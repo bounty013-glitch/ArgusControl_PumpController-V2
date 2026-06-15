@@ -1,0 +1,14 @@
+# ESP-IDF build output
+build/
+managed_components/
+
+# Local SDK/config backups
+sdkconfig.old
+* backup.*
+
+# Editor and OS noise
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
