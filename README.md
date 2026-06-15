@@ -12,7 +12,7 @@ The active build is a self-hosted MQTT continuous output-shaft RPM controller:
 4. Send `argus/peristaltic/cmd/e_stop=true` to immediately kill pulses and hold the motor locked
 5. Send `argus/peristaltic/cmd/unlock=true` only when you intentionally want to release holding torque
 
-The control node now hosts the MQTT broker on its Wi-Fi IP address at port `1883`. Normal stop and e-stop both leave the driver enabled so the motor holds position. `unlock` is the explicit release path.
+The control node now hosts the MQTT broker on both its infrastructure Wi-Fi address and its local access-point address at port `1883`. Normal stop and e-stop both leave the driver enabled so the motor holds position. `unlock` is the explicit release path.
 
 ## Current Features
 
@@ -20,14 +20,25 @@ The control node now hosts the MQTT broker on its Wi-Fi IP address at port `1883
 2. `DIR` output controlled directly from the speed sign
 3. Optional `EN` driver control
 4. Step counting with `PCNT`
-5. Local MQTT broker for Node-RED and the future pump-mounted HMI
+5. Local MQTT broker for the pump-mounted HMI and temporary service tools
 6. MQTT command interface for run, speed percent, soft stop, e-stop, and unlock
 7. Configurable speed ramp to avoid abrupt pulse-frequency jumps
 8. TWAI/CAN source retained for a possible future move back to CAN
 
-## Phase-One MQTT Setup
+## Local MQTT Setup
 
-The pump control board is the broker. Point Node-RED or any temporary laptop HMI to the control node's Wi-Fi IP address:
+The pump control board is the broker. The normal HMI path is the controller's local access point:
+
+```text
+AP SSID: ArgusMotorTest
+AP password: ArgusPump123
+Broker host from AP clients: 192.168.4.1
+Broker port: 1883
+Protocol: MQTT 3.1.1
+TLS/auth: disabled
+```
+
+The controller also still joins the configured external Wi-Fi network when it is available. For Node-RED or service laptop testing on that network, use the control node's station IP address:
 
 ```text
 Broker host: <control-node-ip>
@@ -36,7 +47,7 @@ Protocol: MQTT 3.1.1
 TLS/auth: disabled
 ```
 
-For stable Node-RED control, reserve the control node's IP address in the router/DHCP server. The current Wi-Fi hostname is `ArgusMotorTestNode`.
+If external Wi-Fi is not available, the controller still starts the local AP and broker. The current station hostname is `ArgusMotorTestNode`.
 
 ## MQTT Topics
 
@@ -132,6 +143,6 @@ idf.py -p COMx flash monitor
 ## Next Recommended Steps
 
 1. Tune `ARGUS_RAMP_RPM_PER_SEC_MILLI` after hardware testing
-2. Reserve the control node's Wi-Fi IP address for Node-RED
-3. Add SoftAP mode so the pump-mounted display can connect directly
+2. Flash and verify the HMI on the controller AP at `192.168.4.1`
+3. Decide whether AP credentials should move out of source before production
 4. Decide whether the retained CAN path should be restored later

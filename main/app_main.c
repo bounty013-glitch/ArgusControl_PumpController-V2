@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "lwip/ip4_addr.h"
 #include "nvs_flash.h"
 
 #include "argus_mqtt_broker.h"
@@ -22,6 +23,10 @@
 #define WIFI_HOST       "ArgusMotorTestNode"
 #define WIFI_SSID       "CherryHome1"
 #define WIFI_PASS       "Minstrel13"
+#define WIFI_AP_SSID    "ArgusMotorTest"
+#define WIFI_AP_PASS    "ArgusPump123"
+#define WIFI_AP_CHANNEL 6U
+#define WIFI_AP_MAX_CONN 4U
 
 #define MQTT_BROKER_PORT      1883U
 
@@ -61,8 +66,8 @@
 
 static const char *TAG = "argus_motor_mqtt";
 
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_CONNECT_WAIT_MS 5000
+#define WIFI_STA_CONNECTED_BIT BIT0
+#define WIFI_STA_CONNECT_WAIT_MS 10000
 
 static EventGroupHandle_t wifi_event_group;
 
@@ -206,6 +211,11 @@ static void handle_mqtt_command(const char *topic, const char *data)
         return;
     }
 
+    if (strstr(topic, "/cmd/") == NULL) {
+        ESP_LOGD(TAG, "Ignoring non-command MQTT topic: %s", topic);
+        return;
+    }
+
     ESP_LOGW(TAG, "Unknown MQTT command topic: %s", topic);
 }
 
@@ -214,23 +224,30 @@ static void handle_mqtt_command(const char *topic, const char *data)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
-    (void)event_data;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI("WIFI", "Station started, connecting...");
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        xEventGroupClearBits(wifi_event_group, WIFI_STA_CONNECTED_BIT);
         ESP_LOGW("WIFI", "Disconnected. Reconnecting...");
         esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
+        ESP_LOGI("WIFI", "Access point started: ssid=%s ip=192.168.4.1", WIFI_AP_SSID);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
+        ESP_LOGI("WIFI", "AP client connected: aid=%d", event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
+        ESP_LOGI("WIFI", "AP client disconnected: aid=%d", event->aid);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI("WIFI", "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        ESP_LOGI("WIFI", "Station got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(wifi_event_group, WIFI_STA_CONNECTED_BIT);
     }
 }
 
-static void wifi_connect_blocking(void)
+static void wifi_start_access_point_and_station(void)
 {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -242,8 +259,21 @@ static void wifi_connect_blocking(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(wifi_event_group != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+    esp_netif_ip_info_t ap_ip = {0};
+    IP4_ADDR(&ap_ip.ip, 192, 168, 4, 1);
+    IP4_ADDR(&ap_ip.gw, 192, 168, 4, 1);
+    IP4_ADDR(&ap_ip.netmask, 255, 255, 255, 0);
+    esp_err_t dhcp_err = esp_netif_dhcps_stop(ap_netif);
+    if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_ERROR_CHECK(dhcp_err);
+    }
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ap_ip));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
@@ -258,29 +288,45 @@ static void wifi_connect_blocking(void)
         },
     };
 
+    wifi_config_t ap_config = {
+        .ap = {
+            .channel = WIFI_AP_CHANNEL,
+            .max_connection = WIFI_AP_MAX_CONN,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .required = false,
+            },
+        },
+    };
+
     strlcpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
     strlcpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
+    strlcpy((char *)ap_config.ap.ssid, WIFI_AP_SSID, sizeof(ap_config.ap.ssid));
+    strlcpy((char *)ap_config.ap.password, WIFI_AP_PASS, sizeof(ap_config.ap.password));
+    ap_config.ap.ssid_len = strlen(WIFI_AP_SSID);
+
+    if (strlen(WIFI_AP_PASS) == 0U) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
 
     ESP_ERROR_CHECK(esp_netif_set_hostname(sta_netif, WIFI_HOST));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    while (true) {
-        EventBits_t bits = xEventGroupWaitBits(
-            wifi_event_group,
-            WIFI_CONNECTED_BIT,
-            pdFALSE,
-            pdFALSE,
-            pdMS_TO_TICKS(WIFI_CONNECT_WAIT_MS)
-        );
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_STA_CONNECTED_BIT,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(WIFI_STA_CONNECT_WAIT_MS)
+    );
 
-        if (bits & WIFI_CONNECTED_BIT) {
-            ESP_LOGI("WIFI", "Connected to %s", WIFI_SSID);
-            break;
-        }
-
-        ESP_LOGW("WIFI", "Waiting for WiFi...");
+    if (bits & WIFI_STA_CONNECTED_BIT) {
+        ESP_LOGI("WIFI", "Station connected to %s", WIFI_SSID);
+    } else {
+        ESP_LOGW("WIFI", "Station not connected yet; continuing with local AP broker access");
     }
 }
 
@@ -368,7 +414,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Motor initialized. It will NOT auto-start.");
 
-    wifi_connect_blocking();
+    wifi_start_access_point_and_station();
     mqtt_broker_start();
 
     xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
