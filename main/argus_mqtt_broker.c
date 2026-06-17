@@ -452,9 +452,11 @@ static void argus_mqtt_client_task(void *arg)
             break;
         }
 
-        got = argus_mqtt_read_exact(client->sock, packet, remaining_len);
-        if (got <= 0) {
-            break;
+        if (remaining_len > 0) {
+            got = argus_mqtt_read_exact(client->sock, packet, remaining_len);
+            if (got <= 0) {
+                break;
+            }
         }
 
         uint8_t packet_type = fixed_header >> 4;

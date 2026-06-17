@@ -49,6 +49,14 @@ TLS/auth: disabled
 
 If external Wi-Fi is not available, the controller still starts the local AP and broker. The current station hostname is `ArgusMotorTestNode`.
 
+## Pump HMI
+
+The pump-mounted 2.4 inch ESP32 "cheap yellow display" HMI is currently an Arduino sketch. A reference copy is stored with this firmware repo:
+
+1. [hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino](./hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino)
+
+The HMI joins the controller AP, connects to MQTT broker `192.168.4.1:1883`, publishes pump commands, and subscribes to retained status topics.
+
 ## MQTT Topics
 
 Command topics:
@@ -115,6 +123,8 @@ State flags:
    Retained TWAI transport for Argus command/status frames
 5. [main/argus_protocol.h](./main/argus_protocol.h)
    Protocol IDs and payload definitions
+6. [hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino](./hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino)
+   Arduino reference sketch for the pump-mounted display HMI
 
 ## Current Assumptions
 
