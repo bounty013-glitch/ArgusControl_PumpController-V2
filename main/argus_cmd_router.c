@@ -102,3 +102,35 @@ esp_err_t argus_cmd_router_dispatch(const argus_command_envelope_t *env)
     xSemaphoreGive(s_dispatch_mutex);
     return err;
 }
+
+esp_err_t argus_cmd_router_check_authority(const argus_command_envelope_t *env)
+{
+    if (!env) return ESP_ERR_INVALID_ARG;
+    if (!s_initialized) argus_cmd_router_init();
+
+    if (env->source == ARGUS_CMD_SRC_INTERNAL_SAFETY || env->command_type == ARGUS_CMD_TYPE_ESTOP) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_dispatch_mutex, portMAX_DELAY);
+
+    argus_authority_snapshot_t snap;
+    esp_err_t err = argus_authority_mgr_get_snapshot(&snap);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_dispatch_mutex);
+        return err;
+    }
+
+    if (env->authority_generation != snap.generation) {
+        xSemaphoreGive(s_dispatch_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!argus_authority_validate_permission(&snap, env->source, env->command_type)) {
+        xSemaphoreGive(s_dispatch_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreGive(s_dispatch_mutex);
+    return ESP_OK;
+}

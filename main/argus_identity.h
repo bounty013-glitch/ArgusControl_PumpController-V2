@@ -20,7 +20,7 @@ extern "C" {
 #define ARGUS_IDENTITY_UNIT_ID_MAX      32
 #define ARGUS_IDENTITY_DEV_NAME_MAX     64
 #define ARGUS_IDENTITY_MODEL_MAX        32
-#define ARGUS_IDENTITY_FW_VER_MAX       32
+#define ARGUS_IDENTITY_FW_VER_MAX       64
 #define ARGUS_IDENTITY_SERVICE_SSID_MAX 32
 
 typedef struct {

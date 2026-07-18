@@ -17,6 +17,7 @@
 // Include sdkconfig for Kconfig settings
 #include "sdkconfig.h"
 
+#include "esp_timer.h"
 #include "argus_mqtt_broker.h"
 #include "argus_config.h"
 #include "argus_conversions.h"
@@ -54,6 +55,9 @@ static const char *TAG = "argus_app_main";
 
 static void publish_status_topic(const char *topic, const char *payload, bool retain)
 {
+    if (!argus_mqtt_broker_is_running()) {
+        return;
+    }
     esp_err_t err = argus_mqtt_broker_publish(topic, payload, retain);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "Failed to publish %s: %s", topic, esp_err_to_name(err));
@@ -62,6 +66,10 @@ static void publish_status_topic(const char *topic, const char *payload, bool re
 
 static void publish_status(void)
 {
+    if (!argus_mqtt_broker_is_running()) {
+        return;
+    }
+
     argus_state_snapshot_t snap;
     argus_state_mgr_get_snapshot(&snap);
 
@@ -236,7 +244,9 @@ static void status_task(void *arg)
                  (long)(freq_mhz / 1000), (long)(freq_mhz % 1000),
                  (long long)snap.generated_step_count, snap.driver_enabled, snap.ramp_active, snap.estop_latched, (unsigned long)snap.fault_code);
 
-        publish_status();
+        if (argus_mqtt_broker_is_running()) {
+            publish_status();
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -244,6 +254,398 @@ static void status_task(void *arg)
 // ================= DIAGNOSTIC TEST MENU =================
 
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+static char s_staged_ssid[33] = {0};
+static char s_staged_pass[64] = {0};
+static bool s_has_staged_config = false;
+
+static void estop_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI("test_seam", "[TEST SEAM] Firing concurrent internal software E-STOP during service transition...");
+    argus_state_mgr_estop();
+}
+
+static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const argus_authority_snapshot_t *ab,
+                                        const argus_state_snapshot_t *sa, const argus_authority_snapshot_t *aa)
+{
+    return (sb->machine_state == sa->machine_state &&
+            sb->configured_target_rpm_milli == sa->configured_target_rpm_milli &&
+            sb->trajectory_target_rpm_milli == sa->trajectory_target_rpm_milli &&
+            sb->applied_rpm_milli == sa->applied_rpm_milli &&
+            sb->generated_rpm_milli == sa->generated_rpm_milli &&
+            sb->generated_step_count == sa->generated_step_count &&
+            sb->requested_forward == sa->requested_forward &&
+            sb->applied_forward == sa->applied_forward &&
+            sb->driver_enabled == sa->driver_enabled &&
+            sb->ramp_active == sa->ramp_active &&
+            sb->estop_latched == sa->estop_latched &&
+            sb->fault_code == sa->fault_code &&
+            ab->mode == aa->mode &&
+            ab->owner == aa->owner &&
+            ab->generation == aa->generation);
+}
+
+static void read_string_input(const char *prompt, char *buffer, size_t max_len, bool mask)
+{
+    printf("%s", prompt);
+    fflush(stdout);
+    size_t idx = 0;
+    while (idx < max_len - 1) {
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            printf("\n");
+            break;
+        }
+        buffer[idx++] = (char)c;
+        if (!mask) {
+            printf("%c", c);
+            fflush(stdout);
+        }
+    }
+    buffer[idx] = '\0';
+}
+
+static bool confirm_action(const char *prompt)
+{
+    printf("%s (y/n): ", prompt);
+    fflush(stdout);
+    int c;
+    do {
+        c = getchar();
+        if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
+    } while (c == EOF || c == '\n' || c == '\r');
+    printf("%c\n", c);
+    return (c == 'y' || c == 'Y');
+}
+
+static void argus_phase4a_acceptance_menu(void)
+{
+    while (true) {
+        argus_authority_snapshot_t auth_snap;
+        argus_authority_mgr_get_snapshot(&auth_snap);
+        argus_network_mode_t net_mode = argus_net_mgr_get_mode();
+
+        printf("\n===================================================\n");
+        printf("=== Phase 4A Network & Authority Acceptance ===\n");
+        printf("===================================================\n");
+        printf("Network Mode        : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
+        printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
+        printf("Authority Owner     : %s (%d)\n", argus_authority_mgr_get_owner_name(auth_snap.owner), (int)auth_snap.owner);
+        printf("Authority Generation: %lu\n", (unsigned long)auth_snap.generation);
+        printf("---------------------------------------------------\n");
+        printf("[1] Display sanitized identity/configuration\n");
+        printf("[2] Display network and authority snapshot\n");
+        printf("[3] Display NVS slot validity/generation\n");
+        printf("[4] Enable service AP discoverability\n");
+        printf("[5] Request LOCAL_SERVICE as diagnostic CLI\n");
+        printf("[6] Inject MQTT-source permission test (non-mutating probe)\n");
+        printf("[7] Inject browser-source permission test (non-mutating probe)\n");
+        printf("[E] Test transition E-Stop (Schedule concurrent E-stop during service entry)\n");
+        printf("[8] Stage STA configuration\n");
+        printf("[9] Validate staged configuration\n");
+        printf("[A] Apply staged configuration and reboot\n");
+        printf("[X] Exit local service without configuration change\n");
+        printf("[F] Factory reset\n");
+        printf("[L] Display transition/event log\n");
+        printf("[0] Return\n");
+        printf("Select action: ");
+        fflush(stdout);
+
+        int c;
+        do {
+            c = getchar();
+            if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
+        } while (c == EOF || c == '\n' || c == '\r');
+        printf("%c\n", c);
+
+        if (c == '0') break;
+
+        switch (c) {
+            case '1': {
+                argus_identity_t id;
+                argus_identity_get(&id);
+                argus_config_payload_t cfg;
+                bool has_cfg = (argus_nvs_config_get(&cfg) == ESP_OK);
+
+                printf("\n--- Sanitized Device Identity & Configuration ---\n");
+                printf("Hardware UID : %s\n", id.mac_uid);
+                printf("App Version  : %s\n", id.fw_version);
+                printf("Service SSID : %s\n", id.service_ssid);
+                printf("Service Pass : [CONFIGURED] (Build Protected)\n");
+                printf("Client ID    : %s\n", id.client_id);
+                printf("Unit ID      : %s\n", id.unit_id);
+                printf("Device Name  : %s\n", id.device_name);
+                if (has_cfg && argus_nvs_config_is_commissioned(&cfg)) {
+                    printf("STA SSID     : %s\n", cfg.sta_ssid);
+                    printf("STA Pass     : [CONFIGURED] (Masked)\n");
+                    printf("Commissioned : YES\n");
+                } else {
+                    printf("STA SSID     : [EMPTY]\n");
+                    printf("STA Pass     : [NOT CONFIGURED]\n");
+                    printf("Commissioned : NO\n");
+                }
+                break;
+            }
+            case '2': {
+                printf("\n--- Network & Authority Snapshot ---\n");
+                printf("Network Mode        : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
+                printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
+                printf("Authority Owner     : %s (%d)\n", argus_authority_mgr_get_owner_name(auth_snap.owner), (int)auth_snap.owner);
+                printf("Authority Generation: %lu\n", (unsigned long)auth_snap.generation);
+                printf("STA Status          : %s\n", (net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) ? "CONNECTED" : "DISABLED");
+                printf("Service AP Status   : %s\n", (net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP || net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) ? "ENABLED" : "DISABLED");
+                printf("MQTT Broker Status  : %s\n", argus_mqtt_broker_is_running() ? "READY" : "STOPPED");
+                break;
+            }
+            case '3': {
+                argus_config_payload_t cfg;
+                esp_err_t err = argus_nvs_config_get(&cfg);
+                printf("\n--- NVS Slot Validity & Generation ---\n");
+                if (err == ESP_OK) {
+                    uint32_t crc = argus_nvs_config_calc_crc32(&cfg);
+                    printf("Commissioned : YES\n");
+                    printf("Client ID    : %s\n", cfg.client_id);
+                    printf("Unit ID      : %s\n", cfg.unit_id);
+                    printf("Device Name  : %s\n", cfg.device_name);
+                    printf("STA SSID     : %s\n", cfg.sta_ssid);
+                    printf("CRC32 Status : VALID (0x%08X)\n", (unsigned int)crc);
+                } else {
+                    printf("NVS Status   : NO VALID LKG CONFIGURATION (Uncommissioned)\n");
+                }
+                break;
+            }
+            case '4': {
+                printf("Enabling Service AP discoverability (APSTA mode)...\n");
+                argus_net_mgr_enable_ap_discoverable();
+                break;
+            }
+            case '5': {
+                printf("Requesting LOCAL_SERVICE authority as DIAGNOSTIC_CLI...\n");
+                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                break;
+            }
+            case '6': {
+                argus_state_snapshot_t sb;
+                argus_state_mgr_get_snapshot(&sb);
+                argus_authority_snapshot_t ab;
+                argus_authority_mgr_get_snapshot(&ab);
+
+                printf("Permission test only — no START/RUN command will be issued.\n");
+                printf("Probing MQTT-source authority (gen %lu)... ", (unsigned long)ab.generation);
+
+                argus_command_envelope_t env = {
+                    .source = ARGUS_CMD_SRC_MQTT_SUPERVISORY,
+                    .command_type = ARGUS_CMD_TYPE_SET_TARGET,
+                    .authority_generation = ab.generation,
+                    .target_rpm_milli = 20000,
+                    .forward = true
+                };
+
+                esp_err_t res = argus_cmd_router_check_authority(&env);
+
+                argus_state_snapshot_t sa;
+                argus_state_mgr_get_snapshot(&sa);
+                argus_authority_snapshot_t aa;
+                argus_authority_mgr_get_snapshot(&aa);
+
+                if (res == ESP_OK) {
+                    printf("[ACCEPTED]\n");
+                } else {
+                    printf("[REJECTED: %s (%d)]\n", esp_err_to_name(res), res);
+                }
+
+                bool inv = check_full_state_invariance(&sb, &ab, &sa, &aa);
+                printf("State Invariance Check: %s (15/15 fields unchanged)\n", inv ? "PASSED" : "FAILED");
+                break;
+            }
+            case '7': {
+                argus_state_snapshot_t sb;
+                argus_state_mgr_get_snapshot(&sb);
+                argus_authority_snapshot_t ab;
+                argus_authority_mgr_get_snapshot(&ab);
+
+                printf("Permission test only — no START/RUN command will be issued.\n");
+                printf("Probing Browser-source authority (gen %lu)... ", (unsigned long)ab.generation);
+
+                argus_command_envelope_t env = {
+                    .source = ARGUS_CMD_SRC_LOCAL_SERVICE_PORTAL,
+                    .command_type = ARGUS_CMD_TYPE_SET_TARGET,
+                    .authority_generation = ab.generation,
+                    .target_rpm_milli = 20000,
+                    .forward = true
+                };
+
+                esp_err_t res = argus_cmd_router_check_authority(&env);
+
+                argus_state_snapshot_t sa;
+                argus_state_mgr_get_snapshot(&sa);
+                argus_authority_snapshot_t aa;
+                argus_authority_mgr_get_snapshot(&aa);
+
+                if (res == ESP_OK) {
+                    printf("[ACCEPTED]\n");
+                } else {
+                    printf("[REJECTED: %s (%d)]\n", esp_err_to_name(res), res);
+                }
+
+                bool inv = check_full_state_invariance(&sb, &ab, &sa, &aa);
+                printf("State Invariance Check: %s (15/15 fields unchanged)\n", inv ? "PASSED" : "FAILED");
+                break;
+            }
+            case 'E': {
+                printf("\n--- Concurrent Transition E-Stop Test ---\n");
+                if (!confirm_action("Run concurrent Transition E-Stop test?")) break;
+
+                argus_state_snapshot_t st;
+                argus_state_mgr_get_snapshot(&st);
+                argus_authority_snapshot_t aut;
+                argus_authority_mgr_get_snapshot(&aut);
+
+                if (st.machine_state != ARGUS_STATE_RUNNING || aut.mode != ARGUS_AUTHORITY_SUPERVISORY) {
+                    printf("[ERROR] Prerequisite failed: Motor must be RUNNING under SUPERVISORY/MQTT authority.\n");
+                    printf("Please start supervisory motion first before running this test.\n");
+                    break;
+                }
+
+                printf("Scheduling background E-STOP timer (500 ms delay)...\n");
+                esp_timer_handle_t timer_handle = NULL;
+                esp_timer_create_args_t timer_args = {
+                    .callback = &estop_timer_cb,
+                    .name = "estop_test_timer"
+                };
+                esp_timer_create(&timer_args, &timer_handle);
+                esp_timer_start_once(timer_handle, 500000); // 500 ms
+
+                printf("Requesting service entry (LOCAL_SERVICE as DIAGNOSTIC_CLI)...\n");
+                esp_err_t res = argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+
+                esp_timer_delete(timer_handle);
+
+                argus_state_snapshot_t st_after;
+                argus_state_mgr_get_snapshot(&st_after);
+                argus_authority_snapshot_t aut_after;
+                argus_authority_mgr_get_snapshot(&aut_after);
+
+                printf("\n--- Concurrent Transition E-Stop Results ---\n");
+                printf("Service Request Result : %s (%d)\n", esp_err_to_name(res), res);
+                printf("Machine State          : %s\n", argus_state_mgr_get_state_name(st_after.machine_state));
+                printf("E-Stop Latched         : %s\n", st_after.estop_latched ? "YES" : "NO");
+                printf("Generated RPM          : %ld mRPM\n", (long)st_after.generated_rpm_milli);
+                printf("Authority Granted      : %s (%s/%s)\n",
+                       (aut_after.mode == ARGUS_AUTHORITY_LOCAL_SERVICE) ? "YES (FAILED TEST)" : "NO (PASSED)",
+                       argus_authority_mgr_get_mode_name(aut_after.mode),
+                       argus_authority_mgr_get_owner_name(aut_after.owner));
+
+                if (res != ESP_OK && st_after.machine_state == ARGUS_STATE_EMERGENCY_STOPPED &&
+                    st_after.estop_latched && aut_after.mode != ARGUS_AUTHORITY_LOCAL_SERVICE) {
+                    printf("[TEST PASSED] Transition E-stop preempted service entry and blocked local authority grant!\n");
+                } else {
+                    printf("[TEST FAILED] Unexpected transition E-stop state.\n");
+                }
+                break;
+            }
+            case '8': {
+                read_string_input("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid), false);
+                read_string_input("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass), true);
+                s_has_staged_config = (strlen(s_staged_ssid) >= 1 && strlen(s_staged_pass) >= 8 && strlen(s_staged_pass) <= 63);
+                if (s_has_staged_config) {
+                    printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
+                } else {
+                    printf("[STAGING FAILED] Invalid parameters. SSID must be 1-32 chars, Pass 8-63 chars.\n");
+                    memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                    memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                }
+                break;
+            }
+            case '9': {
+                if (!s_has_staged_config) {
+                    printf("[VALIDATION FAILED] No staged configuration present.\n");
+                } else {
+                    argus_config_payload_t temp = {0};
+                    argus_identity_t id;
+                    argus_identity_get(&id);
+                    strlcpy(temp.client_id, id.client_id, sizeof(temp.client_id));
+                    strlcpy(temp.unit_id, id.unit_id, sizeof(temp.unit_id));
+                    strlcpy(temp.device_name, id.device_name, sizeof(temp.device_name));
+                    strlcpy(temp.sta_ssid, s_staged_ssid, sizeof(temp.sta_ssid));
+                    strlcpy(temp.sta_pass, s_staged_pass, sizeof(temp.sta_pass));
+                    if (argus_nvs_config_is_commissioned(&temp)) {
+                        printf("[VALIDATION PASSED] Staged configuration complies with Schema V1.\n");
+                    } else {
+                        printf("[VALIDATION FAILED] Staged configuration fails Schema V1 rules.\n");
+                    }
+                }
+                break;
+            }
+            case 'A': {
+                if (!s_has_staged_config) {
+                    printf("[ERROR] No valid staged configuration to apply.\n");
+                    break;
+                }
+                if (confirm_action("Apply staged STA configuration to NVS and reboot?")) {
+                    argus_config_payload_t payload = {0};
+                    argus_identity_t id;
+                    argus_identity_get(&id);
+                    strlcpy(payload.client_id, id.client_id, sizeof(payload.client_id));
+                    strlcpy(payload.unit_id, id.unit_id, sizeof(payload.unit_id));
+                    strlcpy(payload.device_name, id.device_name, sizeof(payload.device_name));
+                    strlcpy(payload.sta_ssid, s_staged_ssid, sizeof(payload.sta_ssid));
+                    strlcpy(payload.sta_pass, s_staged_pass, sizeof(payload.sta_pass));
+                    printf("Committing configuration payload to NVS...\n");
+                    esp_err_t err = argus_nvs_config_commit(&payload);
+                    if (err == ESP_OK) {
+                        printf("Commit successful! Rebooting ESP32...\n");
+                        vTaskDelay(pdMS_TO_TICKS(500));
+                        esp_restart();
+                    } else {
+                        printf("[ERROR] NVS Commit failed: %s (%d)\n", esp_err_to_name(err), err);
+                    }
+                }
+                break;
+            }
+            case 'X': {
+                if (confirm_action("Exit local service mode without configuration change and reboot?")) {
+                    printf("Executing controlled service exit...\n");
+                    argus_authority_request_exit();
+                }
+                break;
+            }
+            case 'F': {
+                printf("\nWARNING: Factory Reset will erase:\n");
+                printf("  - STA SSID & WPA2 Password\n");
+                printf("  - Dual configuration slots & active selector\n");
+                printf("  - Pending staged credentials\n");
+                printf("What remains:\n");
+                printf("  - Immutable efuse Hardware UID\n");
+                printf("  - Build Service AP Credential\n");
+                if (confirm_action("Confirm Factory Reset?")) {
+                    printf("Executing factory reset...\n");
+                    argus_nvs_config_factory_reset();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    esp_restart();
+                }
+                break;
+            }
+            case 'L': {
+                printf("\n--- Network & Authority Transition Event Log ---\n");
+                printf("Current Network Mode  : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
+                printf("Current Authority Mode: %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
+                printf("Current Owner         : %s (%d)\n", argus_authority_mgr_get_owner_name(auth_snap.owner), (int)auth_snap.owner);
+                printf("Current Generation    : %lu\n", (unsigned long)auth_snap.generation);
+                printf("(All network, authority, and machine state transitions logged to console in real time)\n");
+                break;
+            }
+            default:
+                printf("Unknown action: '%c'\n", c);
+                break;
+        }
+    }
+}
+
 static void argus_diagnostic_menu_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -262,10 +664,13 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("===================================================\n");
             printf("=== Argus V2 Pump Controller Diagnostic Menu ===\n");
             printf("===================================================\n");
-            printf("Current State: [%s] Setpoint: [%ld mRPM] AuthMode: [%d] AuthOwner: [%d]\n",
+            printf("Current State: [%s] Setpoint: [%ld mRPM] Network: [%s] AuthMode: [%s] AuthOwner: [%s] Gen: [%lu]\n",
                    argus_state_mgr_get_state_name(snap.machine_state),
                    (long)snap.configured_target_rpm_milli,
-                   (int)auth_snap.mode, (int)auth_snap.owner);
+                   argus_net_mgr_get_mode_name(argus_net_mgr_get_mode()),
+                   argus_authority_mgr_get_mode_name(auth_snap.mode),
+                   argus_authority_mgr_get_owner_name(auth_snap.owner),
+                   (unsigned long)auth_snap.generation);
             printf("[1] Set & Start 0.5 RPM (500 mRPM)\n");
             printf("[2] Set & Start 0.6 RPM (600 mRPM)\n");
             printf("[3] Set & Start 0.7 RPM (700 mRPM)\n");
@@ -281,6 +686,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
             printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
+            printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
             printf("[H] Claim LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
             printf("Select option: ");
             fflush(stdout);
@@ -301,13 +707,8 @@ static void argus_diagnostic_menu_task(void *pvParameters)
         argus_authority_snapshot_t auth_snap;
         argus_authority_mgr_get_snapshot(&auth_snap);
 
-        if (c != 't') {
-            if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE || auth_snap.owner != ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI) {
-                printf("[CLI] Claiming LOCAL_SERVICE authority for Diagnostic CLI...\n");
-                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
-                argus_authority_mgr_get_snapshot(&auth_snap);
-            }
-        }
+        bool has_cli_authority = (auth_snap.mode == ARGUS_AUTHORITY_LOCAL_SERVICE &&
+                                  auth_snap.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
 
         argus_command_envelope_t cli_env = {
             .source = ARGUS_CMD_SRC_CLI_DIAGNOSTIC,
@@ -315,6 +716,15 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             .target_rpm_milli = 0,
             .forward = true
         };
+
+        // Enforce explicit authority requirement for motion commands
+        if ((c >= '1' && c <= '8') || c == 'g' || c == 's' || c == 'u') {
+            if (!has_cli_authority) {
+                printf("[REJECTED] CLI motion rejected: diagnostic CLI does not own LOCAL_SERVICE authority.\n");
+                printf("Use H or N -> 5 to request authority explicitly.\n");
+                continue;
+            }
+        }
 
         switch (c) {
             case '1':
@@ -403,6 +813,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 printf("Running Phase 4A PURE unit tests...\n");
                 argus_tests_4a_run_all();
                 break;
+            case 'N':
+                argus_phase4a_acceptance_menu();
+                break;
             case 'H':
                 printf("Claiming LOCAL_SERVICE authority for CLI...\n");
                 argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
@@ -456,7 +869,12 @@ void app_main(void)
     // 10. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
     esp_err_t net_err = argus_net_mgr_init();
     if (net_err == ESP_OK) {
-        mqtt_broker_start();
+        argus_config_payload_t cfg_payload;
+        if (argus_nvs_config_get(&cfg_payload) == ESP_OK && argus_nvs_config_is_commissioned(&cfg_payload)) {
+            mqtt_broker_start();
+        } else {
+            ESP_LOGI(TAG, "Uncommissioned mode: MQTT broker will remain STOPPED.");
+        }
     } else {
         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
     }

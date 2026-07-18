@@ -47,15 +47,49 @@ esp_err_t argus_authority_mgr_get_snapshot(argus_authority_snapshot_t *out_snap)
     return ESP_OK;
 }
 
+#include "esp_log.h"
+
+const char *argus_authority_mgr_get_mode_name(argus_control_authority_t mode)
+{
+    switch (mode) {
+        case ARGUS_AUTHORITY_NONE: return "NONE";
+        case ARGUS_AUTHORITY_SUPERVISORY: return "SUPERVISORY";
+        case ARGUS_AUTHORITY_SERVICE_TRANSITION: return "SERVICE_TRANSITION";
+        case ARGUS_AUTHORITY_LOCAL_SERVICE: return "LOCAL_SERVICE";
+        default: return "UNKNOWN";
+    }
+}
+
+const char *argus_authority_mgr_get_owner_name(argus_authority_owner_t owner)
+{
+    switch (owner) {
+        case ARGUS_AUTH_OWNER_NONE: return "NONE";
+        case ARGUS_AUTH_OWNER_MQTT: return "MQTT";
+        case ARGUS_AUTH_OWNER_BROWSER: return "BROWSER";
+        case ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI: return "DIAGNOSTIC_CLI";
+        default: return "UNKNOWN";
+    }
+}
+
 esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus_authority_owner_t new_owner)
 {
     if (!s_initialized) argus_authority_mgr_init();
 
     xSemaphoreTake(s_auth_mutex, portMAX_DELAY);
+    argus_control_authority_t old_mode = s_authority.mode;
+    argus_authority_owner_t old_owner = s_authority.owner;
     s_authority.mode = new_mode;
     s_authority.owner = new_owner;
     s_authority.generation++;
+    uint32_t gen = s_authority.generation;
     xSemaphoreGive(s_auth_mutex);
+
+    if (old_mode != new_mode || old_owner != new_owner) {
+        ESP_LOGI("argus_auth_mgr", "authority: %s/%s -> %s/%s (gen %lu)",
+                 argus_authority_mgr_get_mode_name(old_mode), argus_authority_mgr_get_owner_name(old_owner),
+                 argus_authority_mgr_get_mode_name(new_mode), argus_authority_mgr_get_owner_name(new_owner),
+                 (unsigned long)gen);
+    }
 
     return ESP_OK;
 }
@@ -97,12 +131,17 @@ esp_err_t argus_authority_request_service(argus_authority_owner_t requested_owne
         timeout_ms -= 50;
     }
 
-    if (timeout_ms <= 0) {
-        // Stop timeout: trigger E-stop
+    if (timeout_ms <= 0 || state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
+        state_snap.machine_state == ARGUS_STATE_FAULTED || state_snap.estop_latched) {
+        // Stop timeout or E-stop fired during transition: trigger E-stop and ABORT local service grant
         argus_state_mgr_estop();
+        ESP_LOGE("argus_auth_mgr", "Service entry aborted: state=%s, estop_latched=%d. Local authority NOT granted.",
+                 argus_state_mgr_get_state_name(state_snap.machine_state), (int)state_snap.estop_latched);
+        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+        return ESP_ERR_INVALID_STATE;
     }
 
-    // Step 5: Transition to LOCAL_SERVICE for requested owner
+    // Step 5: Transition to LOCAL_SERVICE for requested owner only after clean stopped state confirmed
     argus_authority_mgr_set_mode(ARGUS_AUTHORITY_LOCAL_SERVICE, requested_owner);
     return ESP_OK;
 }

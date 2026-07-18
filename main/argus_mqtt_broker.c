@@ -643,3 +643,8 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
 
     return ESP_OK;
 }
+
+bool argus_mqtt_broker_is_running(void)
+{
+    return s_broker.started;
+}

@@ -80,6 +80,16 @@ bool argus_authority_validate_permission(const argus_authority_snapshot_t *snap,
                                          argus_cmd_source_t source,
                                          argus_cmd_type_t cmd_type);
 
+/**
+ * @brief Get human-readable string name for authority mode.
+ */
+const char *argus_authority_mgr_get_mode_name(argus_control_authority_t mode);
+
+/**
+ * @brief Get human-readable string name for authority owner.
+ */
+const char *argus_authority_mgr_get_owner_name(argus_authority_owner_t owner);
+
 #ifdef __cplusplus
 }
 #endif

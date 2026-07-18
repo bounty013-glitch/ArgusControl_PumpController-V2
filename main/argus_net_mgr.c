@@ -49,6 +49,8 @@ static bool validate_build_service_credential(void)
     return (len >= 8 && len <= 63);
 }
 
+static void set_net_mode(argus_network_mode_t new_mode);
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT) {
@@ -76,19 +78,19 @@ static void net_mgr_task(void *pvParameters)
             xSemaphoreTake(s_net_mutex, portMAX_DELAY);
             switch (evt.type) {
                 case ARGUS_NET_EVT_SERVICE_REQUEST:
-                    s_net_mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+                    set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
                     argus_authority_request_service(evt.requested_owner);
-                    s_net_mode = ARGUS_NET_MODE_SERVICE_AP_ONLY;
+                    set_net_mode(ARGUS_NET_MODE_SERVICE_AP_ONLY);
                     break;
 
                 case ARGUS_NET_EVT_SERVICE_EXIT:
-                    s_net_mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+                    set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
                     argus_authority_request_exit();
                     break;
 
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        s_net_mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+                        set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
                         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT);
                     }
                     break;
@@ -180,6 +182,51 @@ esp_err_t argus_net_mgr_init(void)
 
     xTaskCreate(net_mgr_task, "argus_net_mgr", 4096, NULL, 4, NULL);
     s_initialized = true;
+    return ESP_OK;
+}
+
+const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode)
+{
+    switch (mode) {
+        case ARGUS_NET_MODE_BOOTSTRAP: return "BOOTSTRAP";
+        case ARGUS_NET_MODE_UNCOMMISSIONED_AP: return "UNCOMMISSIONED_AP";
+        case ARGUS_NET_MODE_COMMISSIONED_STA: return "COMMISSIONED_STA";
+        case ARGUS_NET_MODE_AP_DISCOVERABLE: return "AP_DISCOVERABLE";
+        case ARGUS_NET_MODE_SERVICE_TRANSITION: return "SERVICE_TRANSITION";
+        case ARGUS_NET_MODE_SERVICE_AP_ONLY: return "SERVICE_AP_ONLY";
+        case ARGUS_NET_MODE_NETWORK_FAULT: return "NETWORK_FAULT";
+        default: return "UNKNOWN";
+    }
+}
+
+static void set_net_mode(argus_network_mode_t new_mode)
+{
+    if (s_net_mode != new_mode) {
+        ESP_LOGI(TAG, "network: %s -> %s", argus_net_mgr_get_mode_name(s_net_mode), argus_net_mgr_get_mode_name(new_mode));
+        s_net_mode = new_mode;
+    }
+}
+
+esp_err_t argus_net_mgr_enable_ap_discoverable(void)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    argus_identity_t id;
+    argus_identity_get(&id);
+
+    wifi_config_t ap_config = {0};
+    strlcpy((char *)ap_config.ap.ssid, id.service_ssid, sizeof(ap_config.ap.ssid));
+    strlcpy((char *)ap_config.ap.password, CONFIG_ARGUS_SERVICE_AP_PASS, sizeof(ap_config.ap.password));
+    ap_config.ap.ssid_len = strlen(id.service_ssid);
+    ap_config.ap.max_connection = 1;
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
+    xSemaphoreGive(s_net_mutex);
+
     return ESP_OK;
 }
 

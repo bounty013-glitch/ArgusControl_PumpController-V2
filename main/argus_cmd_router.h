@@ -41,6 +41,16 @@ void argus_cmd_router_lock_dispatch(void);
  */
 void argus_cmd_router_unlock_dispatch(void);
 
+/**
+ * @brief Non-mutating authority probe. Validates whether an envelope would be authorized
+ *        under current authority state without modifying motion state, setpoints, or authority.
+ * @param env Pointer to command envelope to probe.
+ * @return ESP_OK if envelope is authorized;
+ *         ESP_ERR_INVALID_STATE if rejected by authority rules or generation mismatch;
+ *         ESP_ERR_INVALID_ARG if env is NULL.
+ */
+esp_err_t argus_cmd_router_check_authority(const argus_command_envelope_t *env);
+
 #ifdef __cplusplus
 }
 #endif

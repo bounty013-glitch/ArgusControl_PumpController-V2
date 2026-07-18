@@ -10,6 +10,9 @@
 #include "argus_cmd_router.h"
 #include "argus_cmd_parser.h"
 #include "argus_state_mgr.h"
+#include "argus_net_mgr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -246,80 +249,107 @@ static esp_err_t test_nvs_generation_wrap_comparison(void)
     return ESP_OK;
 }
 
-// Test 10: Authority Snapshot Coherence and Owner Permission Matrix
+// Test 10: Pure Authority Snapshot Permission Matrix Validation
 static esp_err_t test_authority_snapshot_coherence(void)
 {
-    TEST_ASSERT(argus_authority_mgr_init() == ESP_OK, "Auth init failed");
-    TEST_ASSERT(argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT) == ESP_OK, "Auth set failed");
+    argus_authority_snapshot_t snap = {
+        .mode = ARGUS_AUTHORITY_SUPERVISORY,
+        .owner = ARGUS_AUTH_OWNER_MQTT,
+        .generation = 1
+    };
 
-    argus_authority_snapshot_t snap;
-    TEST_ASSERT(argus_authority_mgr_get_snapshot(&snap) == ESP_OK, "Auth snapshot failed");
-    TEST_ASSERT(snap.mode == ARGUS_AUTHORITY_SUPERVISORY, "Auth mode mismatch");
-    TEST_ASSERT(snap.owner == ARGUS_AUTH_OWNER_MQTT, "Auth owner mismatch");
-
-    // MQTT supervisory allowed in SUPERVISORY mode
     TEST_ASSERT(argus_authority_validate_permission(&snap, ARGUS_CMD_SRC_MQTT_SUPERVISORY, ARGUS_CMD_TYPE_START) == true, "MQTT rejected in supervisory mode");
-
-    // CLI motion rejected in SUPERVISORY mode
     TEST_ASSERT(argus_authority_validate_permission(&snap, ARGUS_CMD_SRC_CLI_DIAGNOSTIC, ARGUS_CMD_TYPE_START) == false, "CLI motion allowed in supervisory mode");
-
-    // Internal safety E-stop ALWAYS allowed
     TEST_ASSERT(argus_authority_validate_permission(&snap, ARGUS_CMD_SRC_INTERNAL_SAFETY, ARGUS_CMD_TYPE_ESTOP) == true, "E-stop rejected");
     return ESP_OK;
 }
 
-// Test 11: Browser/CLI Owner Conflict Rejection
+// Test 11: Pure Browser/CLI Owner Conflict Validation
 static esp_err_t test_browser_cli_owner_conflict_rejection(void)
 {
-    argus_authority_snapshot_t orig_snap;
-    argus_authority_mgr_get_snapshot(&orig_snap);
+    argus_authority_snapshot_t snap = {
+        .mode = ARGUS_AUTHORITY_LOCAL_SERVICE,
+        .owner = ARGUS_AUTH_OWNER_BROWSER,
+        .generation = 2
+    };
 
-    TEST_ASSERT(argus_authority_mgr_set_mode(ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_BROWSER) == ESP_OK, "Set browser owner failed");
-
-    argus_authority_snapshot_t snap;
-    TEST_ASSERT(argus_authority_mgr_get_snapshot(&snap) == ESP_OK, "Get snapshot failed");
-
-    // Browser allowed, CLI motion rejected
     TEST_ASSERT(argus_authority_validate_permission(&snap, ARGUS_CMD_SRC_LOCAL_SERVICE_PORTAL, ARGUS_CMD_TYPE_SET_TARGET) == true, "Browser portal motion rejected");
     TEST_ASSERT(argus_authority_validate_permission(&snap, ARGUS_CMD_SRC_CLI_DIAGNOSTIC, ARGUS_CMD_TYPE_SET_TARGET) == false, "CLI motion allowed while browser owns authority");
-
-    argus_authority_mgr_set_mode(orig_snap.mode, orig_snap.owner);
     return ESP_OK;
 }
 
-// Test 12: Command Router Dispatch Gate and Generation Invalidation
+// Test 12: Pure Command Router Check Authority & Generation Gate
 static esp_err_t test_command_router_dispatch_gate(void)
 {
-    argus_authority_snapshot_t orig_snap;
-    argus_authority_mgr_get_snapshot(&orig_snap);
-
-    TEST_ASSERT(argus_cmd_router_init() == ESP_OK, "Router init failed");
-    TEST_ASSERT(argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT) == ESP_OK, "Set supervisory mode failed");
-
-    argus_authority_snapshot_t snap;
-    argus_authority_mgr_get_snapshot(&snap);
+    argus_authority_snapshot_t cur_snap;
+    argus_authority_mgr_get_snapshot(&cur_snap);
 
     argus_command_envelope_t valid_env = {
-        .source = ARGUS_CMD_SRC_MQTT_SUPERVISORY,
+        .source = ARGUS_CMD_SRC_CLI_DIAGNOSTIC,
         .command_type = ARGUS_CMD_TYPE_SET_TARGET,
-        .authority_generation = snap.generation,
+        .authority_generation = cur_snap.generation,
         .target_rpm_milli = 50000,
         .forward = true
     };
-    TEST_ASSERT(argus_cmd_router_dispatch(&valid_env) == ESP_OK, "Valid router dispatch failed");
 
-    // Stale generation counter rejected
+    esp_err_t res = argus_cmd_router_check_authority(&valid_env);
+    if (cur_snap.mode == ARGUS_AUTHORITY_LOCAL_SERVICE && cur_snap.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI) {
+        TEST_ASSERT(res == ESP_OK, "Valid envelope check failed");
+    } else {
+        TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "Unpermitted envelope check accepted");
+    }
+
     argus_command_envelope_t stale_env = valid_env;
-    stale_env.authority_generation = snap.generation - 1;
-    TEST_ASSERT(argus_cmd_router_dispatch(&stale_env) == ESP_ERR_INVALID_STATE, "Stale generation envelope accepted");
-
-    argus_authority_mgr_set_mode(orig_snap.mode, orig_snap.owner);
+    stale_env.authority_generation = cur_snap.generation - 1;
+    TEST_ASSERT(argus_cmd_router_check_authority(&stale_env) == ESP_ERR_INVALID_STATE, "Stale generation envelope check accepted");
     return ESP_OK;
+}
+
+typedef struct {
+    argus_state_snapshot_t state;
+    argus_authority_snapshot_t authority;
+    argus_network_mode_t net_mode;
+    argus_net_err_t last_net_err;
+    UBaseType_t task_count;
+} argus_prod_snapshot_t;
+
+static void capture_prod_snapshot(argus_prod_snapshot_t *out)
+{
+    argus_state_mgr_get_snapshot(&out->state);
+    argus_authority_mgr_get_snapshot(&out->authority);
+    out->net_mode = argus_net_mgr_get_mode();
+    out->last_net_err = argus_net_mgr_get_last_error();
+    out->task_count = uxTaskGetNumberOfTasks();
+}
+
+static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
+{
+    return (b->state.machine_state == a->state.machine_state &&
+            b->state.configured_target_rpm_milli == a->state.configured_target_rpm_milli &&
+            b->state.trajectory_target_rpm_milli == a->state.trajectory_target_rpm_milli &&
+            b->state.applied_rpm_milli == a->state.applied_rpm_milli &&
+            b->state.generated_rpm_milli == a->state.generated_rpm_milli &&
+            b->state.generated_step_count == a->state.generated_step_count &&
+            b->state.requested_forward == a->state.requested_forward &&
+            b->state.applied_forward == a->state.applied_forward &&
+            b->state.driver_enabled == a->state.driver_enabled &&
+            b->state.ramp_active == a->state.ramp_active &&
+            b->state.estop_latched == a->state.estop_latched &&
+            b->state.fault_code == a->state.fault_code &&
+            b->authority.mode == a->authority.mode &&
+            b->authority.owner == a->authority.owner &&
+            b->authority.generation == a->authority.generation &&
+            b->net_mode == a->net_mode &&
+            b->last_net_err == a->last_net_err &&
+            b->task_count == a->task_count);
 }
 
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n--- Starting Phase 4A Pure Non-Motion Unit Tests ---\n");
+
+    argus_prod_snapshot_t snap_before, snap_after;
+    capture_prod_snapshot(&snap_before);
 
     int passed = 0;
     int failed = 0;
@@ -336,18 +366,29 @@ esp_err_t argus_tests_4a_run_all(void)
         } \
     } while (0)
 
-    RUN_TEST(test_identity_mac_uid_derivation);
-    RUN_TEST(test_identity_field_sanitization);
-    RUN_TEST(test_nvs_schema_validation);
-    RUN_TEST(test_nvs_open_sta_rejection);
-    RUN_TEST(test_nvs_dual_slot_atomic_write_readback);
-    RUN_TEST(test_nvs_lkg_rollback_on_crc_mismatch);
-    RUN_TEST(test_password_masking_in_telemetry);
-    RUN_TEST(test_mask_string_write_rejection);
-    RUN_TEST(test_nvs_generation_wrap_comparison);
-    RUN_TEST(test_authority_snapshot_coherence);
-    RUN_TEST(test_browser_cli_owner_conflict_rejection);
-    RUN_TEST(test_command_router_dispatch_gate);
+    for (int run = 1; run <= 3; run++) {
+        printf("\n--- Executing Phase 4A Test Pass %d of 3 ---\n", run);
+        RUN_TEST(test_identity_mac_uid_derivation);
+        RUN_TEST(test_identity_field_sanitization);
+        RUN_TEST(test_nvs_schema_validation);
+        RUN_TEST(test_nvs_open_sta_rejection);
+        RUN_TEST(test_nvs_dual_slot_atomic_write_readback);
+        RUN_TEST(test_nvs_lkg_rollback_on_crc_mismatch);
+        RUN_TEST(test_password_masking_in_telemetry);
+        RUN_TEST(test_mask_string_write_rejection);
+        RUN_TEST(test_nvs_generation_wrap_comparison);
+        RUN_TEST(test_authority_snapshot_coherence);
+        RUN_TEST(test_browser_cli_owner_conflict_rejection);
+        RUN_TEST(test_command_router_dispatch_gate);
+    }
+
+    capture_prod_snapshot(&snap_after);
+    bool non_mutated = compare_prod_snapshots(&snap_before, &snap_after);
+    printf("\n--- Production Non-Mutation Proof: %s ---\n", non_mutated ? "PASSED (100% Equal)" : "FAILED");
+    if (!non_mutated) {
+        printf("[FAIL] Production singleton was mutated during pure test passes!\n");
+        failed++;
+    }
 
     printf("--- Phase 4A Pure Unit Tests Summary: %d Passed, %d Failed ---\n\n", passed, failed);
     return (failed == 0) ? ESP_OK : ESP_FAIL;

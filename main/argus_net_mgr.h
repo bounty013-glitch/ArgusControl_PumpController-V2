@@ -81,6 +81,16 @@ esp_err_t argus_net_mgr_post_event(const argus_net_event_t *evt);
  */
 argus_net_err_t argus_net_mgr_get_last_error(void);
 
+/**
+ * @brief Get human-readable string name for network mode.
+ */
+const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode);
+
+/**
+ * @brief Enable service AP discoverability alongside active STA (APSTA mode).
+ */
+esp_err_t argus_net_mgr_enable_ap_discoverable(void);
+
 #ifdef __cplusplus
 }
 #endif

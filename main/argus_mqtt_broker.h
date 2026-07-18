@@ -17,3 +17,9 @@ typedef struct {
 
 esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);
+
+/**
+ * @brief Authoritative query for current MQTT broker running state.
+ * @return true if broker server task and listening socket are active, false otherwise.
+ */
+bool argus_mqtt_broker_is_running(void);
