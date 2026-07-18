@@ -34,4 +34,5 @@ idf_component_register(
         esp_driver_gptimer
         esp_timer
         esp_http_server
+        mbedtls
 )
