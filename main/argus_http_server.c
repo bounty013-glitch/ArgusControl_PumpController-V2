@@ -23,11 +23,12 @@
  *    Future phases (4B.3+) that need service transitions will post events
  *    to the network manager task for deferred lifecycle changes.
  *
- * 4. HANDLER-LEVEL DEADLOCK AVOIDANCE
- *    HTTP handlers must not take s_net_mutex (via argus_net_mgr_get_snapshot).
- *    The network manager holds s_net_mutex while calling httpd_stop(), which
- *    waits for active handlers. If a handler also waited for s_net_mutex,
- *    both would deadlock. Handlers use lock-free query functions instead.
+ * 4. HANDLER / NETWORK-MANAGER LOCK GRAPH
+ *    HTTP handlers use argus_net_mgr_get_snapshot() which takes s_net_mutex.
+ *    This is safe because all HTTP server lifecycle calls (start/stop) in
+ *    argus_net_mgr.c occur OUTSIDE s_net_mutex. The network manager releases
+ *    s_net_mutex before calling httpd_stop(), so an active handler holding
+ *    s_net_mutex cannot deadlock with the stop.
  *
  * 5. NO SECRETS
  *    No endpoint returns passwords, AP credentials, or sensitive NVS data.
@@ -208,11 +209,9 @@ void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size)
  *
  * Does NOT include: passwords, AP credentials, NVS secrets.
  *
- * DEADLOCK NOTE: This handler uses lock-free network query functions
- * (argus_net_mgr_get_mode, is_sta_connected, is_ap_started) instead of
- * argus_net_mgr_get_snapshot() which takes s_net_mutex. The network
- * manager holds s_net_mutex while calling httpd_stop(), which waits for
- * active handlers — using s_net_mutex here would deadlock.
+ * Lock safety: This handler takes s_net_mutex via argus_net_mgr_get_snapshot().
+ * All HTTP server lifecycle calls (start/stop) in argus_net_mgr.c occur outside
+ * s_net_mutex, so httpd_stop() waiting for this handler cannot deadlock.
  */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
@@ -222,9 +221,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     set_api_headers(req);
 
-    /* Gather snapshots — use APIs that do NOT take s_net_mutex */
+    /* Gather coherent snapshots from existing manager APIs */
     argus_state_snapshot_t state_snap;
-    argus_state_mgr_get_snapshot(&state_snap);  /* uses s_state_mutex, not s_net_mutex */
+    argus_state_mgr_get_snapshot(&state_snap);
 
     argus_authority_snapshot_t auth_snap;
     esp_err_t auth_err = argus_authority_mgr_get_snapshot(&auth_snap);
@@ -234,18 +233,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Lock-free network queries — no s_net_mutex contention */
-    argus_network_mode_t net_mode = argus_net_mgr_get_mode();
-    bool sta_connected = argus_net_mgr_is_sta_connected();
-    bool sta_ip_acquired = argus_net_mgr_is_sta_ip_acquired();
-    bool ap_started = argus_net_mgr_is_ap_started();
+    /* Coherent network snapshot — takes s_net_mutex (safe: see doc block 4) */
+    argus_net_snapshot_t net_snap;
+    esp_err_t net_err = argus_net_mgr_get_snapshot(&net_snap);
+    if (net_err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"network snapshot failed\"}");
+        return ESP_OK;
+    }
 
     argus_mqtt_broker_lifecycle_obs_t broker_obs = {0};
     esp_err_t broker_err = argus_mqtt_broker_get_lifecycle_obs(&broker_obs);
-    bool broker_running = argus_mqtt_broker_is_running();
 
     const char *machine_state_str = argus_state_mgr_get_state_name(state_snap.machine_state);
-    const char *net_mode_str = argus_net_mgr_get_mode_name(net_mode);
+    const char *net_mode_str = argus_net_mgr_get_mode_name(net_snap.mode);
     const char *auth_mode_str = argus_authority_mgr_get_mode_name(auth_snap.mode);
     const char *auth_owner_str = argus_authority_mgr_get_owner_name(auth_snap.owner);
 
@@ -287,10 +288,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         auth_mode_str, auth_owner_str,
         auth_snap.generation,
         net_mode_str,
-        sta_connected ? "true" : "false",
-        sta_ip_acquired ? "true" : "false",
-        ap_started ? "true" : "false",
-        broker_running ? "true" : "false",
+        net_snap.sta_connected ? "true" : "false",
+        net_snap.sta_ip_acquired ? "true" : "false",
+        net_snap.ap_started ? "true" : "false",
+        net_snap.mqtt_broker_running ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
         (broker_err == ESP_OK) ? "true" : "false",
         commissioned ? "true" : "false");
@@ -550,6 +551,35 @@ esp_err_t argus_http_server_init(void)
     return ESP_OK;
 }
 
+/* ── Private lifecycle helper ────────────────────────────────────── */
+
+/**
+ * @brief Stop the HTTP server while s_lifecycle_mutex is already held.
+ *
+ * Unified stop rule: s_server is cleared only after confirmed successful
+ * httpd_stop(). On failure, the handle is preserved to prevent unverified
+ * duplicate starts. Both the public stop() and the startup rollback path
+ * use this function.
+ *
+ * @return ESP_OK on success, or the httpd_stop() error on failure.
+ */
+static esp_err_t stop_server_locked(void)
+{
+    if (s_server == NULL) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = httpd_stop(s_server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_stop failed: %s (%d). Handle preserved.",
+                 esp_err_to_name(err), err);
+        return err;
+    }
+
+    s_server = NULL;
+    return ESP_OK;
+}
+
 esp_err_t argus_http_server_start(void)
 {
     if (!s_initialized) {
@@ -596,9 +626,15 @@ esp_err_t argus_http_server_start(void)
     return ESP_OK;
 
 rollback:
-    ESP_LOGE(TAG, "URI handler registration failed: %s. Stopping server.", esp_err_to_name(reg_err));
-    httpd_stop(s_server);
-    s_server = NULL;
+    ESP_LOGE(TAG, "URI handler registration failed: %s. Rolling back server.",
+             esp_err_to_name(reg_err));
+    /* Use stop_server_locked() — applies the same lifecycle rule:
+     * clear s_server only on confirmed stop; preserve on failure. */
+    esp_err_t stop_err = stop_server_locked();
+    if (stop_err != ESP_OK) {
+        ESP_LOGE(TAG, "Rollback stop also failed: %s. Server in unknown state.",
+                 esp_err_to_name(stop_err));
+    }
     xSemaphoreGive(s_lifecycle_mutex);
     return ESP_FAIL;
 }
@@ -610,29 +646,12 @@ esp_err_t argus_http_server_stop(void)
     }
 
     xSemaphoreTake(s_lifecycle_mutex, portMAX_DELAY);
-
-    if (s_server == NULL) {
-        ESP_LOGD(TAG, "HTTP server already stopped (idempotent stop)");
-        xSemaphoreGive(s_lifecycle_mutex);
-        return ESP_OK;
+    esp_err_t err = stop_server_locked();
+    if (err == ESP_OK && s_server == NULL) {
+        ESP_LOGI(TAG, "HTTP server stopped");
     }
-
-    esp_err_t err = httpd_stop(s_server);
-    if (err != ESP_OK) {
-        /* Preserve s_server — the server may still be running.
-         * Clearing it would falsely report STOPPED and allow a
-         * duplicate httpd_start(), violating lifecycle integrity.
-         * The caller must retry or accept the unknown state. */
-        ESP_LOGE(TAG, "httpd_stop failed: %s (%d). Server state unknown — handle preserved.",
-                 esp_err_to_name(err), err);
-        xSemaphoreGive(s_lifecycle_mutex);
-        return err;
-    }
-
-    s_server = NULL;
-    ESP_LOGI(TAG, "HTTP server stopped");
     xSemaphoreGive(s_lifecycle_mutex);
-    return ESP_OK;
+    return err;
 }
 
 bool argus_http_server_is_running(void)

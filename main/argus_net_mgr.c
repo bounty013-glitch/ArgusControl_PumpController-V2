@@ -314,9 +314,10 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     }
     xSemaphoreGive(s_net_mutex);
 
-    /* Start HTTP server outside s_net_mutex — httpd_stop() waits for active
-     * handlers, and handlers may read network state. Holding s_net_mutex
-     * across server lifecycle operations risks deadlock. */
+    /* Start HTTP server outside s_net_mutex. The status handler takes
+     * s_net_mutex via argus_net_mgr_get_snapshot() for a coherent network
+     * observation. Holding s_net_mutex across server lifecycle operations
+     * would deadlock if httpd_stop() needed to wait for such a handler. */
     if (err == ESP_OK) {
         esp_err_t http_err = argus_http_server_start();
         if (http_err != ESP_OK) {
@@ -642,12 +643,13 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     argus_cmd_router_unlock_dispatch();
     // ---- END FIRST DISPATCH GATE ----
 
-    /* Stop HTTP server outside s_net_mutex and dispatch lock.
-     * httpd_stop() waits for active handlers to finish. If a handler
-     * queried network state under s_net_mutex, holding s_net_mutex here
-     * would deadlock. Mode is already SERVICE_TRANSITION, preventing
-     * concurrent mode-change callers (request_service, enable_ap_discoverable,
-     * request_service_exit all reject on wrong starting mode). */
+    /* Stop HTTP server outside s_net_mutex.
+     * The HTTP status handler takes s_net_mutex via argus_net_mgr_get_snapshot()
+     * for a coherent network observation. httpd_stop() waits for active handlers
+     * to finish. If we held s_net_mutex here, an active handler waiting for
+     * s_net_mutex would deadlock with httpd_stop(). Releasing first ensures
+     * handlers can complete. Mode is already SERVICE_TRANSITION, preventing
+     * concurrent mode-change callers. */
     xSemaphoreGive(s_net_mutex);
     esp_err_t http_stop_err = argus_http_server_stop();
     if (http_stop_err != ESP_OK) {

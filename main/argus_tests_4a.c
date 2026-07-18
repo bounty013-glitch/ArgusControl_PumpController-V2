@@ -992,60 +992,20 @@ static esp_err_t test_http_json_escape_safety(void)
     return ESP_OK;
 }
 
-/**
- * @brief Test HTTP server lifecycle observation.
- *
- * Validates: is_running() returns a coherent boolean after init.
- * A duplicate init must be rejected with ESP_ERR_INVALID_STATE.
- * Cannot test start/stop without network stack — this is a smoke test.
+/*
+ * Note: HTTP lifecycle observation and secret-exclusion verification
+ * are not stack-local pure tests. They require the live HTTP singleton
+ * and live NVS, respectively. They are classified as integration/runtime
+ * verification items and are documented in the operator walkthrough for
+ * on-device acceptance, not run here.
  */
-static esp_err_t test_http_lifecycle_observation(void)
-{
-    /* After app_main init, the server should reflect the current mode.
-     * In diagnostic mode the server may or may not be running depending
-     * on the network mode. The test validates that is_running() returns
-     * without crashing and returns a valid boolean. */
-    bool running = argus_http_server_is_running();
-    TEST_ASSERT(running == true || running == false, "is_running() not boolean");
-
-    /* A duplicate init must be rejected */
-    esp_err_t dup_err = argus_http_server_init();
-    TEST_ASSERT(dup_err == ESP_ERR_INVALID_STATE, "Duplicate init should return INVALID_STATE");
-
-    return ESP_OK;
-}
-
-/**
- * @brief Test that NVS password masking is intact for HTTP secret exclusion.
- *
- * Validates: argus_nvs_config_mask() replaces sta_pass with the mask string.
- * The status handler uses NVS only for the commissioned boolean and zeros
- * the config struct immediately — this test confirms the masking primitive
- * itself is intact.
- */
-static esp_err_t test_http_secret_exclusion(void)
-{
-    argus_config_payload_t cfg;
-    esp_err_t err = argus_nvs_config_get(&cfg);
-    if (err == ESP_OK) {
-        /* Mask and verify password is replaced */
-        argus_config_payload_t masked;
-        argus_nvs_config_mask(&cfg, &masked);
-        TEST_ASSERT(strcmp(masked.sta_pass, ARGUS_CONFIG_MASK_STRING) == 0,
-                    "Password masking broken -- HTTP API may leak secrets");
-    }
-    /* Zero the config to prevent stack-local secret leakage */
-    memset(&cfg, 0, sizeof(cfg));
-
-    return ESP_OK;
-}
 
 /* ── Test runner ───────────────────────────────────────────────────── */
 
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A Pure Non-Motion Unit Test Suite ===\n");
+    printf("=== Phase 4A+4B.1 Pure Non-Motion Unit Test Suite ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -1090,10 +1050,8 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_network_truthfulness_and_broker_ordering);
         RUN_TEST(test_console_input_validation);
         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
-        /* Phase 4B.1 pure tests */
+        /* Phase 4B.1 pure test */
         RUN_TEST(test_http_json_escape_safety);
-        RUN_TEST(test_http_lifecycle_observation);
-        RUN_TEST(test_http_secret_exclusion);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -1103,7 +1061,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1 Pure Tests:\n");
-    printf("  Distinct Test Cases : 21\n");
+    printf("  Distinct Test Cases : 19\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
