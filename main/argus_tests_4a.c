@@ -839,6 +839,9 @@ static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
     }
 
     out->broker_obs_status = argus_mqtt_broker_get_lifecycle_obs(&out->broker_obs);
+    if (out->broker_obs_status != ESP_OK) {
+        return out->broker_obs_status;
+    }
 
     out->task_count = uxTaskGetNumberOfTasks();
     return ESP_OK;

@@ -1,4 +1,4 @@
-﻿#include "argus_mqtt_broker.h"
+#include "argus_mqtt_broker.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -495,7 +495,7 @@ static void argus_mqtt_close_client(argus_mqtt_client_t *client)
     if (prev <= 0) {
         ESP_LOGE(TAG, "active_client_count underflow! (prev=%d)", (int)prev);
     } else if (prev == 1) {
-        /* Last client exited â€” signal any waiter in stop(). */
+        /* Last client exited -- signal any waiter in stop(). */
         xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_CLIENTS_EXITED);
     }
 }
@@ -610,7 +610,7 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
 }
 
 /* ===========================================================================
- * Server (accept-loop) task  â€” socket creation moved here, lifecycle signals
+ * Server (accept-loop) task  -- socket creation moved here, lifecycle signals
  * =========================================================================*/
 
 static void argus_mqtt_server_task(void *arg)
@@ -820,7 +820,7 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
 
     s_broker.state = BROKER_STATE_STARTING;
 
-    /* Zero only runtime fields â€” lifecycle objects are preserved. */
+    /* Zero only runtime fields -- lifecycle objects are preserved. */
     s_broker.port = config->port;
     s_broker.on_message = config->on_message;
     s_broker.policy_check = config->policy_check;
@@ -869,7 +869,7 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
         return (s_broker.startup_error != ESP_OK) ? s_broker.startup_error : ESP_FAIL;
     }
 
-    /* Timeout â€” task neither started nor stopped within the window. */
+    /* Timeout -- task neither started nor stopped within the window. */
     ESP_LOGE(TAG, "broker start timed out after 2000 ms");
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
     s_broker.state = BROKER_STATE_STOPPING;
@@ -972,7 +972,7 @@ esp_err_t argus_mqtt_broker_stop(void)
     if (!(bits & BROKER_EVT_STOPPED)) {
         ESP_LOGW(TAG, "server task did not exit within 2000 ms");
         xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-        /* Remain in STOPPING â€” do not force to STOPPED. */
+        /* Remain in STOPPING -- do not force to STOPPED. */
         xSemaphoreGive(s_broker.lifecycle_mutex);
         return ESP_ERR_TIMEOUT;
     }
@@ -1002,6 +1002,9 @@ esp_err_t argus_mqtt_broker_stop(void)
 
 esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t *out)
 {
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (s_broker.lifecycle_mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
