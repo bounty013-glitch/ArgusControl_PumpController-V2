@@ -13,6 +13,7 @@
 #include "argus_net_mgr.h"
 #include "argus_mqtt_broker.h"
 #include "argus_console_helpers.h"
+#include "argus_http_server.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -938,10 +939,75 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     return match;
 }
 
+/* ── Phase 4B.1 Pure Tests ───────────────────────────────────────── */
+
+/**
+ * @brief Test json_escape with edge cases.
+ *
+ * Validates: normal passthrough, quote/backslash escaping, control char
+ * replacement, truncation at buffer boundary, NULL/empty input handling.
+ * Also confirms HTML metacharacters pass through (HTML escaping is handled
+ * separately by the portal JavaScript h() function).
+ */
+static esp_err_t test_http_json_escape_safety(void)
+{
+    extern void argus_http_test_json_escape(const char *, char *, size_t);
+    char dst[64];
+
+    /* Normal passthrough */
+    argus_http_test_json_escape("hello", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "hello") == 0, "Normal string passthrough failed");
+
+    /* Quote escaping */
+    argus_http_test_json_escape("a\"b", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a\\\"b") == 0, "Quote escaping failed");
+
+    /* Backslash escaping */
+    argus_http_test_json_escape("a\\b", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a\\\\b") == 0, "Backslash escaping failed");
+
+    /* Control character replacement */
+    argus_http_test_json_escape("a\nb\tc", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a b c") == 0, "Control char replacement failed");
+
+    /* Truncation — 4-byte buffer: json_escape reserves 2 bytes at end for
+     * potential escape pair + NUL, so dst_size=4 yields at most 2 chars + NUL.
+     * Output must be NUL-terminated within the buffer. */
+    argus_http_test_json_escape("abcdef", dst, 4);
+    TEST_ASSERT(strlen(dst) < 4, "Truncation overflow");
+    TEST_ASSERT(dst[strlen(dst)] == '\0', "Truncation NUL termination failed");
+
+    /* Empty string */
+    argus_http_test_json_escape("", dst, sizeof(dst));
+    TEST_ASSERT(dst[0] == '\0', "Empty string failed");
+
+    /* NULL source */
+    dst[0] = 'X';
+    argus_http_test_json_escape(NULL, dst, sizeof(dst));
+    TEST_ASSERT(dst[0] == '\0', "NULL source failed");
+
+    /* HTML metacharacters pass through json_escape (HTML escaping is the
+     * responsibility of the portal JavaScript h() function, not json_escape) */
+    argus_http_test_json_escape("<script>alert(1)</script>", dst, sizeof(dst));
+    TEST_ASSERT(strstr(dst, "<script>") != NULL, "HTML chars should pass through json_escape");
+
+    return ESP_OK;
+}
+
+/*
+ * Note: HTTP lifecycle observation and secret-exclusion verification
+ * are not stack-local pure tests. They require the live HTTP singleton
+ * and live NVS, respectively. They are classified as integration/runtime
+ * verification items and are documented in the operator walkthrough for
+ * on-device acceptance, not run here.
+ */
+
+/* ── Test runner ───────────────────────────────────────────────────── */
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A Pure Non-Motion Unit Test Suite ===\n");
+    printf("=== Phase 4A+4B.1 Pure Non-Motion Unit Test Suite ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -986,6 +1052,8 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_network_truthfulness_and_broker_ordering);
         RUN_TEST(test_console_input_validation);
         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
+        /* Phase 4B.1 pure test */
+        RUN_TEST(test_http_json_escape_safety);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -994,8 +1062,8 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A Pure Tests:\n");
-    printf("  Distinct Test Cases : 18\n");
+    printf("\nPhase 4A+4B.1 Pure Tests:\n");
+    printf("  Distinct Test Cases : 19\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
@@ -1021,7 +1089,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4A PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
+    printf("PHASE 4A+4B.1 PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
     return overall_pass ? ESP_OK : ESP_FAIL;

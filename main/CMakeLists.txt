@@ -15,6 +15,7 @@ idf_component_register(
         "argus_cmd_router.c"
         "argus_net_mgr.c"
         "argus_console_helpers.c"
+        "argus_http_server.c"
         "argus_tests_4a.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
@@ -32,4 +33,6 @@ idf_component_register(
         esp_driver_pcnt
         esp_driver_gptimer
         esp_timer
+        esp_http_server
+        mbedtls
 )

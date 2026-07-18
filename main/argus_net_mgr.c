@@ -10,6 +10,7 @@
 #include "argus_state_mgr.h"
 #include "argus_cmd_router.h"
 #include "argus_mqtt_broker.h"
+#include "argus_http_server.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -227,6 +228,12 @@ esp_err_t argus_net_mgr_init(void)
         esp_wifi_set_mode(WIFI_MODE_AP);
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_start();
+
+        /* Start HTTP server for commissioning portal (non-fatal) */
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in UNCOMMISSIONED_AP: %s", esp_err_to_name(http_err));
+        }
     } else {
         // Commissioned STA mode
         s_net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
@@ -306,6 +313,17 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
         ESP_LOGE(TAG, "Failed to enable Service AP: %s. Preserving COMMISSIONED_STA.", esp_err_to_name(err));
     }
     xSemaphoreGive(s_net_mutex);
+
+    /* Start HTTP server outside s_net_mutex. The status handler takes
+     * s_net_mutex via argus_net_mgr_get_snapshot() for a coherent network
+     * observation. Holding s_net_mutex across server lifecycle operations
+     * would deadlock if httpd_stop() needed to wait for such a handler. */
+    if (err == ESP_OK) {
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
+        }
+    }
 
     return err;
 }
@@ -625,6 +643,20 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     argus_cmd_router_unlock_dispatch();
     // ---- END FIRST DISPATCH GATE ----
 
+    /* Stop HTTP server outside s_net_mutex.
+     * The HTTP status handler takes s_net_mutex via argus_net_mgr_get_snapshot()
+     * for a coherent network observation. httpd_stop() waits for active handlers
+     * to finish. If we held s_net_mutex here, an active handler waiting for
+     * s_net_mutex would deadlock with httpd_stop(). Releasing first ensures
+     * handlers can complete. Mode is already SERVICE_TRANSITION, preventing
+     * concurrent mode-change callers. */
+    xSemaphoreGive(s_net_mutex);
+    esp_err_t http_stop_err = argus_http_server_stop();
+    if (http_stop_err != ESP_OK) {
+        ESP_LOGW(TAG, "HTTP server stop failed during service transition: %s", esp_err_to_name(http_stop_err));
+    }
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+
     // Normal commands reaching the router during this interval acquire dispatch,
     // observe SERVICE_TRANSITION, are rejected, and return promptly.
 
@@ -750,6 +782,14 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
              argus_authority_mgr_get_owner_name(requested_owner));
 
     xSemaphoreGive(s_net_mutex);
+
+    /* Start HTTP server outside s_net_mutex (non-fatal, structural consistency) */
+    {
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in SERVICE_AP_ONLY: %s", esp_err_to_name(http_err));
+        }
+    }
     return ESP_OK;
 
 abort_transition:
