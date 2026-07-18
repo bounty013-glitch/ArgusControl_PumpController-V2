@@ -91,6 +91,34 @@ const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode);
  */
 esp_err_t argus_net_mgr_enable_ap_discoverable(void);
 
+typedef struct {
+    esp_err_t (*request_normal_stop)(void *ctx);
+    esp_err_t (*verify_stopped)(void *ctx);
+    esp_err_t (*stop_broker)(void *ctx);
+    esp_err_t (*verify_broker_stopped)(void *ctx);
+    esp_err_t (*disconnect_sta)(void *ctx);
+    esp_err_t (*verify_sta_disconnected)(void *ctx);
+    esp_err_t (*verify_sta_ip_released)(void *ctx);
+    esp_err_t (*set_wifi_ap_only)(void *ctx);
+    esp_err_t (*verify_ap_active)(void *ctx);
+    void *ctx;
+} argus_service_transition_ops_t;
+
+/**
+ * @brief Pure service transition orchestration function operating on caller-provided authority ops and network ops struct.
+ */
+esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode,
+                                                   argus_authority_owner_t requested_owner,
+                                                   const argus_service_authority_ops_t *auth_ops,
+                                                   const argus_service_transition_ops_t *ops);
+
+/**
+ * @brief Synchronously execute coordinated service-entry transition with physical network isolation.
+ * @param requested_owner Target local owner (ARGUS_AUTH_OWNER_BROWSER or ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI).
+ * @return ESP_OK on verified success, error code on failure.
+ */
+esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner);
+
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
 

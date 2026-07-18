@@ -35,6 +35,20 @@ typedef struct {
     uint32_t generation;
 } argus_authority_snapshot_t;
 
+typedef struct {
+    argus_control_authority_t mode;
+    argus_authority_owner_t owner;
+    uint32_t generation;
+    esp_err_t last_error;
+} argus_authority_core_t;
+
+typedef struct {
+    esp_err_t (*prepare_transition)(void *ctx);
+    esp_err_t (*grant_local)(void *ctx, argus_authority_owner_t owner);
+    void (*abort_transition)(void *ctx);
+    void *ctx;
+} argus_service_authority_ops_t;
+
 /**
  * @brief Initialize control authority manager.
  * @return ESP_OK on success.
@@ -55,6 +69,29 @@ esp_err_t argus_authority_mgr_get_snapshot(argus_authority_snapshot_t *out_snap)
  * @return ESP_OK on success.
  */
 esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus_authority_owner_t new_owner);
+
+/**
+ * @brief Prepare service transition by stopping motion and setting mode to SERVICE_TRANSITION/NONE.
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if motion fails to stop or E-stop occurs.
+ */
+esp_err_t argus_authority_prepare_service_transition(void);
+
+/**
+ * @brief Finalize grant of LOCAL_SERVICE authority to requested owner after network isolation.
+ * @param requested_owner Target local owner (BROWSER or DIAGNOSTIC_CLI).
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if current mode is not SERVICE_TRANSITION.
+ */
+esp_err_t argus_authority_grant_local_service(argus_authority_owner_t requested_owner);
+
+/**
+ * @brief Abort an in-progress service transition, returning authority to NONE/NONE.
+ */
+void argus_authority_abort_service_transition(void);
+
+/**
+ * @brief Populate production authority operations seam for orchestrator.
+ */
+void argus_authority_get_production_service_ops(argus_service_authority_ops_t *out_ops);
 
 /**
  * @brief Request controlled transition into LOCAL_SERVICE mode for specified owner.
@@ -89,6 +126,17 @@ const char *argus_authority_mgr_get_mode_name(argus_control_authority_t mode);
  * @brief Get human-readable string name for authority owner.
  */
 const char *argus_authority_mgr_get_owner_name(argus_authority_owner_t owner);
+
+/**
+ * @brief Pure core functions operating on caller-provided authority cores (for pure testing).
+ */
+esp_err_t argus_authority_core_set_mode(argus_authority_core_t *core,
+                                       argus_control_authority_t new_mode,
+                                       argus_authority_owner_t new_owner);
+esp_err_t argus_authority_core_prepare_service_transition(argus_authority_core_t *core);
+esp_err_t argus_authority_core_grant_local_service(argus_authority_core_t *core,
+                                                   argus_authority_owner_t requested_owner);
+void argus_authority_core_abort_service_transition(argus_authority_core_t *core);
 
 #ifdef __cplusplus
 }
