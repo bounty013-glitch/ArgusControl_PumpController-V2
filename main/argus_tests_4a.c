@@ -13,6 +13,7 @@
 #include "argus_net_mgr.h"
 #include "argus_mqtt_broker.h"
 #include "argus_console_helpers.h"
+#include "argus_http_server.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -938,6 +939,109 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     return match;
 }
 
+/* ── Phase 4B.1 Pure Tests ───────────────────────────────────────── */
+
+/**
+ * @brief Test json_escape with edge cases.
+ *
+ * Validates: normal passthrough, quote/backslash escaping, control char
+ * replacement, truncation at buffer boundary, NULL/empty input handling.
+ * Also confirms HTML metacharacters pass through (HTML escaping is handled
+ * separately by the portal JavaScript h() function).
+ */
+static esp_err_t test_http_json_escape_safety(void)
+{
+    extern void argus_http_test_json_escape(const char *, char *, size_t);
+    char dst[64];
+
+    /* Normal passthrough */
+    argus_http_test_json_escape("hello", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "hello") == 0, "Normal string passthrough failed");
+
+    /* Quote escaping */
+    argus_http_test_json_escape("a\"b", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a\\\"b") == 0, "Quote escaping failed");
+
+    /* Backslash escaping */
+    argus_http_test_json_escape("a\\b", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a\\\\b") == 0, "Backslash escaping failed");
+
+    /* Control character replacement */
+    argus_http_test_json_escape("a\nb\tc", dst, sizeof(dst));
+    TEST_ASSERT(strcmp(dst, "a b c") == 0, "Control char replacement failed");
+
+    /* Truncation — 4-byte buffer can hold 3 chars + NUL */
+    argus_http_test_json_escape("abcdef", dst, 4);
+    TEST_ASSERT(strlen(dst) <= 3, "Truncation overflow");
+    TEST_ASSERT(dst[3] == '\0', "Truncation NUL termination failed");
+
+    /* Empty string */
+    argus_http_test_json_escape("", dst, sizeof(dst));
+    TEST_ASSERT(dst[0] == '\0', "Empty string failed");
+
+    /* NULL source */
+    dst[0] = 'X';
+    argus_http_test_json_escape(NULL, dst, sizeof(dst));
+    TEST_ASSERT(dst[0] == '\0', "NULL source failed");
+
+    /* HTML metacharacters pass through json_escape (HTML escaping is the
+     * responsibility of the portal JavaScript h() function, not json_escape) */
+    argus_http_test_json_escape("<script>alert(1)</script>", dst, sizeof(dst));
+    TEST_ASSERT(strstr(dst, "<script>") != NULL, "HTML chars should pass through json_escape");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Test HTTP server lifecycle observation.
+ *
+ * Validates: is_running() returns a coherent boolean after init.
+ * A duplicate init must be rejected with ESP_ERR_INVALID_STATE.
+ * Cannot test start/stop without network stack — this is a smoke test.
+ */
+static esp_err_t test_http_lifecycle_observation(void)
+{
+    /* After app_main init, the server should reflect the current mode.
+     * In diagnostic mode the server may or may not be running depending
+     * on the network mode. The test validates that is_running() returns
+     * without crashing and returns a valid boolean. */
+    bool running = argus_http_server_is_running();
+    TEST_ASSERT(running == true || running == false, "is_running() not boolean");
+
+    /* A duplicate init must be rejected */
+    esp_err_t dup_err = argus_http_server_init();
+    TEST_ASSERT(dup_err == ESP_ERR_INVALID_STATE, "Duplicate init should return INVALID_STATE");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Test that NVS password masking is intact for HTTP secret exclusion.
+ *
+ * Validates: argus_nvs_config_mask() replaces sta_pass with the mask string.
+ * The status handler uses NVS only for the commissioned boolean and zeros
+ * the config struct immediately — this test confirms the masking primitive
+ * itself is intact.
+ */
+static esp_err_t test_http_secret_exclusion(void)
+{
+    argus_config_payload_t cfg;
+    esp_err_t err = argus_nvs_config_get(&cfg);
+    if (err == ESP_OK) {
+        /* Mask and verify password is replaced */
+        argus_config_payload_t masked;
+        argus_nvs_config_mask(&cfg, &masked);
+        TEST_ASSERT(strcmp(masked.sta_pass, ARGUS_CONFIG_MASK_STRING) == 0,
+                    "Password masking broken -- HTTP API may leak secrets");
+    }
+    /* Zero the config to prevent stack-local secret leakage */
+    memset(&cfg, 0, sizeof(cfg));
+
+    return ESP_OK;
+}
+
+/* ── Test runner ───────────────────────────────────────────────────── */
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
@@ -986,6 +1090,10 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_network_truthfulness_and_broker_ordering);
         RUN_TEST(test_console_input_validation);
         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
+        /* Phase 4B.1 pure tests */
+        RUN_TEST(test_http_json_escape_safety);
+        RUN_TEST(test_http_lifecycle_observation);
+        RUN_TEST(test_http_secret_exclusion);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -994,8 +1102,8 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A Pure Tests:\n");
-    printf("  Distinct Test Cases : 18\n");
+    printf("\nPhase 4A+4B.1 Pure Tests:\n");
+    printf("  Distinct Test Cases : 21\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
@@ -1021,7 +1129,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4A PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
+    printf("PHASE 4A+4B.1 PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
     return overall_pass ? ESP_OK : ESP_FAIL;

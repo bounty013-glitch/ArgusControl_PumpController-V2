@@ -89,6 +89,65 @@ browser client without over-committing DRAM (~2KB per connection on
 esp_http_server). `lru_purge_enable=true` evicts the oldest connection
 if the limit is reached.
 
+## Independent Review Corrections (Post-3ae9b22)
+
+Four blocking findings were identified in independent review and corrected:
+
+### C1. HTTP Shutdown Deadlock (Finding 1)
+
+**Root cause:** `status_get_handler` called `argus_net_mgr_get_snapshot()` which
+takes `s_net_mutex`. `request_service()` called `argus_http_server_stop()` while
+holding `s_net_mutex`. `httpd_stop()` waits for active handlers → deadlock.
+
+**Primary fix:** Handler replaced `argus_net_mgr_get_snapshot()` with lock-free
+query functions (`argus_net_mgr_get_mode()`, `is_sta_connected()`, etc.) that
+do not take `s_net_mutex`. The handler never contends with the network manager.
+
+**Defense in depth:** All HTTP start/stop calls in `argus_net_mgr.c` moved
+outside `s_net_mutex`. In `request_service()`, the mutex is temporarily released
+after setting `SERVICE_TRANSITION` (no concurrent mode writer can proceed in
+that state) and re-acquired after `httpd_stop()` returns.
+
+### C2. Service Portal STA Reachability (Finding 2)
+
+**Root cause:** In APSTA mode, `esp_http_server` binds to `INADDR_ANY:80`,
+accepting connections through both AP and STA interfaces.
+
+**Fix:** Added `open_fn` session callback (`http_session_open`) that compares
+the socket's local address (`getsockname`) to the AP netif IP
+(`esp_netif_get_ip_info` on `WIFI_AP_DEF`). Connections arriving on any
+non-AP interface are rejected before any handler executes.
+
+### C3. Unsafe Browser Rendering / DOM Injection (Finding 3)
+
+**Root cause:** `row()` function injected device-supplied values into
+`innerHTML` with only JSON escaping. A `client_id` like `<img onerror=...>`
+would execute as HTML.
+
+**Fix:** Added `h()` HTML escape function in portal JavaScript that replaces
+`& < > " '` with HTML entities. All values in `row()` now pass through `h()`.
+Identity subtitle uses `textContent` (inherently DOM-safe).
+
+### C4. Failed Stop Reported as Success (Finding 4)
+
+**Root cause:** `argus_http_server_stop()` cleared `s_server = NULL` and
+returned `ESP_OK` even when `httpd_stop()` failed. This would allow a
+duplicate `httpd_start()` against a possibly-still-running server.
+
+**Fix:** On `httpd_stop()` failure, `s_server` is preserved (not cleared).
+The error is propagated to the caller. `is_running()` continues to return
+`true`. A subsequent `start()` returns "already running" (idempotent),
+which is the safest behavior for an unknown state.
+
+### Supporting Corrections
+
+- Authority snapshot error checked in status handler.
+- URI handler registration checked with rollback on failure.
+- Removed stale "bounded" shutdown claim from header doc.
+- Exposed `json_escape` as test seam (`argus_http_test_json_escape`).
+- Added 3 pure tests: json_escape safety, lifecycle observation, secret exclusion.
+- Test count updated: 21 distinct test cases (18 Phase 4A + 3 Phase 4B.1).
+
 ---
 
 ## 1. Current-Source Baseline Audit

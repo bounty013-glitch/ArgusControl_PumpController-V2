@@ -309,16 +309,20 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
         // (WIFI_EVENT_AP_START) is the authoritative source.
         set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
         ESP_LOGI(TAG, "Service AP discoverability enabled cleanly in APSTA mode.");
-
-        /* Start HTTP server for read-only portal (non-fatal) */
-        esp_err_t http_err = argus_http_server_start();
-        if (http_err != ESP_OK) {
-            ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
-        }
     } else {
         ESP_LOGE(TAG, "Failed to enable Service AP: %s. Preserving COMMISSIONED_STA.", esp_err_to_name(err));
     }
     xSemaphoreGive(s_net_mutex);
+
+    /* Start HTTP server outside s_net_mutex — httpd_stop() waits for active
+     * handlers, and handlers may read network state. Holding s_net_mutex
+     * across server lifecycle operations risks deadlock. */
+    if (err == ESP_OK) {
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
+        }
+    }
 
     return err;
 }
@@ -635,14 +639,21 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
 
     set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
 
-    /* Stop HTTP server before tearing down network (non-fatal) */
+    argus_cmd_router_unlock_dispatch();
+    // ---- END FIRST DISPATCH GATE ----
+
+    /* Stop HTTP server outside s_net_mutex and dispatch lock.
+     * httpd_stop() waits for active handlers to finish. If a handler
+     * queried network state under s_net_mutex, holding s_net_mutex here
+     * would deadlock. Mode is already SERVICE_TRANSITION, preventing
+     * concurrent mode-change callers (request_service, enable_ap_discoverable,
+     * request_service_exit all reject on wrong starting mode). */
+    xSemaphoreGive(s_net_mutex);
     esp_err_t http_stop_err = argus_http_server_stop();
     if (http_stop_err != ESP_OK) {
         ESP_LOGW(TAG, "HTTP server stop failed during service transition: %s", esp_err_to_name(http_stop_err));
     }
-
-    argus_cmd_router_unlock_dispatch();
-    // ---- END FIRST DISPATCH GATE ----
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
 
     // Normal commands reaching the router during this interval acquire dispatch,
     // observe SERVICE_TRANSITION, are rejected, and return promptly.
@@ -764,19 +775,19 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     argus_cmd_router_unlock_dispatch();
     // ---- END SECOND DISPATCH GATE ----
 
-    /* Start HTTP server in SERVICE_AP_ONLY (non-fatal) */
+
+    ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
+             argus_authority_mgr_get_owner_name(requested_owner));
+
+    xSemaphoreGive(s_net_mutex);
+
+    /* Start HTTP server outside s_net_mutex (non-fatal, structural consistency) */
     {
         esp_err_t http_err = argus_http_server_start();
         if (http_err != ESP_OK) {
             ESP_LOGW(TAG, "HTTP server start failed in SERVICE_AP_ONLY: %s", esp_err_to_name(http_err));
         }
     }
-
-
-    ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
-             argus_authority_mgr_get_owner_name(requested_owner));
-
-    xSemaphoreGive(s_net_mutex);
     return ESP_OK;
 
 abort_transition:

@@ -13,6 +13,8 @@
  *    A static mutex (s_lifecycle_mutex) serializes all start/stop transitions.
  *    The server handle (s_server) is read/written only under this mutex.
  *    This prevents double-start, stale-handle, and concurrent-stop races.
+ *    A failed httpd_stop() preserves s_server to prevent unverified duplicate
+ *    starts — the lifecycle state remains RUNNING/UNKNOWN, not falsely STOPPED.
  *
  * 3. SELF-STOP DEADLOCK AVOIDANCE
  *    An HTTP handler must never call argus_http_server_stop() synchronously.
@@ -21,16 +23,29 @@
  *    Future phases (4B.3+) that need service transitions will post events
  *    to the network manager task for deferred lifecycle changes.
  *
- * 4. NO SECRETS
+ * 4. HANDLER-LEVEL DEADLOCK AVOIDANCE
+ *    HTTP handlers must not take s_net_mutex (via argus_net_mgr_get_snapshot).
+ *    The network manager holds s_net_mutex while calling httpd_stop(), which
+ *    waits for active handlers. If a handler also waited for s_net_mutex,
+ *    both would deadlock. Handlers use lock-free query functions instead.
+ *
+ * 5. NO SECRETS
  *    No endpoint returns passwords, AP credentials, or sensitive NVS data.
  *    GET /api/status and GET /api/identity return only non-secret fields.
  *
- * 5. SECURITY BASELINE
+ * 6. SECURITY BASELINE
  *    - No permissive CORS (no Access-Control-Allow-Origin header).
  *    - Cache-Control: no-store on all API responses.
  *    - Only GET methods accepted (405 for others).
  *    - Content-Type: application/json on all API responses.
  *    - No Internet/CDN dependency — all assets embedded.
+ *
+ * 7. SERVICE AP INTERFACE ENFORCEMENT
+ *    In AP_DISCOVERABLE (APSTA), the HTTP server accepts connections on both
+ *    interfaces. The open_fn session callback verifies each connection arrived
+ *    on the AP interface (192.168.4.x) by comparing the socket's local
+ *    address to the AP netif's IP. Connections through the STA interface are
+ *    rejected before any handler executes.
  */
 
 #include "argus_http_server.h"
@@ -43,8 +58,10 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "lwip/sockets.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +79,51 @@ static bool              s_initialized = false;
 #define HTTP_RECV_TIMEOUT_S   5
 #define HTTP_SEND_TIMEOUT_S   5
 #define HTTP_STACK_SIZE       6144
+
+/* ── AP-Interface Enforcement ────────────────────────────────────── */
+
+/**
+ * @brief Session open callback — reject connections through non-AP interfaces.
+ *
+ * In APSTA mode, esp_http_server binds to INADDR_ANY and would accept
+ * connections on both the AP and STA interfaces. This callback compares
+ * the socket's local address to the AP netif's IP. Connections arriving
+ * on any other interface are rejected before any handler executes.
+ *
+ * This enforces the product decision: the portal is a Service AP interface,
+ * not a production-LAN HTTP service.
+ */
+static esp_err_t http_session_open(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+
+    struct sockaddr_in local_addr;
+    socklen_t addr_len = sizeof(local_addr);
+    if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
+        ESP_LOGW(TAG, "Rejected connection: getsockname failed");
+        return ESP_FAIL;
+    }
+
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif == NULL) {
+        ESP_LOGW(TAG, "Rejected connection: AP netif unavailable");
+        return ESP_FAIL;
+    }
+
+    esp_netif_ip_info_t ap_ip;
+    if (esp_netif_get_ip_info(ap_netif, &ap_ip) != ESP_OK) {
+        ESP_LOGW(TAG, "Rejected connection: AP IP info unavailable");
+        return ESP_FAIL;
+    }
+
+    if (local_addr.sin_addr.s_addr != ap_ip.ip.addr) {
+        ESP_LOGW(TAG, "Rejected connection on non-AP interface (local=%s)",
+                 inet_ntoa(local_addr.sin_addr));
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
 
 /* ── Response helpers ────────────────────────────────────────────── */
 
@@ -97,8 +159,12 @@ static esp_err_t send_method_not_allowed(httpd_req_t *req)
 /**
  * @brief Escape a string for safe JSON embedding.
  *
- * Handles: \ " and control characters (replaced with space).
+ * Handles: \\ \" and control characters (replaced with space).
  * Output is truncated if dst_size is exceeded.
+ *
+ * NOTE: JSON escaping is NOT HTML escaping. Values embedded via innerHTML
+ * require a separate DOM-safe rendering path. The portal JavaScript uses
+ * textContent for user-supplied values to prevent XSS.
  */
 static void json_escape(const char *src, char *dst, size_t dst_size)
 {
@@ -124,6 +190,14 @@ static void json_escape(const char *src, char *dst, size_t dst_size)
     dst[di] = '\0';
 }
 
+/* Expose json_escape for pure testing in diagnostic builds */
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size)
+{
+    json_escape(src, dst, dst_size);
+}
+#endif
+
 /* ── GET /api/status handler ─────────────────────────────────────── */
 
 /**
@@ -133,6 +207,12 @@ static void json_escape(const char *src, char *dst, size_t dst_size)
  * authority mode/owner/generation, broker status.
  *
  * Does NOT include: passwords, AP credentials, NVS secrets.
+ *
+ * DEADLOCK NOTE: This handler uses lock-free network query functions
+ * (argus_net_mgr_get_mode, is_sta_connected, is_ap_started) instead of
+ * argus_net_mgr_get_snapshot() which takes s_net_mutex. The network
+ * manager holds s_net_mutex while calling httpd_stop(), which waits for
+ * active handlers — using s_net_mutex here would deadlock.
  */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
@@ -142,23 +222,32 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     set_api_headers(req);
 
-    /* Gather snapshots from existing APIs */
+    /* Gather snapshots — use APIs that do NOT take s_net_mutex */
     argus_state_snapshot_t state_snap;
-    argus_state_mgr_get_snapshot(&state_snap);
+    argus_state_mgr_get_snapshot(&state_snap);  /* uses s_state_mutex, not s_net_mutex */
 
     argus_authority_snapshot_t auth_snap;
-    argus_authority_mgr_get_snapshot(&auth_snap);
+    esp_err_t auth_err = argus_authority_mgr_get_snapshot(&auth_snap);
+    if (auth_err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"authority snapshot failed\"}");
+        return ESP_OK;
+    }
 
-    argus_net_snapshot_t net_snap;
-    argus_net_mgr_get_snapshot(&net_snap);
+    /* Lock-free network queries — no s_net_mutex contention */
+    argus_network_mode_t net_mode = argus_net_mgr_get_mode();
+    bool sta_connected = argus_net_mgr_is_sta_connected();
+    bool sta_ip_acquired = argus_net_mgr_is_sta_ip_acquired();
+    bool ap_started = argus_net_mgr_is_ap_started();
 
     argus_mqtt_broker_lifecycle_obs_t broker_obs = {0};
     esp_err_t broker_err = argus_mqtt_broker_get_lifecycle_obs(&broker_obs);
+    bool broker_running = argus_mqtt_broker_is_running();
 
-    const char *machine_state = argus_state_mgr_get_state_name(state_snap.machine_state);
-    const char *net_mode = argus_net_mgr_get_mode_name(net_snap.mode);
-    const char *auth_mode = argus_authority_mgr_get_mode_name(auth_snap.mode);
-    const char *auth_owner = argus_authority_mgr_get_owner_name(auth_snap.owner);
+    const char *machine_state_str = argus_state_mgr_get_state_name(state_snap.machine_state);
+    const char *net_mode_str = argus_net_mgr_get_mode_name(net_mode);
+    const char *auth_mode_str = argus_authority_mgr_get_mode_name(auth_snap.mode);
+    const char *auth_owner_str = argus_authority_mgr_get_owner_name(auth_snap.owner);
 
     /* NVS commissioned status — no secrets */
     argus_config_payload_t cfg;
@@ -188,20 +277,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"observable\":%s},"
         "\"commissioned\":%s"
         "}",
-        machine_state,
+        machine_state_str,
         state_snap.configured_target_rpm_milli,
         state_snap.applied_rpm_milli,
         state_snap.generated_rpm_milli,
         state_snap.driver_enabled ? "true" : "false",
         state_snap.estop_latched ? "true" : "false",
         state_snap.ramp_active ? "true" : "false",
-        auth_mode, auth_owner,
+        auth_mode_str, auth_owner_str,
         auth_snap.generation,
-        net_mode,
-        net_snap.sta_connected ? "true" : "false",
-        net_snap.sta_ip_acquired ? "true" : "false",
-        net_snap.ap_started ? "true" : "false",
-        net_snap.mqtt_broker_running ? "true" : "false",
+        net_mode_str,
+        sta_connected ? "true" : "false",
+        sta_ip_acquired ? "true" : "false",
+        ap_started ? "true" : "false",
+        broker_running ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
         (broker_err == ESP_OK) ? "true" : "false",
         commissioned ? "true" : "false");
@@ -285,6 +374,18 @@ static esp_err_t identity_get_handler(httpd_req_t *req)
 
 /* ── GET / — Embedded portal page ────────────────────────────────── */
 
+/**
+ * Portal JavaScript rendering safety:
+ *
+ * The row() function builds HTML strings for display. All device-supplied
+ * and configuration-supplied values (identity fields, state names) are
+ * rendered through the h() function which escapes HTML metacharacters
+ * (&, <, >, ", ') to prevent DOM injection. This is necessary because
+ * JSON escaping alone does not prevent HTML interpretation.
+ *
+ * The identity section uses textContent for firmware_version and
+ * service_ssid in the subtitle, which is inherently DOM-safe.
+ */
 static const char PORTAL_HTML[] =
     "<!DOCTYPE html>"
     "<html lang=\"en\">"
@@ -343,8 +444,12 @@ static const char PORTAL_HTML[] =
     "<button class=\"refresh-btn\" onclick=\"refresh()\">Refresh Status</button>"
     "<div class=\"note\">Read-only portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
-    "function row(l,v,c){return '<div class=\"row\"><span class=\"label\">'+l+"
-    "'</span><span class=\"val\">'+(c?'<span class=\"badge '+c+'\">'+v+'</span>':v)+'</span></div>'}"
+    /* h() — HTML-escape to prevent DOM injection from device-supplied values */
+    "function h(s){if(s==null)return'';"
+    "return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')"
+    ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}"
+    "function row(l,v,c){return '<div class=\"row\"><span class=\"label\">'+h(l)+"
+    "'</span><span class=\"val\">'+(c?'<span class=\"badge '+h(c)+'\">'+h(v)+'</span>':h(v))+'</span></div>'}"
     "function bc(s){var m={'RUNNING':'badge-ok','HOLDING':'badge-ok','UNLOCKED':'badge-warn',"
     "'STARTING':'badge-warn','DECELERATING':'badge-warn','EMERGENCY_STOPPED':'badge-err',"
     "'FAULTED':'badge-err','BOOTING':'badge-off','RECOVERING':'badge-warn'};"
@@ -467,6 +572,7 @@ esp_err_t argus_http_server_start(void)
     config.stack_size         = HTTP_STACK_SIZE;
     config.lru_purge_enable   = true;  /* Evict oldest connection if at max */
     config.server_port        = 80;
+    config.open_fn            = http_session_open;  /* AP-interface enforcement */
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -476,14 +582,25 @@ esp_err_t argus_http_server_start(void)
         return ESP_FAIL;
     }
 
-    /* Register URI handlers */
-    httpd_register_uri_handler(s_server, &uri_status);
-    httpd_register_uri_handler(s_server, &uri_identity);
-    httpd_register_uri_handler(s_server, &uri_portal);
+    /* Register URI handlers — roll back on any failure */
+    esp_err_t reg_err;
+    reg_err = httpd_register_uri_handler(s_server, &uri_status);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_identity);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_portal);
+    if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);
     xSemaphoreGive(s_lifecycle_mutex);
     return ESP_OK;
+
+rollback:
+    ESP_LOGE(TAG, "URI handler registration failed: %s. Stopping server.", esp_err_to_name(reg_err));
+    httpd_stop(s_server);
+    s_server = NULL;
+    xSemaphoreGive(s_lifecycle_mutex);
+    return ESP_FAIL;
 }
 
 esp_err_t argus_http_server_stop(void)
@@ -502,9 +619,14 @@ esp_err_t argus_http_server_stop(void)
 
     esp_err_t err = httpd_stop(s_server);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to stop HTTP server: %s (%d)", esp_err_to_name(err), err);
-        /* Still clear the handle — the server is in an unknown state.
-         * A subsequent start will attempt a fresh httpd_start(). */
+        /* Preserve s_server — the server may still be running.
+         * Clearing it would falsely report STOPPED and allow a
+         * duplicate httpd_start(), violating lifecycle integrity.
+         * The caller must retry or accept the unknown state. */
+        ESP_LOGE(TAG, "httpd_stop failed: %s (%d). Server state unknown — handle preserved.",
+                 esp_err_to_name(err), err);
+        xSemaphoreGive(s_lifecycle_mutex);
+        return err;
     }
 
     s_server = NULL;
