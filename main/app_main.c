@@ -32,6 +32,7 @@
 #include "argus_authority_mgr.h"
 #include "argus_cmd_router.h"
 #include "argus_net_mgr.h"
+#include "argus_console_helpers.h"
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
 
@@ -310,52 +311,155 @@ static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const 
             ab->generation == aa->generation);
 }
 
+static void purge_stdin(void)
+{
+    vTaskDelay(pdMS_TO_TICKS(50));
+    int c;
+    while ((c = getchar()) != EOF) {
+        if (c != '\r' && c != '\n' && c != ' ') {
+            ungetc(c, stdin);
+            break;
+        }
+    }
+}
+
 static int get_menu_key(const char *prompt)
 {
-    printf("%s", prompt);
+    purge_stdin();
+
+    printf("%s\n", prompt);
     fflush(stdout);
 
     int c;
     do {
         c = getchar();
-        if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
-    } while (c == EOF || c == '\n' || c == '\r');
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    } while (c == EOF || c == '\n' || c == '\r' || c == ' ');
 
-    printf("%c\n", c);
+    int choice = c;
+
+    purge_stdin();
+
+    printf("-> Option selected: '%c'\n", choice);
     fflush(stdout);
-    return c;
+    return choice;
 }
 
-static void read_string_input(const char *prompt, char *buffer, size_t max_len, bool mask)
+static esp_err_t read_string_input(const char *prompt, char *buffer, size_t max_len)
 {
-    (void)mask;
-    printf("%s", prompt);
+    if (!buffer || max_len == 0) return ESP_ERR_INVALID_ARG;
+
+    purge_stdin();
+
+    printf("%s\n", prompt);
     fflush(stdout);
 
-    if (!buffer || max_len == 0) return;
+    size_t idx = 0;
     buffer[0] = '\0';
 
-    size_t idx = 0;
     while (idx < max_len - 1) {
         int c = getchar();
         if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+
+        if ((c == '\r' || c == '\n') && idx == 0) {
+            continue;
+        }
+
         if (c == '\r' || c == '\n') {
-            if (idx == 0) {
-                // Ignore leftover newline from menu choice selection
-                continue;
-            }
-            printf("\n");
-            fflush(stdout);
+            write(STDOUT_FILENO, "\r\n", 2);
             break;
         }
-        buffer[idx++] = (char)c;
-        printf("%c", c);
-        fflush(stdout);
+
+        if (c == '\b' || c == 0x7F) {
+            if (idx > 0) {
+                idx--;
+                buffer[idx] = '\0';
+                write(STDOUT_FILENO, "\b \b", 3);
+            }
+            continue;
+        }
+
+        if (c < 32 || c > 126) continue;
+
+        char ch = (char)c;
+        buffer[idx++] = ch;
+        buffer[idx] = '\0';
+        write(STDOUT_FILENO, &ch, 1);
     }
-    buffer[idx] = '\0';
+
+    purge_stdin();
+
+    if (strlen(buffer) == 0) {
+        printf("[INVALID INPUT] Input cannot be empty.\n");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    printf("-> Input received: '%s'\n", buffer);
+    fflush(stdout);
+    return ESP_OK;
+}
+
+static esp_err_t read_password_input(const char *prompt, char *buffer, size_t max_len)
+{
+    if (!buffer || max_len < 9) return ESP_ERR_INVALID_ARG;
+
+    purge_stdin();
+
+    printf("%s\n", prompt);
+    fflush(stdout);
+
+    size_t idx = 0;
+    buffer[0] = '\0';
+
+    while (idx < max_len - 1) {
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        if ((c == '\r' || c == '\n') && idx == 0) {
+            continue;
+        }
+
+        if (c == '\r' || c == '\n') {
+            write(STDOUT_FILENO, "\r\n", 2);
+            break;
+        }
+
+        if (c == '\b' || c == 0x7F) {
+            if (idx > 0) {
+                idx--;
+                buffer[idx] = '\0';
+                write(STDOUT_FILENO, "\b \b", 3);
+            }
+            continue;
+        }
+
+        if (c < 32 || c > 126) continue;
+
+        buffer[idx++] = (char)c;
+        buffer[idx] = '\0';
+        write(STDOUT_FILENO, "*", 1);
+    }
+
+    purge_stdin();
+
+    esp_err_t val_err = argus_console_validate_password(buffer);
+    if (val_err != ESP_OK) {
+        printf("[STAGING FAILED] Password must be 8-63 characters (got %u chars).\n", (unsigned int)strlen(buffer));
+        memset(buffer, 0, max_len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    printf("-> Password received: [CONFIGURED] (%u chars)\n", (unsigned int)strlen(buffer));
+    fflush(stdout);
+    return ESP_OK;
 }
 
 static bool confirm_action(const char *prompt)
@@ -587,15 +691,33 @@ static void argus_phase4a_acceptance_menu(void)
                 break;
             }
             case '8': {
-                read_string_input("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid), false);
-                read_string_input("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass), true);
-                s_has_staged_config = (strlen(s_staged_ssid) >= 1 && strlen(s_staged_pass) >= 8 && strlen(s_staged_pass) <= 63);
-                if (s_has_staged_config) {
+                esp_err_t err_ssid = read_string_input("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid));
+                if (err_ssid != ESP_OK) {
+                    printf("[STAGING FAILED] Invalid SSID input.\n");
+                    memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                    memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                    s_has_staged_config = false;
+                    break;
+                }
+
+                esp_err_t err_pass = read_password_input("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass));
+                if (err_pass != ESP_OK) {
+                    printf("[STAGING FAILED] Invalid WPA2 password.\n");
+                    memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                    memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                    s_has_staged_config = false;
+                    break;
+                }
+
+                if (argus_console_validate_ssid(s_staged_ssid) == ESP_OK &&
+                    argus_console_validate_password(s_staged_pass) == ESP_OK) {
+                    s_has_staged_config = true;
                     printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
                 } else {
                     printf("[STAGING FAILED] Invalid parameters. SSID must be 1-32 chars, Pass 8-63 chars.\n");
                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                    s_has_staged_config = false;
                 }
                 break;
             }

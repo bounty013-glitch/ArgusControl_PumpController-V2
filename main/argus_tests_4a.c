@@ -12,6 +12,7 @@
 #include "argus_state_mgr.h"
 #include "argus_net_mgr.h"
 #include "argus_mqtt_broker.h"
+#include "argus_console_helpers.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -454,21 +455,78 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     return ESP_OK;
 }
 
+static esp_err_t test_console_input_validation(void)
+{
+    char key = '\0';
+
+    // 1. Empty menu input
+    TEST_ASSERT(argus_console_parse_menu_key("", &key) == ESP_ERR_INVALID_ARG, "Empty menu input accepted");
+
+    // 2. Whitespace-only input
+    TEST_ASSERT(argus_console_parse_menu_key("   \t\r\n  ", &key) == ESP_ERR_INVALID_ARG, "Whitespace menu input accepted");
+
+    // 3. One-character menu input
+    TEST_ASSERT(argus_console_parse_menu_key("8", &key) == ESP_OK && key == '8', "Single key '8' failed");
+    TEST_ASSERT(argus_console_parse_menu_key("N", &key) == ESP_OK && key == 'N', "Single key 'N' failed");
+
+    // 4. Leading/trailing whitespace around single character
+    TEST_ASSERT(argus_console_parse_menu_key("  8 \t ", &key) == ESP_OK && key == '8', "Padded single key failed");
+
+    // 5. Multi-character rejection
+    TEST_ASSERT(argus_console_parse_menu_key("89", &key) == ESP_ERR_INVALID_ARG, "Multi-char '89' accepted");
+    TEST_ASSERT(argus_console_parse_menu_key("  8 9 ", &key) == ESP_ERR_INVALID_ARG, "Multi-char '8 9' accepted");
+
+    // 6. Maximum valid SSID length (32)
+    char ssid_32[33];
+    memset(ssid_32, 'A', 32);
+    ssid_32[32] = '\0';
+    TEST_ASSERT(argus_console_validate_ssid(ssid_32) == ESP_OK, "32-char SSID rejected");
+
+    // 7. Overlength SSID rejection (> 32)
+    char ssid_33[34];
+    memset(ssid_33, 'A', 33);
+    ssid_33[33] = '\0';
+    TEST_ASSERT(argus_console_validate_ssid(ssid_33) == ESP_ERR_INVALID_SIZE, "33-char SSID accepted");
+
+    // 8. Minimum valid password length (8)
+    TEST_ASSERT(argus_console_validate_password("12345678") == ESP_OK, "8-char password rejected");
+
+    // 9. Maximum valid password length (63)
+    char pass_63[64];
+    memset(pass_63, 'B', 63);
+    pass_63[63] = '\0';
+    TEST_ASSERT(argus_console_validate_password(pass_63) == ESP_OK, "63-char password rejected");
+
+    // 10. Password underlength rejection (< 8)
+    TEST_ASSERT(argus_console_validate_password("1234567") == ESP_ERR_INVALID_SIZE, "7-char password accepted");
+
+    // 11. Password overlength rejection (> 63)
+    char pass_64[65];
+    memset(pass_64, 'B', 64);
+    pass_64[64] = '\0';
+    TEST_ASSERT(argus_console_validate_password(pass_64) == ESP_ERR_INVALID_SIZE, "64-char password accepted");
+
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
-    printf("\n--- Starting Phase 4A Pure Non-Motion Unit Tests ---\n");
-
-    argus_prod_snapshot_t snap_before, snap_after;
-    capture_prod_snapshot(&snap_before);
+    printf("\n===================================================\n");
+    printf("=== Phase 4A Pure Non-Motion Unit Test Suite ===\n");
+    printf("===================================================\n");
 
     int passed = 0;
     int failed = 0;
 
-#define RUN_TEST(fn) \
+    argus_prod_snapshot_t snap_before, snap_after;
+    capture_prod_snapshot(&snap_before);
+
+#define RUN_TEST(test_fn) \
     do { \
-        printf("Running %s... ", #fn); \
-        if (fn() == ESP_OK) { \
-            printf("[PASS]\n"); \
+        printf("Running %-55s ... ", #test_fn); \
+        esp_err_t err = test_fn(); \
+        if (err == ESP_OK) { \
+            printf("[PASSED]\n"); \
             passed++; \
         } else { \
             printf("[FAIL]\n"); \
@@ -494,6 +552,7 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_oneshot_status_non_mutation);
         RUN_TEST(test_nvs_commit_readback_verification_and_lkg_preservation);
         RUN_TEST(test_network_truthfulness_and_broker_ordering);
+        RUN_TEST(test_console_input_validation);
     }
 
     capture_prod_snapshot(&snap_after);

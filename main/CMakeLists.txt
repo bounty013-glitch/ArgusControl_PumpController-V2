@@ -14,6 +14,7 @@ idf_component_register(
         "argus_authority_mgr.c"
         "argus_cmd_router.c"
         "argus_net_mgr.c"
+        "argus_console_helpers.c"
         "argus_tests_4a.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
