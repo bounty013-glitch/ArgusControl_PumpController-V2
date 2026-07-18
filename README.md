@@ -1,158 +1,84 @@
-# ArgusControl ESP-IDF Firmware
+# ArgusControl_PumpController-V2
 
-This project is now a native Argus motor-control firmware base for the ESP32-S3 control node, not a direct STM32 demo port.
+Argus V2 Peristaltic Pump Controller firmware for ESP32-S3.
 
-## Current Firmware Model
+This repository implements the V2 architecture for precision motor control, featuring exact fixed-point Bresenham GPTimer pulse generation, a 20 ms linear trajectory profile engine, verified common-anode active-low hardware integration, an embedded local MQTT broker, and open-loop safety doctrine.
 
-The active build is a self-hosted MQTT continuous output-shaft RPM controller:
+---
 
-1. Set an output speed target with `argus/peristaltic/cmd/speed_pct`
-2. Send `argus/peristaltic/cmd/run=true` to enable output and ramp toward the target
-3. Send `argus/peristaltic/cmd/stop=true` or `cmd/run=false` to soft-stop by ramping to zero
-4. Send `argus/peristaltic/cmd/e_stop=true` to immediately kill pulses and hold the motor locked
-5. Send `argus/peristaltic/cmd/unlock=true` only when you intentionally want to release holding torque
+## Hardware Configuration & Polarity Doctrine
 
-The control node now hosts the MQTT broker on both its infrastructure Wi-Fi address and its local access-point address at port `1883`. Normal stop and e-stop both leave the driver enabled so the motor holds position. `unlock` is the explicit release path.
+The physical wiring and logic levels between the ESP32-S3 and the UIM344 motor driver are physically verified on production hardware:
 
-## Current Features
+| UIM344 Signal | Wire Color | ESP32-S3 Pin | Polarity / Active Level | Behavior |
+| :--- | :--- | :--- | :--- | :--- |
+| **COM** | Brown | **`3.3 V`** | **Common-Anode Supply** | **MUST NOT** be connected to GND or 5V. |
+| **PLS (STEP)** | Yellow | **`GPIO3`** | Active-Low ($15 \text{ us}$ pulse) | Idle state `HIGH` (optocoupler OFF). Asserting pulse drives `LOW` (optocoupler ON). |
+| **DIR** | Gray | **`GPIO4`** | Inverted Polarity | Logical forward drives `LOW` (0V), reverse drives `HIGH` (3.3V). |
+| **ENA** | Blue | **`GPIO5`** | Active-Low Output | Driving `LOW` energizes ENA optocoupler (holding torque). Driving `HIGH` disables driver (releases shaft). |
 
-1. `STEP` output generated with `LEDC`
-2. `DIR` output controlled directly from the speed sign
-3. Optional `EN` driver control
-4. Step counting with `PCNT`
-5. Local MQTT broker for the pump-mounted HMI and temporary service tools
-6. MQTT command interface for run, speed percent, soft stop, e-stop, and unlock
-7. Configurable speed ramp to avoid abrupt pulse-frequency jumps
-8. TWAI/CAN source retained for a possible future move back to CAN
+> [!CRITICAL]
+> **Common-Anode Wiring Warning**: Connecting `COM` to `GND` (the legacy workaround) forced inverse current drive through the optocoupler diodes, degrading trigger sensitivity and causing mysterious, intermittent motor stalls. Wiring `COM` to `3.3 V` establishes proper common-anode operation.
 
-## Local MQTT Setup
+---
 
-The pump control board is the broker. The normal HMI path is the controller's local access point:
+## Architecture & Core Features
 
-```text
-AP SSID: ArgusMotorTest
-AP password: ArgusPump123
-Broker host from AP clients: 192.168.4.1
-Broker port: 1883
-Protocol: MQTT 3.1.1
-TLS/auth: disabled
-```
+### 1. GPTimer Bresenham Pulse Engine ([main/argus_step_gen.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_step_gen.c))
+*   Uses ESP32-S3 64-bit hardware `GPTimer` at 10 MHz resolution (100 ns ticks).
+*   Implements exact rational period calculation ($T = \frac{600,000,000,000}{\text{milli\_rpm} \times \text{steps\_per\_rev}}$) with Bresenham remainder accumulation.
+*   Eliminates accumulator rounding drift (0.000 ms cumulative error over $10^6$ steps).
+*   Pulse duration is configured to $15 \text{ us}$ (150 ticks) to saturate slow optocoupler diodes safely at 3.3V.
+*   Includes a 3 us (30 tick) safety clamp on `gptimer_set_alarm_action()` to prevent missed timer alarms under concurrent Wi-Fi / MQTT interrupt load.
 
-The controller also still joins the configured external Wi-Fi network when it is available. For Node-RED or service laptop testing on that network, use the control node's station IP address:
+### 2. Linear Trajectory Ramp Engine ([main/argus_trajectory.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_trajectory.c))
+*   Operates via a periodic 20 ms FreeRTOS task.
+*   Acceleration / Deceleration Limit: $10.0 \text{ output RPM/sec}$ ($10,000 \text{ mRPM/sec}$).
+*   Per-tick Increment: $200 \text{ milli-RPM}$ ($0.2 \text{ output RPM}$) per 20 ms update.
+*   Performs exact target clamping without overshoot.
+*   Handles direction reversal through zero speed by decelerating, stopping pulses, toggling DIR during setup time, and ramping in the new direction.
 
-```text
-Broker host: <control-node-ip>
-Broker port: 1883
-Protocol: MQTT 3.1.1
-TLS/auth: disabled
-```
+### 3. Open-Loop Speed & Telemetry Architecture
+Supervisory telemetry strictly distinguishes controller intent from physical motor movement:
+*   `target_rpm_milli`: Requested output target speed setpoint.
+*   `applied_rpm_milli`: Trajectory-limited speed sent to the pulse generator.
+*   `generated_rpm_milli`: Active rate currently output by GPTimer step scheduling.
+*   `generated_step_count`: Total generated pulse count.
+*   *Open-Loop Note*: Without a physical encoder feedback source, generated pulses are not proof of physical motor shaft motion.
 
-If external Wi-Fi is not available, the controller still starts the local AP and broker. The current station hostname is `ArgusMotorTestNode`.
+### 4. Diagnostic CLI & Recovery Path
+An interactive serial CLI menu (`app_main.c`) provides comprehensive hardware diagnostic options:
+*   `[1]` to `[8]`: Ramped target speeds ($0.5 \text{ RPM}$ to $200 \text{ RPM}$).
+*   `[s]`: Normal soft-stop (ramps applied speed to 0, retains holding torque).
+*   `[u]`: Unlock driver (halts pulses, drives ENA HIGH to release shaft).
+*   `[r]`: Diagnostic Recovery (halts pulses, forces STEP inactive, drives ENA HIGH, waits 500 ms, leaves unlocked without requiring MCU reboot).
+*   `[d]`: Slow STEP pin toggle ($1 \text{ Hz}$) for physical multimeter and LED testing.
+*   `[t]`: Run automated unit test suite.
 
-## Pump HMI
+---
 
-The pump-mounted 2.4 inch ESP32 "cheap yellow display" HMI is currently an Arduino sketch. A reference copy is stored with this firmware repo:
+## Embedded Local MQTT Broker
 
-1. [hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino](./hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino)
+The control node hosts a local MQTT broker listening on port `1883` on both its Wi-Fi Station IP and Access Point IP (`192.168.4.1`):
 
-The HMI joins the controller AP, connects to MQTT broker `192.168.4.1:1883`, publishes pump commands, and subscribes to retained status topics.
+*   **AP SSID**: `ArgusMotorTest`
+*   **Broker Port**: `1883`
+*   **Command Topics**: `argus/peristaltic/cmd/speed_pct`, `cmd/run`, `cmd/stop`, `cmd/e_stop`, `cmd/unlock`
+*   **Status Topics**: `argus/peristaltic/status/run`, `status/rpm`, `status/online`
 
-## MQTT Topics
+---
 
-Command topics:
+## Build and Flash Instructions
 
-1. `argus/peristaltic/cmd/speed_pct`
-   Payload: `0` to `100`
-2. `argus/peristaltic/cmd/run`
-   Payload: `true` starts/runs; `false` requests a soft stop
-3. `argus/peristaltic/cmd/stop`
-   Payload: `true` requests a soft stop
-4. `argus/peristaltic/cmd/e_stop`
-   Payload: `true` immediately stops pulses, clears the stored target, and locks the driver
-5. `argus/peristaltic/cmd/unlock`
-   Payload: `true` stops pulses and disables the driver so the motor can move freely
-
-Status topics:
-
-1. `argus/peristaltic/status/run`
-2. `argus/peristaltic/status/rpm`
-3. `argus/peristaltic/status/locked`
-4. `argus/peristaltic/status/e_stop`
-5. `argus/peristaltic/status/online`
-
-Status topics are retained by the local broker so newly connected dashboards and displays immediately see the latest state. Command topics should not be retained.
-
-## Retained CAN Protocol
-
-The CAN files are still in `main/`, but they are not part of the active MQTT build. If the firmware moves back to CAN later, the retained protocol is:
-
-1. `0x100` `SET_SPEED`
-   Bytes `0..3`: signed little-endian `int32` output RPM in milli-RPM
-2. `0x101` `START`
-   Payload ignored
-3. `0x102` `STOP`
-   Payload ignored
-
-Status frames:
-
-1. `0x180` `SPEED_STATUS`
-   Bytes `0..3`: signed commanded output RPM in milli-RPM
-   Bytes `4..7`: signed applied output RPM in milli-RPM
-2. `0x181` `STATE_STATUS`
-   Bytes `0..3`: unsigned step counter
-   Byte `4`: state flags
-   Byte `5`: fault code
-   Bytes `6..7`: reserved
-
-State flags:
-
-1. Bit `0`: driver enabled
-2. Bit `1`: motion active
-3. Bit `2`: forward direction
-4. Bit `3`: run command active
-
-## Project Layout
-
-1. [main/app_main.c](./main/app_main.c)
-   Application wiring, local MQTT broker callbacks, and status publishing
-2. [main/argus_stepper.c](./main/argus_stepper.c)
-   Continuous run/stop/speed control for the stepper interface
-3. [main/argus_mqtt_broker.c](./main/argus_mqtt_broker.c)
-   Lightweight local MQTT broker for the pump control network
-4. [main/argus_can.c](./main/argus_can.c)
-   Retained TWAI transport for Argus command/status frames
-5. [main/argus_protocol.h](./main/argus_protocol.h)
-   Protocol IDs and payload definitions
-6. [hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino](./hmi/ArgusControl_HMI-Peristaltic_Pump/ArgusControl_HMI-Peristaltic_Pump.ino)
-   Arduino reference sketch for the pump-mounted display HMI
-
-## Current Assumptions
-
-1. Control board target: `ESP32-S3`
-2. CAN bitrate: `500 kbps`
-3. Motor full steps per rev: `200`
-4. Microstep setting: `32`
-5. Gearbox ratio: `10:1`
-6. Output steps per rev: `64000`
-7. Motor max speed: `2000 RPM`
-8. Output max speed at 10:1: `200 RPM`
-9. Driver enable settle delay: `20 ms`
-10. Active MQTT max speed command: `72 RPM`
-11. Default ramp rate: `10 RPM/sec`
-12. Local MQTT broker port: `1883`
-
-## Build
+Built with ESP-IDF `v5.5.3` for ESP32-S3:
 
 ```powershell
-cd c:\Users\bount\Dev\Argus\ArgusControl_PumpController-V2
-idf.py set-target esp32s3
+# Activate ESP-IDF environment
+. C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1
+
+# Build the project
 idf.py build
-idf.py -p COMx flash monitor
+
+# Flash to target device and open serial monitor
+idf.py -p PORT flash monitor
 ```
-
-## Next Recommended Steps
-
-1. Tune `ARGUS_RAMP_RPM_PER_SEC_MILLI` after hardware testing
-2. Flash and verify the HMI on the controller AP at `192.168.4.1`
-3. Decide whether AP credentials should move out of source before production
-4. Decide whether the retained CAN path should be restored later
