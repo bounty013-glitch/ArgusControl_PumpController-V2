@@ -2,7 +2,11 @@
 
 ## Summary
 
-Phase 4B.1 delivers a credential-protected, read-only HTTP service portal for the Argus pump controller. The portal is accessible when the operator places the unit in Service/AP Discoverable mode, and provides real-time machine status, authority state, network diagnostics, and identity information through a dark-themed mobile-first web interface.
+Phase 4B.1 delivers a credential-protected HTTP service portal for the Argus pump controller. The portal is accessible when the operator places the unit in Service/AP Discoverable mode (or from the commissioned LAN — see DHR-001), and provides real-time machine status, authority state, network diagnostics, and identity information through a dark-themed mobile-first web interface. The portal includes an NVS-mutating password-change endpoint and is therefore not entirely read-only.
+
+**Closeout status: COMPLETE WITHIN OPERATOR-ACCEPTED DEVELOPMENT RISK SCOPE**
+
+See `DEFERRED_HARDENING_REGISTER.md` for the authoritative record of accepted security limitations.
 
 ---
 
@@ -30,16 +34,20 @@ Phase 4B.1 delivers a credential-protected, read-only HTTP service portal for th
 | `/` | GET | Basic Auth | Portal dashboard (or password-change page if default password active) |
 | `/api/status` | GET | Basic Auth | Machine state, speeds, authority, network, broker status as JSON |
 | `/api/identity` | GET | Basic Auth | Hardware UID, client/unit ID, firmware version, service SSID |
-| `/api/portal-password` | POST | Basic Auth | Change portal password (JSON body: `{"new_password":"..."}`) |
+| `/api/portal-password` | POST | Basic Auth | Change portal password (JSON body: `{"new_password":"..."}`) — NVS mutation |
+| `/change-password` | GET | Basic Auth | Voluntary password change page |
+| `/api/logout` | GET | None | Always returns 401 to clear browser auth cache |
 
 ### Credential Protection (Doc Block 8)
 
-- **Mechanism:** HTTP Basic Auth (`WWW-Authenticate: Basic realm="Argus Service Portal"`)
+- **Mechanism:** HTTP Basic Auth (`WWW-Authenticate: Basic realm="Argus Service Portal"`). This is interim access control, not encrypted transport (see DHR-002).
 - **Default credentials:** `admin` / `admin`
-- **Forced password change:** When default password is active, the portal serves a password-change page instead of the dashboard. The operator must change the password before accessing any portal content.
-- **Storage:** NVS namespace `argus_portal`, keys `pw` (password string) and `pw_set` (bool flag)
-- **Validation:** Min 4 chars, max 64 chars, cannot reuse "admin"
+- **Forced password change:** When the default password is active (NVS `pw_set != 1`), the portal handler serves a password-change page instead of the dashboard. All API endpoints remain accessible with default credentials during this window — the forced-change is a UI-level gate, not an API-level block. After password change, the default `admin` password is explicitly and permanently rejected by `check_auth()` (defense-in-depth).
+- **Default wipe:** After password change, `portal_get_credentials()` uses fail-closed logic. If `pw_set == 1` but the NVS password read fails, no valid password exists (empty string). The hardcoded default is never returned after `pw_set` is recorded.
+- **Storage:** NVS namespace `argus_portal`, keys `pw` (plaintext password string — see DHR-003) and `pw_set` (bool flag)
+- **Validation:** Min 4 chars (see DHR-005), max 64 chars, cannot reuse "admin"
 - **Re-authentication:** After password change, the browser's cached Basic Auth credentials become invalid, triggering the native browser re-authentication prompt
+- **Logout:** `GET /api/logout` always returns 401, clearing cached browser credentials
 - **Stack hygiene:** All credential buffers zeroed after use
 
 ### Security Properties
@@ -47,15 +55,18 @@ Phase 4B.1 delivers a credential-protected, read-only HTTP service portal for th
 | Property | Status |
 |----------|--------|
 | All endpoints require authentication | Yes |
-| Default password forced to change | Yes |
+| Default password forced to change (UI gate) | Yes |
+| Default password permanently rejected after change | Yes |
 | No secrets in API responses (passwords, AP credentials) | Yes |
 | JSON escape on all device-supplied values (prevents JSON injection) | Yes |
 | HTML escaping via JavaScript `h()` function (prevents DOM XSS) | Yes |
 | `X-Content-Type-Options: nosniff` on all responses | Yes |
 | `Cache-Control: no-store` on all responses | Yes |
 | Credential buffers zeroed on stack | Yes |
-| NVS password stored plaintext | Acceptable (ESP32 NVS, physical access = game over anyway) |
-| Basic Auth is base64 not encrypted | Acceptable (WPA2-PSK AP, direct connection) |
+| NVS password stored plaintext | Accepted for development (see DHR-003) |
+| Basic Auth over unencrypted HTTP | Accepted for development (see DHR-002) |
+| No authentication throttling | Accepted for development (see DHR-006) |
+| No CSRF tokens | Accepted for development (see DHR-007) |
 
 ---
 
@@ -67,15 +78,17 @@ The independent review required AP-interface enforcement to prevent STA-network 
 
 ### Approaches Attempted
 
-1. **`open_fn` + `getsockname()`** — lwip returns `0.0.0.0` (INADDR_ANY) for the local address on accepted sockets when the listener is bound to INADDR_ANY. Every connection was rejected.
+Three socket-level approaches were attempted in this project configuration. The observed behavior may differ in other lwip configurations, ESP-IDF versions, or socket usage patterns.
 
-2. **`open_fn` + `getpeername()`** — lwip also returns `0.0.0.0` for the peer address on the socket fd passed to the `open_fn` callback (connection not yet fully established at that point).
+1. **`open_fn` + `getsockname()`** — lwip returned `0.0.0.0` (INADDR_ANY) for the local address on accepted sockets when the listener was bound to INADDR_ANY.
 
-3. **Per-handler `httpd_req_to_sockfd()` + `getpeername()`** — lwip returns `0.0.0.0` even on the fully-established request socket. All connections received 403 Forbidden.
+2. **`open_fn` + `getpeername()`** — lwip returned `0.0.0.0` for the peer address on the socket fd passed to the `open_fn` callback.
+
+3. **Per-handler `httpd_req_to_sockfd()` + `getpeername()`** — lwip returned `0.0.0.0` on the fully-established request socket.
 
 ### Root Cause
 
-ESP-IDF's lwip implementation does not populate `sockaddr_in` peer/local addresses on accepted TCP sockets. This is a platform limitation, not a code bug. The standard BSD behavior (where `getpeername` returns the remote IP) is not implemented in lwip for ESP32.
+In this project configuration (ESP-IDF v5.5.3, ESP32-S3, lwip, `esp_http_server` with `INADDR_ANY` listener), lwip did not populate `sockaddr_in` peer/local addresses on accepted TCP sockets. Whether this applies universally to all ESP32/lwip configurations was not investigated.
 
 ### Resolution
 
@@ -186,13 +199,18 @@ If any `httpd_register_uri_handler()` call fails during `start()`, the server is
 - 57 passed, 0 failed
 - Production state: UNCHANGED across all dimensions
 
-### Portal Access Flow (Operator-Verified)
-1. Phone connected to Argus Service AP, DHCP assigned IP
+### Portal Access Flow (Operator-Verified, All Evidence Operator-Supplied)
+1. Phone connected to Argus Service AP, DHCP assigned IP `192.168.4.2`
 2. Browsed to `http://192.168.4.1`, browser prompted for credentials
-3. Entered `admin` / `admin`, password change page displayed
+3. Entered `admin` / `admin`, password-change page displayed
 4. Changed password, page reloaded, re-authenticated with new credentials
 5. Dashboard loaded with live machine status, authority, network, identity data
-6. Portal also accessible from LAN (STA interface) — credential-protected
+6. `/api/status` returned valid JSON — no configuration passwords or AP credentials observed
+7. `/api/identity` returned valid JSON — no passwords observed
+8. Portal intentionally accessible from controller's STA/LAN address (credential-protected)
+9. Dashboard loaded successfully from both phone (AP) and LAN-connected laptop (STA)
+10. Old browser authentication became invalid after password change
+11. Re-authentication with changed password succeeded
 
 ---
 
@@ -211,7 +229,10 @@ From the main diagnostic menu, press `N` then `4`.
 4. Change password on first access (required before portal loads)
 
 ### Password Reset
-The portal password is stored in NVS namespace `argus_portal`. To reset to defaults, erase NVS or flash with `--erase-otadata`. The next portal access will prompt for `admin`/`admin` again.
+The portal password is stored in NVS namespace `argus_portal`. To reset to defaults:
+- **Full NVS erase:** `idf.py erase-flash` or `nvs_flash_erase()` at boot — resets ALL NVS namespaces including portal credentials and commissioning config.
+- **Selective erase:** Not currently available. The portal credential namespace is separate from the commissioning namespace. `--erase-otadata` does NOT erase the portal credential namespace.
+- **Unified credential/factory-reset:** Not yet implemented (see DHR-008).
 
 ---
 
@@ -219,7 +240,22 @@ The portal password is stored in NVS namespace `argus_portal`. To reset to defau
 
 | Item | Phase | Description |
 |------|-------|-------------|
-| Configuration write via HTTP POST | 4B.2 | Write commissioning config through portal |
+| Configuration read/write via HTTP | 4B.2 | Read and write commissioning config through portal |
 | Service entry via HTTP POST | 4B.3 | `LOCAL_SERVICE`/`BROWSER` authority transfer |
-| WiFi station-list interface filtering | 4B.3 | Alternative to socket-level filtering (deferred from 4B.1) |
-| Portal configuration display | 4B.2 | Show current config (read-only, masked passwords) |
+| Local motion controls | 4B.3 | Start, stop, speed, E-stop via portal |
+| Security hardening | 4D | HTTPS, hashed credentials, throttling, CSRF, audit |
+
+See `DEFERRED_HARDENING_REGISTER.md` for the complete list of deferred security items.
+
+---
+
+## Closeout
+
+**Phase 4B.1 status: COMPLETE WITHIN OPERATOR-ACCEPTED DEVELOPMENT RISK SCOPE**
+
+This does not mean:
+- Production security approved
+- Internet exposure approved
+- Phase 4D hardening complete
+- Portal motion controls approved
+- Configuration secrets approved for transmission over untrusted networks

@@ -1,6 +1,6 @@
 /**
  * @file argus_http_server.c
- * @brief Controller-Hosted HTTP Server — Phase 4B.1 Read-Only Portal
+ * @brief Controller-Hosted HTTP Server — Phase 4B.1 Service Portal
  *
  * Architectural decisions:
  *
@@ -555,7 +555,7 @@ static const char PORTAL_HTML[] =
     "<button class=\"refresh-btn\" style=\"background:#3f3f46\" onclick=\"window.location='/change-password'\">Change Password</button>"
     "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
     "</div>"
-    "<div class=\"note\">Read-only portal. Generated speeds are not proof of physical shaft motion.</div>"
+    "<div class=\"note\">Service portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
     /* h() — HTML-escape to prevent DOM injection from device-supplied values */
     "function h(s){if(s==null)return'';"
