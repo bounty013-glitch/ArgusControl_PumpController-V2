@@ -33,6 +33,7 @@
 #include "argus_cmd_router.h"
 #include "argus_net_mgr.h"
 #include "argus_console_helpers.h"
+#include "argus_http_server.h"
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
 
@@ -894,7 +895,10 @@ void app_main(void)
     // 11. Register MQTT Broker Startup Callback with Network Manager
     argus_net_mgr_register_broker_start_cb(mqtt_broker_start);
 
-    // 12. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
+    // 12. Initialize HTTP Server Lifecycle Objects (once, firmware-lifetime)
+    ESP_ERROR_CHECK(argus_http_server_init());
+
+    // 13. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
     esp_err_t net_err = argus_net_mgr_init();
     if (net_err != ESP_OK) {
         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
@@ -911,5 +915,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4A startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4B startup completed successfully.");
 }

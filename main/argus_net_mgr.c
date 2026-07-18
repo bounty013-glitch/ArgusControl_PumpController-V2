@@ -10,6 +10,7 @@
 #include "argus_state_mgr.h"
 #include "argus_cmd_router.h"
 #include "argus_mqtt_broker.h"
+#include "argus_http_server.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -227,6 +228,12 @@ esp_err_t argus_net_mgr_init(void)
         esp_wifi_set_mode(WIFI_MODE_AP);
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_start();
+
+        /* Start HTTP server for commissioning portal (non-fatal) */
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in UNCOMMISSIONED_AP: %s", esp_err_to_name(http_err));
+        }
     } else {
         // Commissioned STA mode
         s_net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
@@ -302,6 +309,12 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
         // (WIFI_EVENT_AP_START) is the authoritative source.
         set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
         ESP_LOGI(TAG, "Service AP discoverability enabled cleanly in APSTA mode.");
+
+        /* Start HTTP server for read-only portal (non-fatal) */
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
+        }
     } else {
         ESP_LOGE(TAG, "Failed to enable Service AP: %s. Preserving COMMISSIONED_STA.", esp_err_to_name(err));
     }
@@ -622,6 +635,12 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
 
     set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
 
+    /* Stop HTTP server before tearing down network (non-fatal) */
+    esp_err_t http_stop_err = argus_http_server_stop();
+    if (http_stop_err != ESP_OK) {
+        ESP_LOGW(TAG, "HTTP server stop failed during service transition: %s", esp_err_to_name(http_stop_err));
+    }
+
     argus_cmd_router_unlock_dispatch();
     // ---- END FIRST DISPATCH GATE ----
 
@@ -744,6 +763,14 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     }
     argus_cmd_router_unlock_dispatch();
     // ---- END SECOND DISPATCH GATE ----
+
+    /* Start HTTP server in SERVICE_AP_ONLY (non-fatal) */
+    {
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in SERVICE_AP_ONLY: %s", esp_err_to_name(http_err));
+        }
+    }
 
 
     ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
