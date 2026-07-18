@@ -283,6 +283,10 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     esp_err_t readback_err = core->driver->read_slot(core->driver->ctx, inactive_slot, &verify_slot);
     if (readback_err != ESP_OK || !is_slot_valid(&verify_slot) ||
         memcmp(&verify_slot.payload, in_cfg, sizeof(argus_config_payload_t)) != 0) {
+        /* Readback verification failed. Invalidate the slot so a future
+         * init() cannot pick up the unverified higher-generation data.   */
+        argus_cfg_slot_t invalid_slot = {0};  /* valid_marker == 0 => invalid */
+        core->driver->write_slot(core->driver->ctx, inactive_slot, &invalid_slot);
         return ESP_ERR_INVALID_STATE;
     }
 
