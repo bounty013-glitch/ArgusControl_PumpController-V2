@@ -7,6 +7,13 @@ menu "Argus V2 Pump Controller Configuration"
             Enables automated unit testing and the interactive serial command menu on startup.
             WARNING: Diagnostic mode is for testing only. Keep disabled in production.
 
+    config ARGUS_SERVICE_AP_PASS
+        string "Shared Service AP WPA2 Password"
+        default ""
+        help
+            Shared internal Argus service AP password. Privately provisioned at build time.
+            Default is empty string; must be configured in untracked local sdkconfig (8..63 chars).
+
     config ARGUS_WIFI_SSID
         string "Wi-Fi SSID"
         default ""

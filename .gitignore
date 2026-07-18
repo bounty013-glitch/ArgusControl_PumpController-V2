@@ -3,6 +3,7 @@ build/
 managed_components/
 
 # Local SDK/config backups
+sdkconfig
 sdkconfig.old
 * backup.*
 
@@ -10,5 +11,6 @@ sdkconfig.old
 .vscode/
 *.swp
 *.swo
+*.log
 Thumbs.db
 Desktop.ini

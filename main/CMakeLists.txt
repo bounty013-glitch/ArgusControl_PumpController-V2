@@ -9,12 +9,19 @@ idf_component_register(
         "argus_trajectory.c"
         "argus_cmd_parser.c"
         "argus_state_mgr.c"
+        "argus_identity.c"
+        "argus_nvs_config.c"
+        "argus_authority_mgr.c"
+        "argus_cmd_router.c"
+        "argus_net_mgr.c"
+        "argus_tests_4a.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
         esp_event
         esp_netif
+        esp_app_format
         lwip
         nvs_flash
         esp_driver_gpio

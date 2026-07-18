@@ -25,28 +25,13 @@
 #include "argus_trajectory.h"
 #include "argus_cmd_parser.h"
 #include "argus_state_mgr.h"
+#include "argus_identity.h"
+#include "argus_nvs_config.h"
+#include "argus_authority_mgr.h"
+#include "argus_cmd_router.h"
+#include "argus_net_mgr.h"
+#include "argus_tests_4a.h"
 #include "argus_tests.h"
-
-// ================= APP CONFIG =================
-#define UNIT_NAME       "ArgusMotorTest"
-#define WIFI_HOST       "ArgusMotorTestNode"
-
-#ifdef CONFIG_ARGUS_WIFI_SSID
-#define WIFI_SSID       CONFIG_ARGUS_WIFI_SSID
-#else
-#define WIFI_SSID       ""
-#endif
-
-#ifdef CONFIG_ARGUS_WIFI_PASSWORD
-#define WIFI_PASS       CONFIG_ARGUS_WIFI_PASSWORD
-#else
-#define WIFI_PASS       ""
-#endif
-
-#define WIFI_AP_SSID    "ArgusMotorTest"
-#define WIFI_AP_PASS    ""                  // Default empty/non-secret AP password
-#define WIFI_AP_CHANNEL 6U
-#define WIFI_AP_MAX_CONN 4U
 
 #define MQTT_BROKER_PORT      1883U
 
@@ -64,9 +49,6 @@
 #define STATUS_ONLINE_TOPIC   MQTT_TOPIC_ROOT "/status/online"
 
 static const char *TAG = "argus_app_main";
-
-#define WIFI_STA_CONNECTED_BIT BIT0
-static EventGroupHandle_t wifi_event_group;
 
 // ================= TELEMETRY =================
 
@@ -95,7 +77,7 @@ static void publish_status(void)
     publish_status_topic(STATUS_RUN_TOPIC, payload, true);
 }
 
-// ================= COMMAND ARBITRATION =================
+// ================= COMMAND ARBITRATION VIA ROUTER =================
 
 static void handle_mqtt_command(const char *topic, const char *data, bool retain)
 {
@@ -105,6 +87,16 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
         ESP_LOGW(TAG, "Command rejected: Retained control payload ignored on topic %s", topic);
         return;
     }
+
+    argus_authority_snapshot_t snap;
+    argus_authority_mgr_get_snapshot(&snap);
+
+    argus_command_envelope_t env = {
+        .source = ARGUS_CMD_SRC_MQTT_SUPERVISORY,
+        .authority_generation = snap.generation,
+        .target_rpm_milli = 0,
+        .forward = true
+    };
 
     if (strcmp(topic, CMD_SPEED_PCT_TOPIC) == 0) {
         int pct = 0;
@@ -117,9 +109,14 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
         int32_t rpm_milli = cfg->min_output_milli_rpm + (pct * range) / 100;
         if (pct == 0) rpm_milli = 0;
 
-        esp_err_t err = argus_state_mgr_set_target(rpm_milli, true);
+        env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+        env.target_rpm_milli = rpm_milli;
+
+        esp_err_t err = argus_cmd_router_dispatch(&env);
         if (err == ESP_OK) {
             ESP_LOGI(TAG, "Setpoint updated: %d%% (%ld mRPM)", pct, (long)rpm_milli);
+        } else {
+            ESP_LOGW(TAG, "Setpoint dispatch rejected: %s", esp_err_to_name(err));
         }
         publish_status();
         return;
@@ -131,11 +128,8 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
             ESP_LOGW(TAG, "Command rejected: Malformed run payload: '%s'", data);
             return;
         }
-        if (run_val) {
-            argus_state_mgr_start();
-        } else {
-            argus_state_mgr_stop_normal();
-        }
+        env.command_type = run_val ? ARGUS_CMD_TYPE_START : ARGUS_CMD_TYPE_STOP_NORMAL;
+        argus_cmd_router_dispatch(&env);
         publish_status();
         return;
     }
@@ -147,7 +141,8 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
             return;
         }
         if (stop_val) {
-            argus_state_mgr_stop_normal();
+            env.command_type = ARGUS_CMD_TYPE_STOP_NORMAL;
+            argus_cmd_router_dispatch(&env);
         }
         publish_status();
         return;
@@ -159,12 +154,8 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
             ESP_LOGW(TAG, "Command rejected: Malformed e_stop payload: '%s'", data);
             return;
         }
-        if (estop_val) {
-            argus_state_mgr_estop();
-        } else {
-            // e_stop=false maps to reset_estop
-            argus_state_mgr_reset_estop();
-        }
+        env.command_type = estop_val ? ARGUS_CMD_TYPE_ESTOP : ARGUS_CMD_TYPE_RESET_ESTOP;
+        argus_cmd_router_dispatch(&env);
         publish_status();
         return;
     }
@@ -176,7 +167,8 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
             return;
         }
         if (reset_val) {
-            argus_state_mgr_reset_estop();
+            env.command_type = ARGUS_CMD_TYPE_RESET_ESTOP;
+            argus_cmd_router_dispatch(&env);
         }
         publish_status();
         return;
@@ -189,103 +181,12 @@ static void handle_mqtt_command(const char *topic, const char *data, bool retain
             return;
         }
         if (unlock_val) {
-            argus_state_mgr_unlock();
-        } else {
-            ESP_LOGI(TAG, "unlock=false payload parsed successfully: no-op.");
+            env.command_type = ARGUS_CMD_TYPE_UNLOCK;
+            argus_cmd_router_dispatch(&env);
         }
         publish_status();
         return;
     }
-}
-
-// ================= WIFI =================
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
-{
-    (void)arg;
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        if (strlen(WIFI_SSID) > 0) {
-            esp_wifi_connect();
-        }
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(wifi_event_group, WIFI_STA_CONNECTED_BIT);
-        if (strlen(WIFI_SSID) > 0) {
-            esp_wifi_connect();
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI("WIFI", "Station got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(wifi_event_group, WIFI_STA_CONNECTED_BIT);
-    }
-}
-
-static void wifi_start_access_point_and_station(void)
-{
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
-    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(wifi_event_group != NULL ? ESP_OK : ESP_ERR_NO_MEM);
-
-    esp_netif_ip_info_t ap_ip = {0};
-    IP4_ADDR(&ap_ip.ip, 192, 168, 4, 1);
-    IP4_ADDR(&ap_ip.gw, 192, 168, 4, 1);
-    IP4_ADDR(&ap_ip.netmask, 255, 255, 255, 0);
-    
-    esp_err_t dhcp_err = esp_netif_dhcps_stop(ap_netif);
-    if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
-        ESP_ERROR_CHECK(dhcp_err);
-    }
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ap_ip));
-    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
-
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
-
-    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
-        },
-    };
-
-    wifi_config_t ap_config = {
-        .ap = {
-            .channel = WIFI_AP_CHANNEL,
-            .max_connection = WIFI_AP_MAX_CONN,
-            .authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-
-    strlcpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
-    strlcpy((char *)ap_config.ap.ssid, WIFI_AP_SSID, sizeof(ap_config.ap.ssid));
-    strlcpy((char *)ap_config.ap.password, WIFI_AP_PASS, sizeof(ap_config.ap.password));
-    ap_config.ap.ssid_len = strlen(WIFI_AP_SSID);
-
-    if (strlen(WIFI_AP_PASS) == 0) {
-        ap_config.ap.authmode = WIFI_AUTH_OPEN;
-    }
-
-    ESP_ERROR_CHECK(esp_netif_set_hostname(sta_netif, WIFI_HOST));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI("WIFI", "Access Point and Station initialized.");
 }
 
 // ================= MQTT BROKER & POLICY SEAM =================
@@ -354,15 +255,17 @@ static void argus_diagnostic_menu_task(void *pvParameters)
         if (print_menu) {
             argus_state_snapshot_t snap;
             argus_state_mgr_get_snapshot(&snap);
+            argus_authority_snapshot_t auth_snap;
+            argus_authority_mgr_get_snapshot(&auth_snap);
 
             printf("\n");
             printf("===================================================\n");
             printf("=== Argus V2 Pump Controller Diagnostic Menu ===\n");
             printf("===================================================\n");
-            printf("Current State: [%s] Setpoint: [%ld mRPM] E-Stop: [%s]\n",
+            printf("Current State: [%s] Setpoint: [%ld mRPM] AuthMode: [%d] AuthOwner: [%d]\n",
                    argus_state_mgr_get_state_name(snap.machine_state),
                    (long)snap.configured_target_rpm_milli,
-                   snap.estop_latched ? "LATCHED" : "CLEAR");
+                   (int)auth_snap.mode, (int)auth_snap.owner);
             printf("[1] Set & Start 0.5 RPM (500 mRPM)\n");
             printf("[2] Set & Start 0.6 RPM (600 mRPM)\n");
             printf("[3] Set & Start 0.7 RPM (700 mRPM)\n");
@@ -377,8 +280,8 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[e] Software E-STOP (instant pulse halt, latches E-stop)\n");
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
-            printf("[t] Run PURE unit tests (mock backend, 0 hardware touch)\n");
-            printf("[H] Open HARDWARE ACCEPTANCE test submenu\n");
+            printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
+            printf("[H] Claim LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
             printf("Select option: ");
             fflush(stdout);
             print_menu = false;
@@ -395,68 +298,114 @@ static void argus_diagnostic_menu_task(void *pvParameters)
         printf("%c\n", c);
         print_menu = true;
 
+        argus_authority_snapshot_t auth_snap;
+        argus_authority_mgr_get_snapshot(&auth_snap);
+
+        if (c != 't') {
+            if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE || auth_snap.owner != ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI) {
+                printf("[CLI] Claiming LOCAL_SERVICE authority for Diagnostic CLI...\n");
+                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                argus_authority_mgr_get_snapshot(&auth_snap);
+            }
+        }
+
+        argus_command_envelope_t cli_env = {
+            .source = ARGUS_CMD_SRC_CLI_DIAGNOSTIC,
+            .authority_generation = auth_snap.generation,
+            .target_rpm_milli = 0,
+            .forward = true
+        };
+
         switch (c) {
             case '1':
-                argus_state_mgr_set_target(500, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 500;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '2':
-                argus_state_mgr_set_target(600, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 600;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '3':
-                argus_state_mgr_set_target(700, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 700;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '4':
-                argus_state_mgr_set_target(1000, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 1000;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '5':
-                argus_state_mgr_set_target(20000, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 20000;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '6':
-                argus_state_mgr_set_target(72000, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 72000;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '7':
-                argus_state_mgr_set_target(100000, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 100000;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case '8':
-                argus_state_mgr_set_target(200000, true);
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
+                cli_env.target_rpm_milli = 200000;
+                argus_cmd_router_dispatch(&cli_env);
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 'g':
-                printf("Issuing START command...\n");
-                argus_state_mgr_start();
+                cli_env.command_type = ARGUS_CMD_TYPE_START;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 's':
-                printf("Issuing STOP_NORMAL command...\n");
-                argus_state_mgr_stop_normal();
+                cli_env.command_type = ARGUS_CMD_TYPE_STOP_NORMAL;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 'u':
-                printf("Issuing UNLOCK command...\n");
-                argus_state_mgr_unlock();
+                cli_env.command_type = ARGUS_CMD_TYPE_UNLOCK;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 'e':
-                printf("Issuing E_STOP command...\n");
-                argus_state_mgr_estop();
+                cli_env.command_type = ARGUS_CMD_TYPE_ESTOP;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 'c':
-                printf("Issuing RESET_ESTOP command...\n");
-                argus_state_mgr_reset_estop();
+                cli_env.command_type = ARGUS_CMD_TYPE_RESET_ESTOP;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 'r':
-                printf("Issuing RECOVER command...\n");
-                argus_state_mgr_recover();
+                cli_env.command_type = ARGUS_CMD_TYPE_RECOVER;
+                argus_cmd_router_dispatch(&cli_env);
                 break;
             case 't':
-                printf("Running PURE unit tests (mock operations, zero hardware touch)...\n");
+                printf("Running Phase 3B PURE unit tests...\n");
                 argus_tests_run_all();
+                printf("Running Phase 4A PURE unit tests...\n");
+                argus_tests_4a_run_all();
                 break;
             case 'H':
+                printf("Claiming LOCAL_SERVICE authority for CLI...\n");
+                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
                 printf("Opening HARDWARE ACCEPTANCE test submenu...\n");
                 argus_tests_run_hardware_acceptance();
                 break;
@@ -472,37 +421,45 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 3B)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4A)...");
 
-    // 1. Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    // 1. Initialize Persistent Device Identity
+    ESP_ERROR_CHECK(argus_identity_init());
 
-    // 2. Initialize V2 Configuration
+    // 2. Initialize Power-Loss-Safe Dual-Slot NVS Configuration (production storage)
+    ESP_ERROR_CHECK(argus_nvs_config_init(NULL));
+
+    // 3. Initialize V2 Core Configuration
     ESP_ERROR_CHECK(argus_config_init());
     const argus_config_t *cfg = argus_config_get();
 
-    // 3. Initialize V2 GPTimer Step Generator
+    // 4. Initialize GPTimer Step Generator
     ESP_ERROR_CHECK(argus_step_gen_init(cfg));
 
-    // 4. Initialize V2 Trajectory Linear Ramp Engine
+    // 5. Initialize Trajectory Linear Ramp Engine
     ESP_ERROR_CHECK(argus_trajectory_init(cfg));
 
-    // 5. Initialize V2 Authoritative State Manager (using production motion ops)
+    // 6. Initialize Authoritative State Manager (using production motion ops)
     ESP_ERROR_CHECK(argus_state_mgr_init(cfg, NULL));
 
-    // 6. Arm & Start Step Generator & Trajectory Periodic Task
+    // 7. Initialize Exclusive Control Authority Manager
+    ESP_ERROR_CHECK(argus_authority_mgr_init());
+
+    // 8. Initialize Command Router Serialization Gate
+    ESP_ERROR_CHECK(argus_cmd_router_init());
+
+    // 9. Arm & Start Step Generator & Trajectory Periodic Task
     ESP_ERROR_CHECK(argus_step_gen_arm());
     ESP_ERROR_CHECK(argus_step_gen_start());
     ESP_ERROR_CHECK(argus_trajectory_task_start());
 
-    // Start networking and broker under concurrent load
-    wifi_start_access_point_and_station();
-    mqtt_broker_start();
+    // 10. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
+    esp_err_t net_err = argus_net_mgr_init();
+    if (net_err == ESP_OK) {
+        mqtt_broker_start();
+    } else {
+        ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
+    }
 
     // Launch background tasks
     xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
@@ -510,5 +467,5 @@ void app_main(void)
     xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 3B startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4A startup completed successfully.");
 }
