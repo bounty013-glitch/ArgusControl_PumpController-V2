@@ -104,22 +104,35 @@ static bool              s_initialized = false;
  */
 static void portal_get_credentials(char *out_pw, bool *out_is_default)
 {
-    /* Defaults */
-    strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
-    out_pw[PORTAL_MAX_PW_LEN] = '\0';
+    out_pw[0] = '\0';
     *out_is_default = true;
 
     nvs_handle_t nvs;
-    if (nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        size_t len = PORTAL_MAX_PW_LEN + 1;
-        if (nvs_get_str(nvs, PORTAL_NVS_KEY_PW, out_pw, &len) == ESP_OK) {
-            uint8_t pw_set = 0;
-            if (nvs_get_u8(nvs, PORTAL_NVS_KEY_PW_SET, &pw_set) == ESP_OK && pw_set == 1) {
-                *out_is_default = false;
-            }
-        }
-        nvs_close(nvs);
+    if (nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        /* No NVS namespace yet = first boot, use default */
+        strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
+        out_pw[PORTAL_MAX_PW_LEN] = '\0';
+        return;
     }
+
+    /* Check if password has ever been changed */
+    uint8_t pw_set = 0;
+    nvs_get_u8(nvs, PORTAL_NVS_KEY_PW_SET, &pw_set);
+
+    if (pw_set == 1) {
+        *out_is_default = false;
+        /* Read the stored password. If this fails, out_pw stays empty (fail closed) */
+        size_t len = PORTAL_MAX_PW_LEN + 1;
+        if (nvs_get_str(nvs, PORTAL_NVS_KEY_PW, out_pw, &len) != ESP_OK) {
+            ESP_LOGE(TAG, "pw_set=1 but password read failed - fail closed");
+            out_pw[0] = '\0';
+        }
+    } else {
+        /* No password change recorded, use default */
+        strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
+        out_pw[PORTAL_MAX_PW_LEN] = '\0';
+    }
+    nvs_close(nvs);
 }
 
 /**
@@ -190,6 +203,14 @@ static bool check_auth(httpd_req_t *req)
     char stored_pw[PORTAL_MAX_PW_LEN + 1];
     bool is_default;
     portal_get_credentials(stored_pw, &is_default);
+
+    /* Defense-in-depth: after password change, the hardcoded default
+     * is permanently blocked regardless of NVS state */
+    if (!is_default && strcmp(password, PORTAL_DEFAULT_PASS) == 0) {
+        memset(stored_pw, 0, sizeof(stored_pw));
+        memset(decoded, 0, sizeof(decoded));
+        goto unauthorized;
+    }
 
     bool match = (strcmp(password, stored_pw) == 0);
     memset(stored_pw, 0, sizeof(stored_pw));  /* clear from stack */
@@ -530,6 +551,10 @@ static const char PORTAL_HTML[] =
     "<div id=\"identity-rows\">Loading...</div>"
     "</div>"
     "<button class=\"refresh-btn\" onclick=\"refresh()\">Refresh Status</button>"
+    "<div style=\"display:flex;gap:8px;margin-top:8px\">"
+    "<button class=\"refresh-btn\" style=\"background:#3f3f46\" onclick=\"window.location='/change-password'\">Change Password</button>"
+    "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
+    "</div>"
     "<div class=\"note\">Read-only portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
     /* h() — HTML-escape to prevent DOM injection from device-supplied values */
@@ -582,6 +607,102 @@ static const char PORTAL_HTML[] =
     "</body>"
     "</html>";
 
+/* ── File-scope password change page HTML ────────────────────────── */
+
+static const char PW_CHANGE_HTML[] =
+    "<!DOCTYPE html>"
+    "<html lang=\"en\"><head>"
+    "<meta charset=\"UTF-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Argus \xe2\x80\x94 Change Password</title>"
+    "<style>"
+    "*{margin:0;padding:0;box-sizing:border-box}"
+    "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
+    "background:#0f1117;color:#e4e4e7;min-height:100vh;display:flex;"
+    "align-items:center;justify-content:center;padding:16px}"
+    ".card{background:#1a1b23;border:1px solid #27272a;border-radius:12px;"
+    "padding:24px;width:100%;max-width:380px}"
+    "h1{font-size:1.1rem;color:#a78bfa;margin-bottom:4px}"
+    ".warn{background:#451a03;color:#fbbf24;padding:10px 12px;border-radius:8px;"
+    "font-size:0.8rem;margin:12px 0}"
+    "label{display:block;font-size:0.8rem;color:#a1a1aa;margin:12px 0 4px}"
+    "input{width:100%;padding:10px;background:#27272a;border:1px solid #3f3f46;"
+    "border-radius:8px;color:#e4e4e7;font-size:0.9rem}"
+    "input:focus{outline:none;border-color:#7c3aed}"
+    ".btn{background:#7c3aed;color:#fff;border:none;border-radius:8px;"
+    "padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;"
+    "width:100%;margin-top:16px;transition:background 0.15s}"
+    ".btn:active{background:#6d28d9}"
+    ".btn:disabled{background:#3f3f46;cursor:not-allowed}"
+    "#msg{font-size:0.8rem;margin-top:8px;min-height:1.2em}"
+    ".ok{color:#34d399}.err{color:#f87171}"
+    "</style></head><body>"
+    "<div class=\"card\">"
+    "<h1>&#9670; Argus Service Portal</h1>"
+    "<div class=\"warn\">Change your portal password below.</div>"
+    "<label for=\"pw1\">New Password (min 4 characters)</label>"
+    "<input type=\"password\" id=\"pw1\" autocomplete=\"new-password\">"
+    "<label for=\"pw2\">Confirm New Password</label>"
+    "<input type=\"password\" id=\"pw2\" autocomplete=\"new-password\">"
+    "<button class=\"btn\" id=\"btn\" onclick=\"submit()\">Change Password</button>"
+    "<div id=\"msg\"></div>"
+    "</div>"
+    "<script>"
+    "function submit(){"
+    "var p1=document.getElementById('pw1').value;"
+    "var p2=document.getElementById('pw2').value;"
+    "var msg=document.getElementById('msg');"
+    "var btn=document.getElementById('btn');"
+    "if(p1.length<4){msg.className='err';msg.textContent='Password must be at least 4 characters';return}"
+    "if(p1!==p2){msg.className='err';msg.textContent='Passwords do not match';return}"
+    "if(p1==='admin'){msg.className='err';msg.textContent='Cannot reuse default password';return}"
+    "btn.disabled=true;btn.textContent='Saving...';"
+    "fetch('/api/portal-password',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({new_password:p1})})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.ok){msg.className='ok';msg.textContent='Password changed. Reloading...';"
+    "setTimeout(()=>{window.location.href='/'},1500)}"
+    "else{msg.className='err';msg.textContent=d.error||'Failed';btn.disabled=false;btn.textContent='Change Password'}"
+    "}).catch(e=>{msg.className='err';msg.textContent='Network error';btn.disabled=false;btn.textContent='Change Password'})}"
+    "</script></body></html>";
+
+/* ── GET /change-password handler ────────────────────────────────── */
+
+static esp_err_t change_password_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_send(req, PW_CHANGE_HTML, sizeof(PW_CHANGE_HTML) - 1);
+    return ESP_OK;
+}
+
+/* ── GET /api/logout handler ─────────────────────────────────────── */
+
+static esp_err_t logout_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"Argus Service Portal\"");
+    httpd_resp_sendstr(req,
+        "<!DOCTYPE html><html><head>"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<style>body{background:#0f1117;color:#e4e4e7;font-family:-apple-system,sans-serif;"
+        "display:flex;align-items:center;justify-content:center;min-height:100vh}"
+        ".card{background:#1a1b23;border:1px solid #27272a;border-radius:12px;padding:24px;"
+        "text-align:center;max-width:320px}"
+        "h2{color:#a78bfa;font-size:1rem;margin-bottom:8px}"
+        "p{color:#a1a1aa;font-size:0.85rem;margin-bottom:12px}"
+        "a{color:#7c3aed;text-decoration:none}</style></head><body>"
+        "<div class=\"card\"><h2>Logged Out</h2>"
+        "<p>Your session has been cleared.</p>"
+        "<a href=\"/\">Log in again</a></div></body></html>");
+    return ESP_OK;
+}
+
 static esp_err_t portal_get_handler(httpd_req_t *req)
 {
     if (!check_auth(req)) return ESP_OK;
@@ -602,65 +723,6 @@ static esp_err_t portal_get_handler(httpd_req_t *req)
 
     if (is_default) {
         /* Send password change page instead of portal */
-        static const char PW_CHANGE_HTML[] =
-            "<!DOCTYPE html>"
-            "<html lang=\"en\"><head>"
-            "<meta charset=\"UTF-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            "<title>Argus — Change Password</title>"
-            "<style>"
-            "*{margin:0;padding:0;box-sizing:border-box}"
-            "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
-            "background:#0f1117;color:#e4e4e7;min-height:100vh;display:flex;"
-            "align-items:center;justify-content:center;padding:16px}"
-            ".card{background:#1a1b23;border:1px solid #27272a;border-radius:12px;"
-            "padding:24px;width:100%;max-width:380px}"
-            "h1{font-size:1.1rem;color:#a78bfa;margin-bottom:4px}"
-            ".warn{background:#451a03;color:#fbbf24;padding:10px 12px;border-radius:8px;"
-            "font-size:0.8rem;margin:12px 0}"
-            "label{display:block;font-size:0.8rem;color:#a1a1aa;margin:12px 0 4px}"
-            "input{width:100%;padding:10px;background:#27272a;border:1px solid #3f3f46;"
-            "border-radius:8px;color:#e4e4e7;font-size:0.9rem}"
-            "input:focus{outline:none;border-color:#7c3aed}"
-            ".btn{background:#7c3aed;color:#fff;border:none;border-radius:8px;"
-            "padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;"
-            "width:100%;margin-top:16px;transition:background 0.15s}"
-            ".btn:active{background:#6d28d9}"
-            ".btn:disabled{background:#3f3f46;cursor:not-allowed}"
-            "#msg{font-size:0.8rem;margin-top:8px;min-height:1.2em}"
-            ".ok{color:#34d399}.err{color:#f87171}"
-            "</style></head><body>"
-            "<div class=\"card\">"
-            "<h1>&#9670; Argus Service Portal</h1>"
-            "<div class=\"warn\">&#9888; Default password detected. You must change "
-            "your password before accessing the portal.</div>"
-            "<label for=\"pw1\">New Password (min 4 characters)</label>"
-            "<input type=\"password\" id=\"pw1\" autocomplete=\"new-password\">"
-            "<label for=\"pw2\">Confirm New Password</label>"
-            "<input type=\"password\" id=\"pw2\" autocomplete=\"new-password\">"
-            "<button class=\"btn\" id=\"btn\" onclick=\"submit()\">Change Password</button>"
-            "<div id=\"msg\"></div>"
-            "</div>"
-            "<script>"
-            "function submit(){"
-            "var p1=document.getElementById('pw1').value;"
-            "var p2=document.getElementById('pw2').value;"
-            "var msg=document.getElementById('msg');"
-            "var btn=document.getElementById('btn');"
-            "if(p1.length<4){msg.className='err';msg.textContent='Password must be at least 4 characters';return}"
-            "if(p1!==p2){msg.className='err';msg.textContent='Passwords do not match';return}"
-            "if(p1==='admin'){msg.className='err';msg.textContent='Cannot reuse default password';return}"
-            "btn.disabled=true;btn.textContent='Saving...';"
-            "fetch('/api/portal-password',{method:'POST',"
-            "headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({new_password:p1})})"
-            ".then(r=>r.json()).then(d=>{"
-            "if(d.ok){msg.className='ok';msg.textContent='Password changed. Reloading...';"
-            "setTimeout(()=>{window.location.href='/'},1500)}"
-            "else{msg.className='err';msg.textContent=d.error||'Failed';btn.disabled=false;btn.textContent='Change Password'}"
-            "}).catch(e=>{msg.className='err';msg.textContent='Network error';btn.disabled=false;btn.textContent='Change Password'})}"
-            "</script></body></html>";
-
         httpd_resp_send(req, PW_CHANGE_HTML, sizeof(PW_CHANGE_HTML) - 1);
         return ESP_OK;
     }
@@ -792,6 +854,20 @@ static const httpd_uri_t uri_password = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t uri_change_password = {
+    .uri       = "/change-password",
+    .method    = HTTP_GET,
+    .handler   = change_password_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_logout = {
+    .uri       = "/api/logout",
+    .method    = HTTP_GET,
+    .handler   = logout_handler,
+    .user_ctx  = NULL
+};
+
 /* ── Lifecycle implementation ────────────────────────────────────── */
 
 esp_err_t argus_http_server_init(void)
@@ -856,7 +932,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 8;
+    config.max_uri_handlers   = 10;
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -884,6 +960,10 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_portal);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_password);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_change_password);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_logout);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);
