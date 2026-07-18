@@ -1,87 +1,202 @@
-# Phase 4A Runtime Acceptance Record
+# Phase 4A Runtime Acceptance Evidence
 
-## Status Overview
+## Source Identification
 
-- **Scenario A (Uncommissioned AP Mode)**: `COMPLETE — PHYSICALLY VERIFIED`
-- **Scenario B (STA Commissioning & NVS Persistence)**: `COMPLETE — PHYSICALLY VERIFIED`
-- **Scenario C (Service AP Discoverability & Dual-Interface Coexistence)**: `COMPLETE — PHYSICALLY VERIFIED`
-- **Scenario D (Coordinated Service AP Transition & MQTT Shutdown)**: `NOT STARTED — AWAITING SHAWN`
+- **Branch:** `phase4a-hardening-audit`
+- **HEAD at flash:** `c68ff24`
+- **App version:** `v2-phase4a-dev`
+- **ESP-IDF:** v5.5.3
+- **Target:** ESP32-S3
 
----
+## Verification Source
 
-## Scenario C Verification Evidence
-
-On-device physical verification performed on ESP32-S3 target hardware running `v2-phase4a-dev`.
-
-### 1. Service AP Association Log
-```text
-wifi:station: ae:49:7b:08:5b:23 join, AID=1, bgn, 20
-esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
-```
-
-### 2. Network and Authority Snapshot
-```text
-Network Mode        : AP_DISCOVERABLE (3)
-Wi-Fi Driver Mode   : APSTA
-STA Status          : CONNECTED (IP Acquired)
-Service AP Status   : ENABLED
-MQTT Broker Status  : READY
-Authority Mode      : SUPERVISORY (1)
-Authority Owner     : MQTT (1)
-Authority Generation: 2
-```
-
-### 3. Non-Mutating Permission Probes
-- **Browser-Source Permission Probe**:
-  ```text
-  Probing Browser-source authority (gen 2)...
-  [REJECTED: ESP_ERR_INVALID_STATE (259)]
-  State Invariance Check: PASSED (15/15 fields unchanged)
-  ```
-- **MQTT-Source Permission Probe**:
-  ```text
-  Probing MQTT-source authority (gen 2)...
-  [ACCEPTED]
-  State Invariance Check: PASSED (15/15 fields unchanged)
-  ```
+All runtime evidence was supplied by the operator via physical serial
+monitor observation. No runtime results were inferred, simulated, or
+claimed by tooling.
 
 ---
 
-## Scenario C Acceptance Conclusions
+## 1. Pure Non-Motion Unit Tests
 
-All of the following acceptance requirements have been physically verified on hardware:
-1. Service AP was discoverable and visible.
-2. WPA2 authentication succeeded.
-3. Client phone associated successfully.
-4. Service AP DHCP assigned `192.168.4.2`.
-5. Wi-Fi driver operated in `APSTA` dual mode.
-6. Commissioned STA interface remained connected with an acquired IP.
-7. Embedded MQTT broker remained ready and operational.
-8. Authority mode remained exclusively `SUPERVISORY/MQTT`.
-9. Authority generation remained unchanged at generation 2.
-10. AP association did not transfer command authority.
-11. Browser-source motion command authority was rejected.
-12. MQTT-source command authority remained accepted.
-13. Both permission probes were non-mutating.
-14. The "one pump, one command authority" doctrine remained 100% intact during AP discoverability.
+**Status: PHYSICALLY EXECUTED -- PASSED**
 
-**Scenario C Status**: `COMPLETE — PHYSICALLY VERIFIED`
+### Phase 3B Pure Tests
+
+| Item                  | Result  |
+|-----------------------|---------|
+| Strict Command Parser | PASSED  |
+| State Core Permissions| PASSED  |
+| Error Propagation     | PASSED  |
+| Singleton Isolation   | PASSED  |
+
+### Phase 4A Pure Tests
+
+| Item                  | Value   |
+|-----------------------|---------|
+| Distinct test cases   | 18      |
+| Repeat passes         | 3       |
+| Total executions      | 54      |
+| Passed executions     | 54      |
+| Failed executions     | 0       |
+
+### Production Isolation (Read-Only Proof)
+
+| Observable              | Result              |
+|-------------------------|---------------------|
+| Authority Generation    | UNCHANGED (Gen 2)   |
+| Network State           | UNCHANGED (COMMISSIONED_STA) |
+| MQTT Broker State       | UNCHANGED (RUNNING) |
+| Machine State           | UNCHANGED (UNLOCKED)|
+| Task Count              | UNCHANGED (14)      |
+
+No panic, watchdog event, unintended reboot, or production-state
+mutation was observed during any test execution.
 
 ---
 
-## Pre-Scenario D Test Isolation & Service Orchestration Hardening
+## 2. AP Discoverability (Scenario Step 2)
 
-- **Previous Physical Execution Result**:
-  - 17/18 distinct Phase 4A cases passed
-  - 51/54 total executions passed
-  - 1 distinct case (`test_nvs_dual_slot_atomic_write_readback`) failed in all 3 repeat passes due to unassigned active config payload copy in test seam.
-- **Hardening & Isolation Applied**:
-  - Encapsulated command-dispatch serialization barrier (`argus_cmd_router_lock_dispatch()` / `unlock_dispatch()`).
-  - Private authority core encapsulation (`argus_authority_core_t`) and `argus_service_authority_ops_t` seam.
-  - Complete 14-step synchronous orchestrator (`argus_net_mgr_orchestrate_service_entry()`) with strict action -> verification ordering, bounded polling timeouts, and fail-closed error preservation used identically in production and unit tests.
-  - Full-fidelity 23-field read-only production snapshot comparison (`compare_prod_snapshots()`) with diff logging and explicit `PHASE 4A PURE UNIT TEST SUITE: PASSED/FAILED` result.
-  - 100% stack-local caller-owned mock NVS contexts (`mock_nvs_store_t`) and verified payload readback assignment in `argus_nvs_core_commit()`.
-- **Final Uncontested Build Evidence**:
-  - Binary Size: `0xcfaa0` (850,592 bytes)
-  - Status: `HARDENING IMPLEMENTED AND COMPILED — PENDING SHAWN'S RUNTIME TEST`
-- **Scenario D Status**: `NOT STARTED — PENDING SHAWN'S RUNTIME TEST`
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+Starting conditions: COMMISSIONED_STA, SUPERVISORY/MQTT, UNLOCKED.
+
+Menu path: `N` -> `4` (enable service AP) -> `2` (snapshot).
+
+| Observable              | Expected            | Observed            |
+|-------------------------|---------------------|---------------------|
+| Network Mode            | AP_DISCOVERABLE     | AP_DISCOVERABLE (3) |
+| Wi-Fi Driver Mode       | APSTA               | APSTA               |
+| STA Status              | CONNECTED w/ IP     | CONNECTED (IP Acquired) |
+| Service AP Status       | ENABLED             | ENABLED             |
+| MQTT Broker Status      | READY or RUNNING    | READY               |
+| Authority Mode          | SUPERVISORY         | SUPERVISORY (1)     |
+| Authority Owner         | MQTT                | MQTT (1)            |
+
+DHCP server started on AP interface (192.168.4.1). No authority transfer
+occurred from phone connection to Service AP.
+
+---
+
+## 3. Stopped-State Service Entry (Scenario Step 3)
+
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+Menu path: `5` (request LOCAL_SERVICE as diagnostic CLI).
+
+### Authority Transition Sequence
+
+| Step | Transition                                        |
+|------|---------------------------------------------------|
+| 1    | SUPERVISORY/MQTT -> SERVICE_TRANSITION/NONE (gen 3) |
+| 2    | Controlled normal stop requested                  |
+| 3    | Stopped state verified                            |
+| 4    | MQTT broker shut down cleanly                     |
+| 5    | MQTT server task exited cleanly                   |
+| 6    | STA disconnected (run -> init)                    |
+| 7    | STA IP released                                   |
+| 8    | Wi-Fi changed from APSTA to softAP only           |
+| 9    | AP-only state verified                            |
+| 10   | Machine safety revalidated                        |
+| 11   | SERVICE_TRANSITION/NONE -> LOCAL_SERVICE/DIAGNOSTIC_CLI (gen 4) |
+
+### Absence of Failure Conditions
+
+- No deadlock
+- No timeout
+- No panic
+- No watchdog event
+- No unintended reboot
+- No broker lifecycle errors
+- No duplicate broker tasks
+- No authority-generation rejection
+- Service AP remained active throughout
+
+---
+
+## 4. Local Service State Verification (Scenario Step 4)
+
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+| Observable              | Expected            | Observed              |
+|-------------------------|---------------------|-----------------------|
+| Network Mode            | SERVICE_AP_ONLY     | SERVICE_AP_ONLY (5)   |
+| Wi-Fi Driver Mode       | AP                  | AP                    |
+| STA Status              | DISCONNECTED        | DISABLED              |
+| Service AP Status       | ENABLED             | ENABLED               |
+| MQTT Broker Status      | STOPPED             | STOPPED               |
+| Authority Mode          | LOCAL_SERVICE       | LOCAL_SERVICE (3)     |
+| Authority Owner         | DIAGNOSTIC_CLI      | DIAGNOSTIC_CLI (3)    |
+| Authority Generation    | 4                   | 4                     |
+
+---
+
+## 5. Non-Owner Rejection (Scenario Step 5)
+
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+Authority during test: LOCAL_SERVICE/DIAGNOSTIC_CLI (gen 4).
+
+| Probe                | Result                        | State Invariance       |
+|----------------------|-------------------------------|------------------------|
+| MQTT-source (option 6)   | REJECTED (ESP_ERR_INVALID_STATE) | PASSED (15/15 fields) |
+| Browser-source (option 7)| REJECTED (ESP_ERR_INVALID_STATE) | PASSED (15/15 fields) |
+
+Neither probe started motion, changed the setpoint, changed authority,
+changed network state, or mutated any production state.
+
+---
+
+## 6. Service Exit and Reboot (Scenario Step 6)
+
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+Menu path: `X` -> `y` (confirm exit).
+
+### Exit Transition Sequence
+
+| Step | Transition                                            |
+|------|-------------------------------------------------------|
+| 1    | Ownership validated: LOCAL_SERVICE/DIAGNOSTIC_CLI     |
+| 2    | SERVICE_AP_ONLY -> SERVICE_TRANSITION                 |
+| 3    | LOCAL_SERVICE/DIAGNOSTIC_CLI -> SERVICE_TRANSITION/NONE (gen 5) |
+| 4    | Controlled stop requested and verified                |
+| 5    | SERVICE_TRANSITION/NONE -> NONE/NONE (gen 6)          |
+| 6    | Intentional reboot (RTC_SW_CPU_RST)                   |
+
+---
+
+## 7. Post-Reboot Recovery (Scenario Step 7)
+
+**Status: PHYSICALLY VERIFIED -- PASSED**
+
+| Observable              | Expected            | Observed              |
+|-------------------------|---------------------|-----------------------|
+| Reset reason            | RTC_SW_CPU_RST      | RTC_SW_CPU_RST        |
+| NVS configuration       | VALID, COMMISSIONED | Slot A: gen=2, valid=YES, Commissioned: YES |
+| Network Mode            | COMMISSIONED_STA    | COMMISSIONED_STA      |
+| STA Status              | CONNECTED w/ IP     | Connected (192.168.50.236) |
+| MQTT Broker Status      | RUNNING             | Listening on port 1883|
+| Authority Mode          | SUPERVISORY         | SUPERVISORY           |
+| Authority Owner         | MQTT                | MQTT                  |
+| Authority Generation    | 2                   | 2 (fresh boot)        |
+| Machine State           | UNLOCKED            | UNLOCKED              |
+
+### Post-Reboot Health
+
+- Exactly one MQTT broker server task active
+- No repeated broker lifecycle errors
+- No watchdog, panic, or unintended reset
+- Periodic status logging: OFF
+- Diagnostic menu rendered correctly
+
+---
+
+## Remaining Unverified Scenarios
+
+| Scenario                                    | Status  |
+|---------------------------------------------|---------|
+| Active-motion controlled-stop service entry | PENDING |
+| Remaining Phase 4A acceptance scenarios     | PENDING |
+
+The final Phase 4A hardware-verification tag must not be created until
+all remaining scenarios are physically verified.
