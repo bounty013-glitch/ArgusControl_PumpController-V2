@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status: 4B.1 IMPLEMENTED — REVIEW PENDING**
+**Status: **4B.1 COMPLETE — OPERATOR ACCEPTED****
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -97,26 +97,41 @@ Four blocking findings were identified in independent review and corrected:
 
 **Root cause:** `status_get_handler` called `argus_net_mgr_get_snapshot()` which
 takes `s_net_mutex`. `request_service()` called `argus_http_server_stop()` while
-holding `s_net_mutex`. `httpd_stop()` waits for active handlers → deadlock.
+holding `s_net_mutex`. `httpd_stop()` waits for active handlers -> deadlock.
 
-**Primary fix:** Handler replaced `argus_net_mgr_get_snapshot()` with lock-free
-query functions (`argus_net_mgr_get_mode()`, `is_sta_connected()`, etc.) that
-do not take `s_net_mutex`. The handler never contends with the network manager.
+**Fix (first review):** Handler replaced `argus_net_mgr_get_snapshot()` with
+lock-free query functions. HTTP start/stop moved outside `s_net_mutex`.
 
-**Defense in depth:** All HTTP start/stop calls in `argus_net_mgr.c` moved
-outside `s_net_mutex`. In `request_service()`, the mutex is temporarily released
-after setting `SERVICE_TRANSITION` (no concurrent mode writer can proceed in
-that state) and re-acquired after `httpd_stop()` returns.
+**Fix (second review):** `argus_net_mgr_get_snapshot()` restored in the handler
+because HTTP stop is now outside `s_net_mutex` (handler can safely take it).
+Lock-free queries removed as they constituted a data race.
 
-### C2. Service Portal STA Reachability (Finding 2)
+### C2. Service Portal Access Control (Finding 2)
 
 **Root cause:** In APSTA mode, `esp_http_server` binds to `INADDR_ANY:80`,
 accepting connections through both AP and STA interfaces.
 
-**Fix:** Added `open_fn` session callback (`http_session_open`) that compares
-the socket's local address (`getsockname`) to the AP netif IP
-(`esp_netif_get_ip_info` on `WIFI_AP_DEF`). Connections arriving on any
-non-AP interface are rejected before any handler executes.
+**Attempted fix 1:** `open_fn` session callback using `getsockname()` to compare
+local address to AP netif IP. **Failed:** lwip returns `0.0.0.0` for
+`getsockname()` on accepted sockets bound to `INADDR_ANY`.
+
+**Attempted fix 2:** `open_fn` using `getpeername()` for client IP subnet check.
+**Failed:** lwip also returns `0.0.0.0` for `getpeername()` in the `open_fn`
+callback (connection not yet fully established).
+
+**Attempted fix 3:** Per-handler check using `httpd_req_to_sockfd()` +
+`getpeername()`. **Failed:** lwip returns `0.0.0.0` even on the fully-established
+request socket. This is a platform limitation — ESP-IDF's lwip does not populate
+peer/local addresses on accepted TCP sockets.
+
+**Final fix:** HTTP Basic Auth credential protection. All endpoints require
+`Authorization: Basic` header. Default credentials `admin`/`admin` with forced
+password change on first access. Password stored in NVS namespace `argus_portal`.
+This is stronger than subnet filtering (credentials vs. network position) and
+works regardless of interface. See `PHASE_4B1_WALKTHROUGH.md` for full details.
+
+**Operator acceptance:** LAN-accessible portal access accepted as useful during
+development. Credential protection is the preferred long-term approach.
 
 ### C3. Unsafe Browser Rendering / DOM Injection (Finding 3)
 
@@ -145,8 +160,10 @@ which is the safest behavior for an unknown state.
 - URI handler registration checked with rollback on failure.
 - Removed stale "bounded" shutdown claim from header doc.
 - Exposed `json_escape` as test seam (`argus_http_test_json_escape`).
-- Added 3 pure tests: json_escape safety, lifecycle observation, secret exclusion.
-- Test count updated: 21 distinct test cases (18 Phase 4A + 3 Phase 4B.1).
+- Added 1 pure test: json_escape safety (8 edge cases).
+- Removed 2 non-pure tests (lifecycle observation, secret exclusion) during
+  second review — these read live singletons/NVS, not stack-local pure.
+- Test count: 19 distinct test cases (18 Phase 4A + 1 Phase 4B.1).
 
 ---
 
@@ -435,6 +452,9 @@ intent from physical motor movement:
 
 | Control | Value |
 |---|---|
+| **HTTP Basic Auth** | **All endpoints require `Authorization: Basic` header** |
+| **Default credentials** | **`admin`/`admin`, forced password change on first access** |
+| **Credential storage** | **NVS namespace `argus_portal`, keys `pw` and `pw_set`** |
 | Max request body | 1024 bytes |
 | Max field length | Per NVS constants (CLIENT_ID: 32, SSID: 32, etc.) |
 | Content-Type | `application/json` required for all POST |
@@ -445,8 +465,10 @@ intent from physical motor movement:
 | Duplicate requests | Reject if transition in progress |
 | Cache-Control | `no-store` for config and authority responses |
 | Password masking | `argus_nvs_config_mask()` on all GET config responses |
+| Credential hygiene | All credential buffers zeroed after use |
 | AP security | WPA2-PSK, single client, no open fallback |
 | WAN exposure | None — AP-only, no routing, no Internet gateway |
+| Interface filtering | **Deferred** (lwip platform limitation, see C2) |
 
 ### Deferred to Phase 4D
 
@@ -463,17 +485,18 @@ intent from physical motor movement:
 
 | Method | URI | Allowed Modes | Required Authority | Request | Response | Mutation | Idempotent | Failure Codes | Secret Rule |
 |---|---|---|---|---|---|---|---|---|---|
-| GET | `/` | UNCOMM, AP_DISC, SVC_AP | Any | None | HTML portal | No | Yes | 200 | None |
-| GET | `/api/status` | UNCOMM, AP_DISC, SVC_AP | Any | None | JSON status | No | Yes | 200, 500 | None |
-| GET | `/api/identity` | UNCOMM, AP_DISC, SVC_AP | Any | None | JSON identity | No | Yes | 200, 500 | None |
-| GET | `/api/config` | UNCOMM, AP_DISC, SVC_AP | Any | None | JSON masked config | No | Yes | 200, 500 | Password masked |
-| POST | `/api/config/stage` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | JSON fields | JSON result | RAM only | No | 200, 400, 403 | Password write-only |
-| POST | `/api/config/validate` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON validation | No | Yes | 200, 400, 403 | None |
-| POST | `/api/config/apply` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON + reboot | NVS commit | No | 200, 400, 403, 500 | Password committed |
-| POST | `/api/service/enter` | AP_DISC | Any (becomes BROWSER) | None | JSON result | Auth transition | No | 200, 409, 503 | None |
-| POST | `/api/service/exit` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | Auth revoke | No | 200, 403, 500 | None |
-| POST | `/api/command` | SVC_AP | LOCAL_SERVICE/BROWSER | JSON envelope | JSON result | Motion cmd | No | 200, 400, 403, 500 | None |
-| POST | `/api/factory-reset` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | NVS erase | No | 200, 403, 500 | None |
+| GET | `/` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | HTML portal | No | Yes | 200, 401 | None |
+| GET | `/api/status` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | JSON status | No | Yes | 200, 401, 500 | None |
+| GET | `/api/identity` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | JSON identity | No | Yes | 200, 401, 500 | None |
+| **POST** | **`/api/portal-password`** | **Any** | **Basic Auth** | **JSON** | **JSON result** | **NVS write** | **No** | **200, 400, 401, 500** | **Password write-only** |
+| GET | `/api/config` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | JSON masked config | No | Yes | 200, 401, 500 | Password masked |
+| POST | `/api/config/stage` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | JSON fields | JSON result | RAM only | No | 200, 400, 401, 403 | Password write-only |
+| POST | `/api/config/validate` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON validation | No | Yes | 200, 400, 401, 403 | None |
+| POST | `/api/config/apply` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON + reboot | NVS commit | No | 200, 400, 401, 403, 500 | Password committed |
+| POST | `/api/service/enter` | AP_DISC | Basic Auth (becomes BROWSER) | None | JSON result | Auth transition | No | 200, 401, 409, 503 | None |
+| POST | `/api/service/exit` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | Auth revoke | No | 200, 401, 403, 500 | None |
+| POST | `/api/command` | SVC_AP | LOCAL_SERVICE/BROWSER | JSON envelope | JSON result | Motion cmd | No | 200, 400, 401, 403, 500 | None |
+| POST | `/api/factory-reset` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | NVS erase | No | 200, 401, 403, 500 | None |
 
 ### JSON schemas (planned)
 
