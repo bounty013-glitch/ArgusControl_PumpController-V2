@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 
 #define TEST_ASSERT(cond, msg) \
     do { \
@@ -26,6 +27,9 @@
             return ESP_FAIL; \
         } \
     } while (0)
+
+static const int EXPECTED_FULL_SEQUENCE[] = {2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15};
+
 
 // Stack-local mock NVS driver storage for testing
 typedef struct {
@@ -465,6 +469,8 @@ typedef struct {
     int fail_stage;
     esp_err_t fail_error;
     bool estop_during_stop;
+
+    int motion_start_count;
 } mock_orchestration_ctx_t;
 
 static void init_mock_ctx(mock_orchestration_ctx_t *m) {
@@ -647,6 +653,11 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.set_ap_count == 1, "set_ap mismatch");
     TEST_ASSERT(ctx.verify_ap_count == 1, "verify_ap mismatch");
     TEST_ASSERT(ctx.verify_machine_safe_count == 1, "verify_machine_safe mismatch");
+    TEST_ASSERT(ctx.call_count == (sizeof(EXPECTED_FULL_SEQUENCE)/sizeof(EXPECTED_FULL_SEQUENCE[0])), "Happy path call count mismatch");
+    for (int k = 0; k < ctx.call_count; k++) {
+        TEST_ASSERT(ctx.call_sequence[k] == EXPECTED_FULL_SEQUENCE[k], "Happy path call sequence mismatch");
+    }
+    TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0 in happy path");
 
     typedef struct {
         const char *name;
@@ -680,6 +691,10 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
 
         TEST_ASSERT(res == test_cases[i].injected_error, "Exact esp_err_t mismatch!");
         TEST_ASSERT(ctx.call_count == test_cases[i].expected_calls, "Exact callback count mismatch!");
+        for (int k = 0; k < ctx.call_count; k++) {
+            TEST_ASSERT(ctx.call_sequence[k] == EXPECTED_FULL_SEQUENCE[k], "Call sequence prefix mismatch");
+        }
+        TEST_ASSERT(ctx.call_sequence[ctx.call_count - 1] == test_cases[i].fail_stage, "Failed callback not the last executed");
         TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
         TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
         if (test_cases[i].fail_stage == 15) {
@@ -689,6 +704,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
         }
         TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE after abort");
         TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_NONE, "Auth owner not NONE after abort");
+        TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0 in failure cases");
     }
 
     // Part C: Prepare transition failure: fail_stage = 2
@@ -700,6 +716,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
     TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch on prep fail");
     TEST_ASSERT(ctx.normal_stop_count == 0, "ops called after prep fail");
+    TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0");
 
     // Part D: E-stop during verify_stopped
     init_mock_ctx(&ctx);
@@ -717,6 +734,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.set_ap_count == 0, "set_ap called after E-stop");
     TEST_ASSERT(ctx.verify_ap_count == 0, "verify_ap called after E-stop");
     TEST_ASSERT(ctx.verify_machine_safe_count == 0, "verify_machine_safe called after E-stop");
+    TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0");
 
     // Part E: verify_machine_safe failure (stage 13)
     init_mock_ctx(&ctx);
@@ -729,6 +747,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
     TEST_ASSERT(ctx.verify_ap_count == 1, "Preceding callback verify_ap not called");
     TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE");
+    TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0");
 
     return ESP_OK;
 }
@@ -794,6 +813,8 @@ typedef struct {
     wifi_mode_t wifi_driver_mode;
     argus_nvs_observation_t nvs_obs;
     UBaseType_t task_count;
+    argus_mqtt_broker_lifecycle_obs_t broker_obs;
+    esp_err_t broker_obs_status;
 } argus_prod_snapshot_t;
 
 static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
@@ -801,17 +822,23 @@ static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
     memset(out, 0, sizeof(argus_prod_snapshot_t));
     argus_state_mgr_get_snapshot(&out->state);
     argus_authority_mgr_get_snapshot(&out->authority);
-    argus_net_mgr_get_snapshot(&out->net_snap);
+
+    esp_err_t err = argus_net_mgr_get_snapshot(&out->net_snap);
+    if (err != ESP_OK) {
+        return err;
+    }
 
     out->wifi_mode_status = esp_wifi_get_mode(&out->wifi_driver_mode);
     if (out->wifi_mode_status != ESP_OK && out->wifi_mode_status != ESP_ERR_WIFI_NOT_INIT) {
         return out->wifi_mode_status;
     }
 
-    esp_err_t err = argus_nvs_config_get_observation_snapshot(&out->nvs_obs);
+    err = argus_nvs_config_get_observation_snapshot(&out->nvs_obs);
     if (err != ESP_OK) {
         return err;
     }
+
+    out->broker_obs_status = argus_mqtt_broker_get_lifecycle_obs(&out->broker_obs);
 
     out->task_count = uxTaskGetNumberOfTasks();
     return ESP_OK;
@@ -829,12 +856,28 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
         } \
     } while(0)
 
+#define CHECK_DIFF_UINT64(field_name, val_b, val_a) \
+    do { \
+        if ((val_b) != (val_a)) { \
+            printf("\nField  : %s\nBefore : %" PRIu64 "\nAfter  : %" PRIu64 "\n", (field_name), (uint64_t)(val_b), (uint64_t)(val_a)); \
+            match = false; \
+        } \
+    } while(0)
+
+#define CHECK_DIFF_MEM(field_name, ptr_b, ptr_a, size) \
+    do { \
+        if (memcmp((ptr_b), (ptr_a), (size)) != 0) { \
+            printf("\nField  : %s\nData differs.\n", (field_name)); \
+            match = false; \
+        } \
+    } while(0)
+
     CHECK_DIFF_INT("1. machine_state", b->state.machine_state, a->state.machine_state);
     CHECK_DIFF_INT("2. configured_target_rpm_milli", b->state.configured_target_rpm_milli, a->state.configured_target_rpm_milli);
     CHECK_DIFF_INT("3. trajectory_target_rpm_milli", b->state.trajectory_target_rpm_milli, a->state.trajectory_target_rpm_milli);
     CHECK_DIFF_INT("4. applied_rpm_milli", b->state.applied_rpm_milli, a->state.applied_rpm_milli);
     CHECK_DIFF_INT("5. generated_rpm_milli", b->state.generated_rpm_milli, a->state.generated_rpm_milli);
-    CHECK_DIFF_INT("6. generated_step_count", b->state.generated_step_count, a->state.generated_step_count);
+    CHECK_DIFF_UINT64("6. generated_step_count", b->state.generated_step_count, a->state.generated_step_count);
     CHECK_DIFF_INT("7. driver_enabled", b->state.driver_enabled, a->state.driver_enabled);
     CHECK_DIFF_INT("8. estop_latched", b->state.estop_latched, a->state.estop_latched);
     CHECK_DIFF_INT("9. fault_code", b->state.fault_code, a->state.fault_code);
@@ -849,15 +892,46 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     CHECK_DIFF_INT("18. authority.mode", b->authority.mode, a->authority.mode);
     CHECK_DIFF_INT("19. authority.owner", b->authority.owner, a->authority.owner);
     CHECK_DIFF_INT("20. authority.generation", b->authority.generation, a->authority.generation);
+
     CHECK_DIFF_INT("21. nvs_selector_status", b->nvs_obs.selector_status, a->nvs_obs.selector_status);
-    CHECK_DIFF_INT("22. nvs_selector", b->nvs_obs.selector, a->nvs_obs.selector);
-    CHECK_DIFF_INT("23. slot_a_status", b->nvs_obs.slot_a_status, a->nvs_obs.slot_a_status);
-    CHECK_DIFF_INT("24. slot_a.config_generation", b->nvs_obs.slot_a.config_generation, a->nvs_obs.slot_a.config_generation);
-    CHECK_DIFF_INT("25. slot_b_status", b->nvs_obs.slot_b_status, a->nvs_obs.slot_b_status);
-    CHECK_DIFF_INT("26. slot_b.config_generation", b->nvs_obs.slot_b.config_generation, a->nvs_obs.slot_b.config_generation);
-    CHECK_DIFF_INT("27. task_count", b->task_count, a->task_count);
+    CHECK_DIFF_INT("22. nvs_selector_present", b->nvs_obs.selector_present, a->nvs_obs.selector_present);
+    CHECK_DIFF_INT("23. nvs_selector", b->nvs_obs.selector, a->nvs_obs.selector);
+
+    CHECK_DIFF_INT("24. slot_a_status", b->nvs_obs.slot_a_status, a->nvs_obs.slot_a_status);
+    CHECK_DIFF_INT("25. slot_a_present", b->nvs_obs.slot_a_present, a->nvs_obs.slot_a_present);
+    CHECK_DIFF_INT("26. slot_a_valid", b->nvs_obs.slot_a_valid, a->nvs_obs.slot_a_valid);
+    if (b->nvs_obs.slot_a_present) {
+        CHECK_DIFF_INT("slot_a.config_generation", b->nvs_obs.slot_a.config_generation, a->nvs_obs.slot_a.config_generation);
+        CHECK_DIFF_INT("slot_a.schema_version", b->nvs_obs.slot_a.schema_version, a->nvs_obs.slot_a.schema_version);
+        CHECK_DIFF_INT("slot_a.valid_marker", b->nvs_obs.slot_a.valid_marker, a->nvs_obs.slot_a.valid_marker);
+        CHECK_DIFF_INT("slot_a.payload_length", b->nvs_obs.slot_a.payload_length, a->nvs_obs.slot_a.payload_length);
+        CHECK_DIFF_INT("slot_a.crc32", b->nvs_obs.slot_a.crc32, a->nvs_obs.slot_a.crc32);
+        CHECK_DIFF_MEM("slot_a.payload", &b->nvs_obs.slot_a.payload, &a->nvs_obs.slot_a.payload, sizeof(argus_config_payload_t));
+    }
+
+    CHECK_DIFF_INT("27. slot_b_status", b->nvs_obs.slot_b_status, a->nvs_obs.slot_b_status);
+    CHECK_DIFF_INT("28. slot_b_present", b->nvs_obs.slot_b_present, a->nvs_obs.slot_b_present);
+    CHECK_DIFF_INT("29. slot_b_valid", b->nvs_obs.slot_b_valid, a->nvs_obs.slot_b_valid);
+    if (b->nvs_obs.slot_b_present) {
+        CHECK_DIFF_INT("slot_b.config_generation", b->nvs_obs.slot_b.config_generation, a->nvs_obs.slot_b.config_generation);
+        CHECK_DIFF_INT("slot_b.schema_version", b->nvs_obs.slot_b.schema_version, a->nvs_obs.slot_b.schema_version);
+        CHECK_DIFF_INT("slot_b.valid_marker", b->nvs_obs.slot_b.valid_marker, a->nvs_obs.slot_b.valid_marker);
+        CHECK_DIFF_INT("slot_b.payload_length", b->nvs_obs.slot_b.payload_length, a->nvs_obs.slot_b.payload_length);
+        CHECK_DIFF_INT("slot_b.crc32", b->nvs_obs.slot_b.crc32, a->nvs_obs.slot_b.crc32);
+        CHECK_DIFF_MEM("slot_b.payload", &b->nvs_obs.slot_b.payload, &a->nvs_obs.slot_b.payload, sizeof(argus_config_payload_t));
+    }
+
+    CHECK_DIFF_INT("30. task_count", b->task_count, a->task_count);
+
+    CHECK_DIFF_INT("31. broker_obs_status", b->broker_obs_status, a->broker_obs_status);
+    CHECK_DIFF_INT("32. broker.state", b->broker_obs.state, a->broker_obs.state);
+    CHECK_DIFF_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
+    CHECK_DIFF_INT("34. broker.has_server_task", b->broker_obs.has_server_task, a->broker_obs.has_server_task);
+    CHECK_DIFF_INT("35. broker.has_listener", b->broker_obs.has_listener, a->broker_obs.has_listener);
 
 #undef CHECK_DIFF_INT
+#undef CHECK_DIFF_UINT64
+#undef CHECK_DIFF_MEM
     return match;
 }
 
@@ -941,7 +1015,7 @@ esp_err_t argus_tests_4a_run_all(void)
            (snap_before.task_count == snap_after.task_count) ? "UNCHANGED" : "MUTATED",
            (unsigned)snap_after.task_count);
 
-    bool overall_pass = (failed_executions == 0 && non_mutated);
+    bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
     printf("PHASE 4A PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");

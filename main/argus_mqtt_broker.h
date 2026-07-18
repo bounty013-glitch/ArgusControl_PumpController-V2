@@ -36,3 +36,12 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
  * @return true if broker server task and listening socket are active, false otherwise.
  */
 bool argus_mqtt_broker_is_running(void);
+
+typedef struct {
+    int state;           // argus_broker_state_t cast to int
+    int32_t active_client_count;
+    bool has_server_task;
+    bool has_listener;
+} argus_mqtt_broker_lifecycle_obs_t;
+
+esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t *out);

@@ -574,11 +574,36 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // ---- FIRST DISPATCH GATE: validate + set SERVICE_TRANSITION ----
+    // ---- FIRST DISPATCH GATE: validate authority + set SERVICE_TRANSITION ----
     argus_cmd_router_lock_dispatch();
 
     argus_service_authority_ops_t auth_ops;
     argus_authority_get_production_service_ops(&auth_ops);
+
+    // Validate current authority is consistent with the starting mode
+    argus_authority_snapshot_t auth_pre;
+    argus_authority_mgr_get_snapshot(&auth_pre);
+    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
+        // Discoverable mode requires SUPERVISORY/MQTT authority
+        if (auth_pre.mode != ARGUS_AUTHORITY_SUPERVISORY ||
+            auth_pre.owner != ARGUS_AUTH_OWNER_MQTT) {
+            ESP_LOGE(TAG, "Service entry: AP_DISCOVERABLE requires SUPERVISORY/MQTT (got mode=%d, owner=%d)",
+                     (int)auth_pre.mode, (int)auth_pre.owner);
+            argus_cmd_router_unlock_dispatch();
+            xSemaphoreGive(s_net_mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+    } else if (s_net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
+        // Uncommissioned mode requires NONE/NONE authority
+        if (auth_pre.mode != ARGUS_AUTHORITY_NONE ||
+            auth_pre.owner != ARGUS_AUTH_OWNER_NONE) {
+            ESP_LOGE(TAG, "Service entry: UNCOMMISSIONED_AP requires NONE/NONE (got mode=%d, owner=%d)",
+                     (int)auth_pre.mode, (int)auth_pre.owner);
+            argus_cmd_router_unlock_dispatch();
+            xSemaphoreGive(s_net_mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
 
     // Set authority to SERVICE_TRANSITION/NONE (increments generation)
     esp_err_t prep_err = auth_ops.prepare_transition(auth_ops.ctx);
@@ -688,11 +713,16 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
             return ESP_ERR_INVALID_STATE;
         }
 
-        // Revalidate AP-only network mode
+        // Revalidate full AP-only network state (check wifi_get_mode return)
         wifi_mode_t wifi_mode = WIFI_MODE_NULL;
-        esp_wifi_get_mode(&wifi_mode);
-        if (wifi_mode != WIFI_MODE_AP) {
-            ESP_LOGE(TAG, "Service entry: Wi-Fi not AP-only at grant point");
+        esp_err_t wifi_err = esp_wifi_get_mode(&wifi_mode);
+        if (wifi_err != ESP_OK || wifi_mode != WIFI_MODE_AP ||
+            !atomic_load(&s_ap_started) ||
+            atomic_load(&s_sta_started) ||
+            atomic_load(&s_sta_connected) ||
+            atomic_load(&s_sta_ip_acquired)) {
+            ESP_LOGE(TAG, "Service entry: network not fully AP-only at grant point (wifi_err=%s, mode=%d)",
+                     esp_err_to_name(wifi_err), (int)wifi_mode);
             auth_ops.abort_transition(auth_ops.ctx);
             s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
             argus_cmd_router_unlock_dispatch();
@@ -714,6 +744,7 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     }
     argus_cmd_router_unlock_dispatch();
     // ---- END SECOND DISPATCH GATE ----
+
 
     ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
              argus_authority_mgr_get_owner_name(requested_owner));
@@ -771,21 +802,27 @@ esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_o
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Validate the caller currently owns LOCAL_SERVICE authority
+    // ---- FIRST DISPATCH GATE: validate authority + set SERVICE_TRANSITION ----
+    argus_cmd_router_lock_dispatch();
+
+    // Validate the caller currently owns LOCAL_SERVICE authority (atomic with dispatch)
     argus_authority_snapshot_t auth_snap;
     argus_authority_mgr_get_snapshot(&auth_snap);
     if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE || auth_snap.owner != requested_owner) {
         ESP_LOGE(TAG, "Service exit rejected: caller does not own LOCAL_SERVICE (mode=%d, owner=%d, requested=%d)",
                  (int)auth_snap.mode, (int)auth_snap.owner, (int)requested_owner);
+        argus_cmd_router_unlock_dispatch();
         xSemaphoreGive(s_net_mutex);
         return ESP_ERR_INVALID_STATE;
     }
 
-    // ---- FIRST DISPATCH GATE: set SERVICE_TRANSITION ----
-    argus_cmd_router_lock_dispatch();
-
     set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
     argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
+
+    // Capture the transition generation for revalidation
+    argus_authority_snapshot_t exit_auth_post;
+    argus_authority_mgr_get_snapshot(&exit_auth_post);
+    uint32_t exit_transition_gen = exit_auth_post.generation;
 
     argus_cmd_router_unlock_dispatch();
     // ---- END FIRST DISPATCH GATE ----
@@ -825,9 +862,25 @@ esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_o
         goto exit_fail_closed;
     }
 
-    // ---- SECOND DISPATCH GATE: revoke authority + verify safe ----
+    // ---- SECOND DISPATCH GATE: revalidate authority+generation+machine, revoke ----
     argus_cmd_router_lock_dispatch();
     {
+        // Revalidate authority remains SERVICE_TRANSITION/NONE with matching generation
+        argus_authority_snapshot_t exit_recheck;
+        argus_authority_mgr_get_snapshot(&exit_recheck);
+        if (exit_recheck.mode != ARGUS_AUTHORITY_SERVICE_TRANSITION ||
+            exit_recheck.owner != ARGUS_AUTH_OWNER_NONE ||
+            exit_recheck.generation != exit_transition_gen) {
+            ESP_LOGE(TAG, "Service exit: authority changed during transition (gen %lu -> %lu, mode %d)",
+                     (unsigned long)exit_transition_gen, (unsigned long)exit_recheck.generation,
+                     (int)exit_recheck.mode);
+            argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
+            argus_cmd_router_unlock_dispatch();
+            xSemaphoreGive(s_net_mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+
         // Revalidate machine is still safe
         argus_state_mgr_get_snapshot(&state_snap);
         if (state_snap.estop_latched ||
