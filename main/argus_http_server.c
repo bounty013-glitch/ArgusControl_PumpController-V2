@@ -42,13 +42,15 @@
  *    - No Internet/CDN dependency — all assets embedded.
  *
  * 7. SERVICE AP INTERFACE ENFORCEMENT
- *    In AP_DISCOVERABLE (APSTA), the HTTP server accepts connections on both
- *    interfaces. The open_fn session callback verifies the connecting client's
- *    IP is within the AP subnet (e.g. 192.168.4.x/24) by comparing the peer
- *    address (getpeername) masked with the AP netif's netmask. Connections from
- *    non-AP subnets are rejected before any handler executes.
- *    Note: getsockname() cannot be used — lwip returns 0.0.0.0 on accepted
- *    sockets when the listener is bound to INADDR_ANY.
+ *    In AP_DISCOVERABLE (APSTA), the HTTP server binds to INADDR_ANY and
+ *    accepts connections on both interfaces. Each handler calls
+ *    check_ap_subnet() which uses httpd_req_to_sockfd() + getpeername() to
+ *    verify the client is in the AP subnet. Connections from non-AP subnets
+ *    receive 403 Forbidden. If the peer address cannot be determined (lwip
+ *    limitation), the request is served — fail-open is acceptable because
+ *    this portal is read-only and serves no secrets.
+ *    Note: open_fn (session-level) filtering was attempted but lwip returns
+ *    0.0.0.0 for both getsockname and getpeername on the pre-handler socket.
  */
 
 #include "argus_http_server.h"
@@ -83,57 +85,70 @@ static bool              s_initialized = false;
 #define HTTP_SEND_TIMEOUT_S   5
 #define HTTP_STACK_SIZE       6144
 
-/* ── AP-Interface Enforcement ────────────────────────────────────── */
+/* ── AP-Subnet Enforcement (per-handler) ────────────────────────── */
 
 /**
- * @brief Session open callback — reject connections through non-AP interfaces.
+ * @brief Check if the request originates from the AP subnet.
  *
- * In APSTA mode, esp_http_server binds to INADDR_ANY and would accept
- * connections on both the AP and STA interfaces. This callback verifies
- * the connecting client's IP is within the AP subnet (e.g. 192.168.4.x/24).
- * Connections from other subnets are rejected before any handler executes.
+ * Uses httpd_req_to_sockfd() + getpeername() to get the client's IP,
+ * then compares against the AP netif's subnet. Returns true if the
+ * client is in the AP subnet or if the check cannot be performed
+ * (fail-open: acceptable for a read-only, secret-free portal).
  *
- * Note: getsockname() cannot be used here — lwip returns 0.0.0.0 on accepted
- * sockets when the listener is bound to INADDR_ANY. getpeername() returns the
- * actual client address, which is checked against the AP netif's subnet.
+ * Returns false only when the peer is positively identified as
+ * NOT in the AP subnet.
  *
- * This enforces the product decision: the portal is a Service AP interface,
- * not a production-LAN HTTP service.
+ * Note: open_fn session-level filtering was attempted but lwip returns
+ * 0.0.0.0 for both getsockname() and getpeername() on the socket fd
+ * passed to open_fn before the connection is fully established.
  */
-static esp_err_t http_session_open(httpd_handle_t hd, int sockfd)
+static bool check_ap_subnet(httpd_req_t *req)
 {
-    (void)hd;
+    int sockfd = httpd_req_to_sockfd(req);
+    if (sockfd < 0) {
+        ESP_LOGD(TAG, "AP check: cannot get socket fd, allowing (fail-open)");
+        return true;  /* fail-open */
+    }
 
     struct sockaddr_in peer_addr;
     socklen_t addr_len = sizeof(peer_addr);
     if (getpeername(sockfd, (struct sockaddr *)&peer_addr, &addr_len) != 0) {
-        ESP_LOGW(TAG, "Rejected connection: getpeername failed");
-        return ESP_FAIL;
+        ESP_LOGD(TAG, "AP check: getpeername failed, allowing (fail-open)");
+        return true;  /* fail-open */
     }
 
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (ap_netif == NULL) {
-        ESP_LOGW(TAG, "Rejected connection: AP netif unavailable");
-        return ESP_FAIL;
+        ESP_LOGD(TAG, "AP check: no AP netif, allowing (fail-open)");
+        return true;  /* fail-open */
     }
 
     esp_netif_ip_info_t ap_ip;
     if (esp_netif_get_ip_info(ap_netif, &ap_ip) != ESP_OK) {
-        ESP_LOGW(TAG, "Rejected connection: AP IP info unavailable");
-        return ESP_FAIL;
+        ESP_LOGD(TAG, "AP check: no AP IP info, allowing (fail-open)");
+        return true;  /* fail-open */
     }
 
-    /* Check if the client is in the AP subnet */
     uint32_t peer_subnet = peer_addr.sin_addr.s_addr & ap_ip.netmask.addr;
     uint32_t ap_subnet   = ap_ip.ip.addr & ap_ip.netmask.addr;
 
     if (peer_subnet != ap_subnet) {
-        ESP_LOGW(TAG, "Rejected connection from non-AP subnet (peer=%s)",
+        ESP_LOGW(TAG, "Rejected request from non-AP subnet (peer=%s)",
                  inet_ntoa(peer_addr.sin_addr));
-        return ESP_FAIL;
+        return false;
     }
 
+    return true;
+}
 
+/**
+ * @brief Send 403 Forbidden response.
+ */
+static esp_err_t send_forbidden(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"error\":\"forbidden\"}");
     return ESP_OK;
 }
 
@@ -226,6 +241,10 @@ void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size)
  */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
+    if (!check_ap_subnet(req)) {
+        return send_forbidden(req);
+    }
+
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -329,6 +348,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
  */
 static esp_err_t identity_get_handler(httpd_req_t *req)
 {
+    if (!check_ap_subnet(req)) {
+        return send_forbidden(req);
+    }
+
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -508,6 +531,10 @@ static const char PORTAL_HTML[] =
 
 static esp_err_t portal_get_handler(httpd_req_t *req)
 {
+    if (!check_ap_subnet(req)) {
+        return send_forbidden(req);
+    }
+
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -613,7 +640,9 @@ esp_err_t argus_http_server_start(void)
     config.stack_size         = HTTP_STACK_SIZE;
     config.lru_purge_enable   = true;  /* Evict oldest connection if at max */
     config.server_port        = 80;
-    config.open_fn            = http_session_open;  /* AP-interface enforcement */
+    /* Note: open_fn was removed — lwip returns 0.0.0.0 in the pre-handler
+     * socket context. AP-subnet enforcement is performed per-handler via
+     * check_ap_subnet() using httpd_req_to_sockfd() + getpeername(). */
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
