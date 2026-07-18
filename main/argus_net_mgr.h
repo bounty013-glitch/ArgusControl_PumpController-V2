@@ -101,6 +101,7 @@ typedef struct {
     esp_err_t (*verify_sta_ip_released)(void *ctx);
     esp_err_t (*set_wifi_ap_only)(void *ctx);
     esp_err_t (*verify_ap_active)(void *ctx);
+    esp_err_t (*verify_machine_safe)(void *ctx);  /**< Final pre-grant machine-state/E-stop check */
     void *ctx;
 } argus_service_transition_ops_t;
 
@@ -119,8 +120,30 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
  */
 esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner);
 
+/**
+ * @brief Request coordinated service-exit transition with motion stop, network restore, and reboot.
+ * @param requested_owner Current owner requesting exit.
+ * @return ESP_OK if reboot initiated, error code on failure (reboot does not occur on error).
+ */
+esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner);
+
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
+
+/**
+ * @brief Race-free network observation assembled from mutex-protected mode/error
+ *        state and atomic lifecycle flags.
+ */
+typedef struct {
+    argus_network_mode_t mode;
+    argus_net_err_t last_error;
+    bool sta_connected;
+    bool sta_ip_acquired;
+    bool ap_started;
+    bool mqtt_broker_running;
+} argus_net_snapshot_t;
+
+esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);
 
 bool argus_net_mgr_is_sta_started(void);
 bool argus_net_mgr_is_sta_connected(void);

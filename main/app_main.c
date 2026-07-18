@@ -237,6 +237,11 @@ static void mqtt_broker_message_cb(const char *topic, const char *payload, bool 
 
 static void mqtt_broker_start(void)
 {
+    if (argus_mqtt_broker_is_running()) {
+        ESP_LOGI(TAG, "MQTT broker callback: broker already running.");
+        return;
+    }
+
     const argus_mqtt_broker_config_t broker_config = {
         .port = MQTT_BROKER_PORT,
         .on_message = mqtt_broker_message_cb,
@@ -244,9 +249,13 @@ static void mqtt_broker_start(void)
         .user_ctx = NULL,
     };
 
-    ESP_ERROR_CHECK(argus_mqtt_broker_start(&broker_config));
-    publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
-    publish_status();
+    esp_err_t err = argus_mqtt_broker_start(&broker_config);
+    if (err == ESP_OK) {
+        publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
+        publish_status();
+    } else if (err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to start MQTT broker: %s", esp_err_to_name(err));
+    }
 }
 
 // ================= STATUS TASK =================
@@ -284,12 +293,7 @@ static char s_staged_ssid[33] = {0};
 static char s_staged_pass[64] = {0};
 static bool s_has_staged_config = false;
 
-static void estop_timer_cb(void *arg)
-{
-    (void)arg;
-    ESP_LOGI("test_seam", "[TEST SEAM] Firing concurrent internal software E-STOP during service transition...");
-    argus_state_mgr_estop();
-}
+/* estop_timer_cb removed: concurrent E-stop preemption testing deferred to Phase 4B */
 
 static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const argus_authority_snapshot_t *ab,
                                         const argus_state_snapshot_t *sa, const argus_authority_snapshot_t *aa)
@@ -311,163 +315,37 @@ static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const 
             ab->generation == aa->generation);
 }
 
-static void purge_stdin(void)
-{
-    vTaskDelay(pdMS_TO_TICKS(50));
-    int c;
-    while ((c = getchar()) != EOF) {
-        if (c != '\r' && c != '\n' && c != ' ') {
-            ungetc(c, stdin);
-            break;
-        }
-    }
-}
-
 static int get_menu_key(const char *prompt)
 {
-    purge_stdin();
+    char line[16];
 
-    printf("%s\n", prompt);
-    fflush(stdout);
-
-    int c;
-    do {
-        c = getchar();
-        if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-    } while (c == EOF || c == '\n' || c == '\r' || c == ' ');
-
-    int choice = c;
-
-    purge_stdin();
-
-    printf("-> Option selected: '%c'\n", choice);
-    fflush(stdout);
-    return choice;
-}
-
-static esp_err_t read_string_input(const char *prompt, char *buffer, size_t max_len)
-{
-    if (!buffer || max_len == 0) return ESP_ERR_INVALID_ARG;
-
-    purge_stdin();
-
-    printf("%s\n", prompt);
-    fflush(stdout);
-
-    size_t idx = 0;
-    buffer[0] = '\0';
-
-    while (idx < max_len - 1) {
-        int c = getchar();
-        if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(20));
+    while (true) {
+        esp_err_t read_err = argus_console_read_line(prompt, line, sizeof(line));
+        if (read_err != ESP_OK) {
+            printf("[INVALID INPUT] Unable to read menu selection: %s\n", esp_err_to_name(read_err));
             continue;
         }
 
-        if ((c == '\r' || c == '\n') && idx == 0) {
-            continue;
+        char key = '\0';
+        esp_err_t parse_err = argus_console_parse_menu_key(line, &key);
+        if (parse_err == ESP_OK) {
+            return (int)key;
         }
 
-        if (c == '\r' || c == '\n') {
-            write(STDOUT_FILENO, "\r\n", 2);
-            break;
-        }
-
-        if (c == '\b' || c == 0x7F) {
-            if (idx > 0) {
-                idx--;
-                buffer[idx] = '\0';
-                write(STDOUT_FILENO, "\b \b", 3);
-            }
-            continue;
-        }
-
-        if (c < 32 || c > 126) continue;
-
-        char ch = (char)c;
-        buffer[idx++] = ch;
-        buffer[idx] = '\0';
-        write(STDOUT_FILENO, &ch, 1);
+        printf("[INVALID INPUT] Enter exactly one menu character and press Enter.\n");
     }
-
-    purge_stdin();
-
-    if (strlen(buffer) == 0) {
-        printf("[INVALID INPUT] Input cannot be empty.\n");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    printf("-> Input received: '%s'\n", buffer);
-    fflush(stdout);
-    return ESP_OK;
-}
-
-static esp_err_t read_password_input(const char *prompt, char *buffer, size_t max_len)
-{
-    if (!buffer || max_len < 9) return ESP_ERR_INVALID_ARG;
-
-    purge_stdin();
-
-    printf("%s\n", prompt);
-    fflush(stdout);
-
-    size_t idx = 0;
-    buffer[0] = '\0';
-
-    while (idx < max_len - 1) {
-        int c = getchar();
-        if (c == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
-        if ((c == '\r' || c == '\n') && idx == 0) {
-            continue;
-        }
-
-        if (c == '\r' || c == '\n') {
-            write(STDOUT_FILENO, "\r\n", 2);
-            break;
-        }
-
-        if (c == '\b' || c == 0x7F) {
-            if (idx > 0) {
-                idx--;
-                buffer[idx] = '\0';
-                write(STDOUT_FILENO, "\b \b", 3);
-            }
-            continue;
-        }
-
-        if (c < 32 || c > 126) continue;
-
-        buffer[idx++] = (char)c;
-        buffer[idx] = '\0';
-        write(STDOUT_FILENO, "*", 1);
-    }
-
-    purge_stdin();
-
-    esp_err_t val_err = argus_console_validate_password(buffer);
-    if (val_err != ESP_OK) {
-        printf("[STAGING FAILED] Password must be 8-63 characters (got %u chars).\n", (unsigned int)strlen(buffer));
-        memset(buffer, 0, max_len);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    printf("-> Password received: [CONFIGURED] (%u chars)\n", (unsigned int)strlen(buffer));
-    fflush(stdout);
-    return ESP_OK;
 }
 
 static bool confirm_action(const char *prompt)
 {
     char full_prompt[128];
     snprintf(full_prompt, sizeof(full_prompt), "%s (y/n): ", prompt);
-    int c = get_menu_key(full_prompt);
-    return (c == 'y' || c == 'Y');
+    while (true) {
+        int c = get_menu_key(full_prompt);
+        if (c == 'y' || c == 'Y') return true;
+        if (c == 'n' || c == 'N') return false;
+        printf("[INVALID SELECTION] Please enter 'y' for yes or 'n' for no.\n");
+    }
 }
 
 static void argus_phase4a_acceptance_menu(void)
@@ -492,7 +370,6 @@ static void argus_phase4a_acceptance_menu(void)
         printf("[5] Request LOCAL_SERVICE as diagnostic CLI\n");
         printf("[6] Inject MQTT-source permission test (non-mutating probe)\n");
         printf("[7] Inject browser-source permission test (non-mutating probe)\n");
-        printf("[E] Test transition E-Stop (Schedule concurrent E-stop during service entry)\n");
         printf("[8] Stage STA configuration\n");
         printf("[9] Validate staged configuration\n");
         printf("[A] Apply staged configuration and reboot\n");
@@ -566,8 +443,13 @@ static void argus_phase4a_acceptance_menu(void)
                 break;
             }
             case '5': {
-                printf("Requesting LOCAL_SERVICE authority as DIAGNOSTIC_CLI...\n");
-                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                printf("Requesting coordinated LOCAL_SERVICE entry...\n");
+                esp_err_t err = argus_net_mgr_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                if (err == ESP_OK) {
+                    printf("[SERVICE ENTRY COMPLETE]\n");
+                } else {
+                    printf("[SERVICE ENTRY FAILED] %s (%d)\n", esp_err_to_name(err), err);
+                }
                 break;
             }
             case '6': {
@@ -638,87 +520,40 @@ static void argus_phase4a_acceptance_menu(void)
                 printf("State Invariance Check: %s (15/15 fields unchanged)\n", inv ? "PASSED" : "FAILED");
                 break;
             }
-            case 'E': {
-                printf("\n--- Concurrent Transition E-Stop Test ---\n");
-                if (!confirm_action("Run concurrent Transition E-Stop test?")) break;
-
-                argus_state_snapshot_t st;
-                argus_state_mgr_get_snapshot(&st);
-                argus_authority_snapshot_t aut;
-                argus_authority_mgr_get_snapshot(&aut);
-
-                if (st.machine_state != ARGUS_STATE_RUNNING || aut.mode != ARGUS_AUTHORITY_SUPERVISORY) {
-                    printf("[ERROR] Prerequisite failed: Motor must be RUNNING under SUPERVISORY/MQTT authority.\n");
-                    printf("Please start supervisory motion first before running this test.\n");
-                    break;
-                }
-
-                printf("Scheduling background E-STOP timer (500 ms delay)...\n");
-                esp_timer_handle_t timer_handle = NULL;
-                esp_timer_create_args_t timer_args = {
-                    .callback = &estop_timer_cb,
-                    .name = "estop_test_timer"
-                };
-                esp_timer_create(&timer_args, &timer_handle);
-                esp_timer_start_once(timer_handle, 500000); // 500 ms
-
-                printf("Requesting service entry (LOCAL_SERVICE as DIAGNOSTIC_CLI)...\n");
-                esp_err_t res = argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
-
-                esp_timer_delete(timer_handle);
-
-                argus_state_snapshot_t st_after;
-                argus_state_mgr_get_snapshot(&st_after);
-                argus_authority_snapshot_t aut_after;
-                argus_authority_mgr_get_snapshot(&aut_after);
-
-                printf("\n--- Concurrent Transition E-Stop Results ---\n");
-                printf("Service Request Result : %s (%d)\n", esp_err_to_name(res), res);
-                printf("Machine State          : %s\n", argus_state_mgr_get_state_name(st_after.machine_state));
-                printf("E-Stop Latched         : %s\n", st_after.estop_latched ? "YES" : "NO");
-                printf("Generated RPM          : %ld mRPM\n", (long)st_after.generated_rpm_milli);
-                printf("Authority Granted      : %s (%s/%s)\n",
-                       (aut_after.mode == ARGUS_AUTHORITY_LOCAL_SERVICE) ? "YES (FAILED TEST)" : "NO (PASSED)",
-                       argus_authority_mgr_get_mode_name(aut_after.mode),
-                       argus_authority_mgr_get_owner_name(aut_after.owner));
-
-                if (res != ESP_OK && st_after.machine_state == ARGUS_STATE_EMERGENCY_STOPPED &&
-                    st_after.estop_latched && aut_after.mode != ARGUS_AUTHORITY_LOCAL_SERVICE) {
-                    printf("[TEST PASSED] Transition E-stop preempted service entry and blocked local authority grant!\n");
-                } else {
-                    printf("[TEST FAILED] Unexpected transition E-stop state.\n");
-                }
-                break;
-            }
+            /* case 'E' removed: concurrent E-stop preemption testing deferred to Phase 4B.
+             * E-stop currently blocks behind s_state_mutex; actual preemption latency is
+             * unbounded by the present software design. Cancellation-generation checks
+             * cannot preempt while the same state mutex prevents the generation from changing.
+             */
             case '8': {
-                esp_err_t err_ssid = read_string_input("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid));
+                esp_err_t err_ssid = argus_console_read_line("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid));
                 if (err_ssid != ESP_OK) {
-                    printf("[STAGING FAILED] Invalid SSID input.\n");
+                    printf("[STAGING FAILED] Invalid SSID input: %s\n", esp_err_to_name(err_ssid));
                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
                     s_has_staged_config = false;
                     break;
                 }
 
-                esp_err_t err_pass = read_password_input("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass));
+                if (argus_console_validate_ssid(s_staged_ssid) != ESP_OK) {
+                    printf("[STAGING FAILED] SSID must be 1-32 characters.\n");
+                    memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                    memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                    s_has_staged_config = false;
+                    break;
+                }
+
+                esp_err_t err_pass = argus_console_read_password("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass));
                 if (err_pass != ESP_OK) {
-                    printf("[STAGING FAILED] Invalid WPA2 password.\n");
+                    printf("[STAGING FAILED] Invalid WPA2 password: %s\n", esp_err_to_name(err_pass));
                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
                     s_has_staged_config = false;
                     break;
                 }
 
-                if (argus_console_validate_ssid(s_staged_ssid) == ESP_OK &&
-                    argus_console_validate_password(s_staged_pass) == ESP_OK) {
-                    s_has_staged_config = true;
-                    printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
-                } else {
-                    printf("[STAGING FAILED] Invalid parameters. SSID must be 1-32 chars, Pass 8-63 chars.\n");
-                    memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
-                    memset(s_staged_pass, 0, sizeof(s_staged_pass));
-                    s_has_staged_config = false;
-                }
+                s_has_staged_config = true;
+                printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
                 break;
             }
             case '9': {
@@ -769,8 +604,12 @@ static void argus_phase4a_acceptance_menu(void)
             }
             case 'X': {
                 if (confirm_action("Exit local service mode without configuration change and reboot?")) {
-                    printf("Executing controlled service exit...\n");
-                    argus_authority_request_exit();
+                    printf("Executing coordinated service exit...\n");
+                    esp_err_t exit_err = argus_net_mgr_request_service_exit(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                    if (exit_err != ESP_OK) {
+                        printf("[ERROR] Service exit failed: %s (%d)\n", esp_err_to_name(exit_err), exit_err);
+                    }
+                    // On success, esp_restart() was called inside request_service_exit
                 }
                 break;
             }
@@ -845,12 +684,12 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[g] Start Motion (apply stored setpoint)\n");
             printf("[s] Stop Normal (ramps speed to zero, retains holding torque)\n");
             printf("[u] Unlock/Disable driver (releases shaft)\n");
-            printf("[e] Software E-STOP (instant pulse halt, latches E-stop)\n");
+            printf("[e] Software E-STOP (requests pulse halt and latches E-stop; non-safety-rated)\n");
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
             printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
             printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
-            printf("[H] Claim LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
+            printf("[H] Request LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
         print_menu = false;
         }
 
@@ -993,12 +832,18 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             case 'N':
                 argus_phase4a_acceptance_menu();
                 break;
-            case 'H':
-                printf("Claiming LOCAL_SERVICE authority for CLI...\n");
-                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
-                printf("Opening HARDWARE ACCEPTANCE test submenu...\n");
-                argus_tests_run_hardware_acceptance();
+            case 'H': {
+                printf("Requesting coordinated LOCAL_SERVICE entry for CLI...\n");
+                esp_err_t h_err = argus_net_mgr_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+                if (h_err == ESP_OK) {
+                    printf("[SERVICE ENTRY COMPLETE] Opening HARDWARE ACCEPTANCE test submenu...\n");
+                    argus_tests_run_hardware_acceptance();
+                } else {
+                    printf("[SERVICE ENTRY FAILED] %s (%d). Hardware controls not available.\n",
+                           esp_err_to_name(h_err), h_err);
+                }
                 break;
+            }
             default:
                 printf("Unknown option: '%c'\n", c);
                 break;
@@ -1043,10 +888,13 @@ void app_main(void)
     ESP_ERROR_CHECK(argus_step_gen_start());
     ESP_ERROR_CHECK(argus_trajectory_task_start());
 
-    // 10. Register MQTT Broker Startup Callback with Network Manager
+    // 10. Initialize MQTT Broker Lifecycle Objects (once, firmware-lifetime)
+    ESP_ERROR_CHECK(argus_mqtt_broker_init());
+
+    // 11. Register MQTT Broker Startup Callback with Network Manager
     argus_net_mgr_register_broker_start_cb(mqtt_broker_start);
 
-    // 11. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
+    // 12. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
     esp_err_t net_err = argus_net_mgr_init();
     if (net_err != ESP_OK) {
         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
@@ -1055,7 +903,12 @@ void app_main(void)
     // Launch background tasks
     xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
-    xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
+    esp_err_t console_err = argus_console_transport_init();
+    if (console_err == ESP_OK) {
+        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
+    } else {
+        ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
+    }
 #endif
 
     ESP_LOGI(TAG, "V2 Pump Controller Phase 4A startup completed successfully.");

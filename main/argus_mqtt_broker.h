@@ -15,6 +15,18 @@ typedef struct {
     void *user_ctx;
 } argus_mqtt_broker_config_t;
 
+/**
+ * @brief One-time lifecycle object creation (mutex, event group).
+ *
+ * Must be called once before any start/stop cycle.  Safe to call from
+ * app_main before the scheduler or networking is ready.  Creates
+ * firmware-lifetime synchronisation objects that are never deleted.
+ *
+ * @return ESP_OK on success, ESP_ERR_NO_MEM if allocation fails,
+ *         ESP_ERR_INVALID_STATE if already initialised.
+ */
+esp_err_t argus_mqtt_broker_init(void);
+
 esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
 esp_err_t argus_mqtt_broker_stop(void);
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);

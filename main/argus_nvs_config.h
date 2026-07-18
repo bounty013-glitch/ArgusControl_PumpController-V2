@@ -138,9 +138,39 @@ uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload);
 bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b);
 
 /**
- * @brief Read-only observation helper for NVS selector and dual-slot metadata without state mutation.
+ * @brief NVS observation result with per-slot error differentiation.
+ *
+ * - status == ESP_OK: data was read successfully (present = true)
+ * - status == ESP_ERR_NOT_FOUND: key does not exist (present = false, valid = false)
+ * - status == other: driver error (present = false, valid = false)
+ * - valid: slot present AND valid_marker == ARGUS_CONFIG_VALID_MARKER
  */
-esp_err_t argus_nvs_config_get_observation_snapshot(uint8_t *out_selector, argus_cfg_slot_t *out_slot_a, argus_cfg_slot_t *out_slot_b);
+typedef struct {
+    esp_err_t selector_status;
+    bool      selector_present;
+    uint8_t   selector;
+
+    esp_err_t slot_a_status;
+    bool      slot_a_present;
+    bool      slot_a_valid;
+    argus_cfg_slot_t slot_a;
+
+    esp_err_t slot_b_status;
+    bool      slot_b_present;
+    bool      slot_b_valid;
+    argus_cfg_slot_t slot_b;
+} argus_nvs_observation_t;
+
+/**
+ * @brief Read-only observation of NVS selector and dual-slot metadata without state mutation.
+ *
+ * Missing NVS configuration is valid for an uncommissioned device.
+ *
+ * @param[out] out_obs Observation result.
+ * @return ESP_OK if all reads returned ESP_OK or ESP_ERR_NOT_FOUND.
+ *         Returns the first unexpected error otherwise.
+ */
+esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,99 @@
+﻿PHASE 4A HARDENING AUDIT EVIDENCE V2
+Generated: 2026-07-18T10:36:28-05:00
+
+=== git status --short --untracked-files=all ===
+ M main/CMakeLists.txt
+ M main/app_main.c
+ M main/argus_authority_mgr.c
+ M main/argus_authority_mgr.h
+ M main/argus_cmd_router.c
+ M main/argus_console_helpers.c
+ M main/argus_console_helpers.h
+ M main/argus_mqtt_broker.c
+ M main/argus_mqtt_broker.h
+ M main/argus_net_mgr.c
+ M main/argus_net_mgr.h
+ M main/argus_nvs_config.c
+ M main/argus_nvs_config.h
+ M main/argus_state_mgr.c
+ M main/argus_tests_4a.c
+?? PHASE_4A_HARDENING_AUDIT_EVIDENCE.txt
+?? PHASE_4A_HARDENING_IMPLEMENTATION.patch
+?? PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch
+?? "docs/PHASE_4A_HARDENING_AUDIT_CORRECTIVE_PLAN (AMENDED).md"
+?? docs/PHASE_4A_HARDENING_AUDIT_CORRECTIVE_PLAN.md
+?? "docs/PHASE_4A_Phase 4A Hardening \342\200\224 Amended Plan Sections.md"
+?? "docs/PHASE_4A_Phase 4A Hardening \342\200\224 Source-Reconciled Corrective Plan.md"
+?? "docs/PHASE_4A_Phase 4A Hardening \342\200\224 Walkthrough.md"
+?? "docs/Phase 4A Hardening Implementation - Task List.md"
+?? "docs/V2_IMPLEMENTATION_PLAN - Phase 4A  Pure Test  and Service - Orchestration Hardening.md"
+?? "docs/V2_IMPLEMENTATION_PLAN - Phase 4A  Pure Test Isolation Correction.md"
+?? docs/learning_proposal.md
+
+=== git diff --check ===
+Exit code: 0
+
+=== git diff --stat ===
+ main/CMakeLists.txt          |   2 +
+ main/app_main.c              | 311 +++++++------------------
+ main/argus_authority_mgr.c   | 112 +--------
+ main/argus_authority_mgr.h   |  26 +--
+ main/argus_cmd_router.c      |   2 +-
+ main/argus_console_helpers.c | 153 +++++++++++++
+ main/argus_console_helpers.h |  24 ++
+ main/argus_mqtt_broker.c     | 424 +++++++++++++++++++++++++++++-----
+ main/argus_mqtt_broker.h     |  12 +
+ main/argus_net_mgr.c         | 368 ++++++++++++++++++++++++++----
+ main/argus_net_mgr.h         |  23 ++
+ main/argus_nvs_config.c      |  52 ++++-
+ main/argus_nvs_config.h      |  34 ++-
+ main/argus_state_mgr.c       |   2 +-
+ main/argus_tests_4a.c        | 526 ++++++++++++++++++++++++++-----------------
+ 15 files changed, 1396 insertions(+), 675 deletions(-)
+
+=== git diff --name-only ===
+main/CMakeLists.txt
+main/app_main.c
+main/argus_authority_mgr.c
+main/argus_authority_mgr.h
+main/argus_cmd_router.c
+main/argus_console_helpers.c
+main/argus_console_helpers.h
+main/argus_mqtt_broker.c
+main/argus_mqtt_broker.h
+main/argus_net_mgr.c
+main/argus_net_mgr.h
+main/argus_nvs_config.c
+main/argus_nvs_config.h
+main/argus_state_mgr.c
+main/argus_tests_4a.c
+
+=== git rev-parse HEAD ===
+bdb3b34a4eb44f961a5407dea2f4c674e4cad20d
+
+=== git branch --show-current ===
+phase4a-hardening-audit
+
+=== idf.py fullclean + build ===
+fullclean exit: 0
+build exit: 0
+Compilation warnings: 0
+Compilation errors: 0
+
+=== binary size ===
+Binary: 0xd0e10 bytes (855568 bytes)
+Partition: 0x100000 bytes (1048576 bytes)
+Free: 0x2f1f0 bytes (193008 bytes, 18%)
+Total image: 855445 bytes
+
+=== idf.py size memory ===
+Flash Code (.text): 601414 bytes
+DIRAM used: 149639 / 341760 bytes (43.78%)
+Flash Data (.rodata + .appdesc): 135232 bytes
+
+=== patch file ===
+Filename: PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch
+Encoding: UTF-8 with BOM
+Size: 123474 bytes
+First line: diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+Credential scan: No secret values found

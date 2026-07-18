@@ -71,15 +71,14 @@ esp_err_t argus_authority_mgr_get_snapshot(argus_authority_snapshot_t *out_snap)
 esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus_authority_owner_t new_owner);
 
 /**
- * @brief Prepare service transition by stopping motion and setting mode to SERVICE_TRANSITION/NONE.
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if motion fails to stop or E-stop occurs.
- */
-esp_err_t argus_authority_prepare_service_transition(void);
-
-/**
- * @brief Finalize grant of LOCAL_SERVICE authority to requested owner after network isolation.
+ * @brief Finalize grant of LOCAL_SERVICE authority to requested owner (state-only).
+ *
+ * Updates authority mode to LOCAL_SERVICE under s_auth_mutex.
+ * Machine-state validation is performed by the orchestrator before this call.
+ *
  * @param requested_owner Target local owner (BROWSER or DIAGNOSTIC_CLI).
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if current mode is not SERVICE_TRANSITION.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if invalid owner,
+ *         ESP_ERR_INVALID_STATE if current mode is not SERVICE_TRANSITION.
  */
 esp_err_t argus_authority_grant_local_service(argus_authority_owner_t requested_owner);
 
@@ -93,18 +92,7 @@ void argus_authority_abort_service_transition(void);
  */
 void argus_authority_get_production_service_ops(argus_service_authority_ops_t *out_ops);
 
-/**
- * @brief Request controlled transition into LOCAL_SERVICE mode for specified owner.
- * @param requested_owner Target owner (ARGUS_AUTH_OWNER_BROWSER or ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI).
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if invalid owner requested.
- */
-esp_err_t argus_authority_request_service(argus_authority_owner_t requested_owner);
 
-/**
- * @brief Request controlled service exit and reboot.
- * @return ESP_OK on success.
- */
-esp_err_t argus_authority_request_exit(void);
 
 /**
  * @brief Validate whether a command source and type are permitted under the given snapshot.

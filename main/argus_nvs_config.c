@@ -566,18 +566,52 @@ void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_pa
     }
 }
 
-esp_err_t argus_nvs_config_get_observation_snapshot(uint8_t *out_selector, argus_cfg_slot_t *out_slot_a, argus_cfg_slot_t *out_slot_b)
+esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
 {
+    if (!out_obs) return ESP_ERR_INVALID_ARG;
+
     const argus_nvs_driver_t *drv = get_driver();
-    if (out_selector) {
-        *out_selector = s_active_slot_index;
-        drv->read_selector(drv->ctx, out_selector);
+    esp_err_t first_unexpected = ESP_OK;
+
+    // Read selector
+    memset(out_obs, 0, sizeof(*out_obs));
+    out_obs->selector_status = drv->read_selector(drv->ctx, &out_obs->selector);
+    if (out_obs->selector_status == ESP_OK) {
+        out_obs->selector_present = true;
+    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND) {
+        out_obs->selector_present = false;
+    } else {
+        out_obs->selector_present = false;
+        if (first_unexpected == ESP_OK) first_unexpected = out_obs->selector_status;
     }
-    if (out_slot_a) {
-        drv->read_slot(drv->ctx, 0, out_slot_a);
+
+    // Read slot A
+    out_obs->slot_a_status = drv->read_slot(drv->ctx, 0, &out_obs->slot_a);
+    if (out_obs->slot_a_status == ESP_OK) {
+        out_obs->slot_a_present = true;
+        out_obs->slot_a_valid = is_slot_valid(&out_obs->slot_a);
+    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND) {
+        out_obs->slot_a_present = false;
+        out_obs->slot_a_valid = false;
+    } else {
+        out_obs->slot_a_present = false;
+        out_obs->slot_a_valid = false;
+        if (first_unexpected == ESP_OK) first_unexpected = out_obs->slot_a_status;
     }
-    if (out_slot_b) {
-        drv->read_slot(drv->ctx, 1, out_slot_b);
+
+    // Read slot B
+    out_obs->slot_b_status = drv->read_slot(drv->ctx, 1, &out_obs->slot_b);
+    if (out_obs->slot_b_status == ESP_OK) {
+        out_obs->slot_b_present = true;
+        out_obs->slot_b_valid = is_slot_valid(&out_obs->slot_b);
+    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND) {
+        out_obs->slot_b_present = false;
+        out_obs->slot_b_valid = false;
+    } else {
+        out_obs->slot_b_present = false;
+        out_obs->slot_b_valid = false;
+        if (first_unexpected == ESP_OK) first_unexpected = out_obs->slot_b_status;
     }
-    return ESP_OK;
+
+    return first_unexpected;
 }

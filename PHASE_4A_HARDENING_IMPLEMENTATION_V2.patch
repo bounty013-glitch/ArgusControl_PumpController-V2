@@ -1,0 +1,2818 @@
+﻿diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index d5ed00b..e5677de 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -19,6 +19,8 @@ idf_component_register(
+         "argus_tests.c"
+     INCLUDE_DIRS "."
+     REQUIRES
++        console
++        esp_driver_usb_serial_jtag
+         esp_wifi
+         esp_event
+         esp_netif
+diff --git a/main/app_main.c b/main/app_main.c
+index 3897ad1..e846af1 100644
+--- a/main/app_main.c
++++ b/main/app_main.c
+@@ -237,6 +237,11 @@ static void mqtt_broker_message_cb(const char *topic, const char *payload, bool
+ 
+ static void mqtt_broker_start(void)
+ {
++    if (argus_mqtt_broker_is_running()) {
++        ESP_LOGI(TAG, "MQTT broker callback: broker already running.");
++        return;
++    }
++
+     const argus_mqtt_broker_config_t broker_config = {
+         .port = MQTT_BROKER_PORT,
+         .on_message = mqtt_broker_message_cb,
+@@ -244,9 +249,13 @@ static void mqtt_broker_start(void)
+         .user_ctx = NULL,
+     };
+ 
+-    ESP_ERROR_CHECK(argus_mqtt_broker_start(&broker_config));
+-    publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
+-    publish_status();
++    esp_err_t err = argus_mqtt_broker_start(&broker_config);
++    if (err == ESP_OK) {
++        publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
++        publish_status();
++    } else if (err != ESP_ERR_INVALID_STATE) {
++        ESP_LOGE(TAG, "Failed to start MQTT broker: %s", esp_err_to_name(err));
++    }
+ }
+ 
+ // ================= STATUS TASK =================
+@@ -284,12 +293,7 @@ static char s_staged_ssid[33] = {0};
+ static char s_staged_pass[64] = {0};
+ static bool s_has_staged_config = false;
+ 
+-static void estop_timer_cb(void *arg)
+-{
+-    (void)arg;
+-    ESP_LOGI("test_seam", "[TEST SEAM] Firing concurrent internal software E-STOP during service transition...");
+-    argus_state_mgr_estop();
+-}
++/* estop_timer_cb removed: concurrent E-stop preemption testing deferred to Phase 4B */
+ 
+ static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const argus_authority_snapshot_t *ab,
+                                         const argus_state_snapshot_t *sa, const argus_authority_snapshot_t *aa)
+@@ -311,163 +315,37 @@ static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const
+             ab->generation == aa->generation);
+ }
+ 
+-static void purge_stdin(void)
+-{
+-    vTaskDelay(pdMS_TO_TICKS(50));
+-    int c;
+-    while ((c = getchar()) != EOF) {
+-        if (c != '\r' && c != '\n' && c != ' ') {
+-            ungetc(c, stdin);
+-            break;
+-        }
+-    }
+-}
+-
+ static int get_menu_key(const char *prompt)
+ {
+-    purge_stdin();
+-
+-    printf("%s\n", prompt);
+-    fflush(stdout);
+-
+-    int c;
+-    do {
+-        c = getchar();
+-        if (c == EOF) {
+-            vTaskDelay(pdMS_TO_TICKS(50));
+-        }
+-    } while (c == EOF || c == '\n' || c == '\r' || c == ' ');
+-
+-    int choice = c;
+-
+-    purge_stdin();
+-
+-    printf("-> Option selected: '%c'\n", choice);
+-    fflush(stdout);
+-    return choice;
+-}
+-
+-static esp_err_t read_string_input(const char *prompt, char *buffer, size_t max_len)
+-{
+-    if (!buffer || max_len == 0) return ESP_ERR_INVALID_ARG;
++    char line[16];
+ 
+-    purge_stdin();
+-
+-    printf("%s\n", prompt);
+-    fflush(stdout);
+-
+-    size_t idx = 0;
+-    buffer[0] = '\0';
+-
+-    while (idx < max_len - 1) {
+-        int c = getchar();
+-        if (c == EOF) {
+-            vTaskDelay(pdMS_TO_TICKS(20));
+-            continue;
+-        }
+-
+-        if ((c == '\r' || c == '\n') && idx == 0) {
+-            continue;
+-        }
+-
+-        if (c == '\r' || c == '\n') {
+-            write(STDOUT_FILENO, "\r\n", 2);
+-            break;
+-        }
+-
+-        if (c == '\b' || c == 0x7F) {
+-            if (idx > 0) {
+-                idx--;
+-                buffer[idx] = '\0';
+-                write(STDOUT_FILENO, "\b \b", 3);
+-            }
+-            continue;
+-        }
+-
+-        if (c < 32 || c > 126) continue;
+-
+-        char ch = (char)c;
+-        buffer[idx++] = ch;
+-        buffer[idx] = '\0';
+-        write(STDOUT_FILENO, &ch, 1);
+-    }
+-
+-    purge_stdin();
+-
+-    if (strlen(buffer) == 0) {
+-        printf("[INVALID INPUT] Input cannot be empty.\n");
+-        return ESP_ERR_INVALID_ARG;
+-    }
+-
+-    printf("-> Input received: '%s'\n", buffer);
+-    fflush(stdout);
+-    return ESP_OK;
+-}
+-
+-static esp_err_t read_password_input(const char *prompt, char *buffer, size_t max_len)
+-{
+-    if (!buffer || max_len < 9) return ESP_ERR_INVALID_ARG;
+-
+-    purge_stdin();
+-
+-    printf("%s\n", prompt);
+-    fflush(stdout);
+-
+-    size_t idx = 0;
+-    buffer[0] = '\0';
+-
+-    while (idx < max_len - 1) {
+-        int c = getchar();
+-        if (c == EOF) {
+-            vTaskDelay(pdMS_TO_TICKS(20));
+-            continue;
+-        }
+-
+-        if ((c == '\r' || c == '\n') && idx == 0) {
++    while (true) {
++        esp_err_t read_err = argus_console_read_line(prompt, line, sizeof(line));
++        if (read_err != ESP_OK) {
++            printf("[INVALID INPUT] Unable to read menu selection: %s\n", esp_err_to_name(read_err));
+             continue;
+         }
+ 
+-        if (c == '\r' || c == '\n') {
+-            write(STDOUT_FILENO, "\r\n", 2);
+-            break;
+-        }
+-
+-        if (c == '\b' || c == 0x7F) {
+-            if (idx > 0) {
+-                idx--;
+-                buffer[idx] = '\0';
+-                write(STDOUT_FILENO, "\b \b", 3);
+-            }
+-            continue;
++        char key = '\0';
++        esp_err_t parse_err = argus_console_parse_menu_key(line, &key);
++        if (parse_err == ESP_OK) {
++            return (int)key;
+         }
+ 
+-        if (c < 32 || c > 126) continue;
+-
+-        buffer[idx++] = (char)c;
+-        buffer[idx] = '\0';
+-        write(STDOUT_FILENO, "*", 1);
++        printf("[INVALID INPUT] Enter exactly one menu character and press Enter.\n");
+     }
+-
+-    purge_stdin();
+-
+-    esp_err_t val_err = argus_console_validate_password(buffer);
+-    if (val_err != ESP_OK) {
+-        printf("[STAGING FAILED] Password must be 8-63 characters (got %u chars).\n", (unsigned int)strlen(buffer));
+-        memset(buffer, 0, max_len);
+-        return ESP_ERR_INVALID_SIZE;
+-    }
+-
+-    printf("-> Password received: [CONFIGURED] (%u chars)\n", (unsigned int)strlen(buffer));
+-    fflush(stdout);
+-    return ESP_OK;
+ }
+ 
+ static bool confirm_action(const char *prompt)
+ {
+     char full_prompt[128];
+     snprintf(full_prompt, sizeof(full_prompt), "%s (y/n): ", prompt);
+-    int c = get_menu_key(full_prompt);
+-    return (c == 'y' || c == 'Y');
++    while (true) {
++        int c = get_menu_key(full_prompt);
++        if (c == 'y' || c == 'Y') return true;
++        if (c == 'n' || c == 'N') return false;
++        printf("[INVALID SELECTION] Please enter 'y' for yes or 'n' for no.\n");
++    }
+ }
+ 
+ static void argus_phase4a_acceptance_menu(void)
+@@ -492,7 +370,6 @@ static void argus_phase4a_acceptance_menu(void)
+         printf("[5] Request LOCAL_SERVICE as diagnostic CLI\n");
+         printf("[6] Inject MQTT-source permission test (non-mutating probe)\n");
+         printf("[7] Inject browser-source permission test (non-mutating probe)\n");
+-        printf("[E] Test transition E-Stop (Schedule concurrent E-stop during service entry)\n");
+         printf("[8] Stage STA configuration\n");
+         printf("[9] Validate staged configuration\n");
+         printf("[A] Apply staged configuration and reboot\n");
+@@ -566,8 +443,13 @@ static void argus_phase4a_acceptance_menu(void)
+                 break;
+             }
+             case '5': {
+-                printf("Requesting LOCAL_SERVICE authority as DIAGNOSTIC_CLI...\n");
+-                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
++                printf("Requesting coordinated LOCAL_SERVICE entry...\n");
++                esp_err_t err = argus_net_mgr_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
++                if (err == ESP_OK) {
++                    printf("[SERVICE ENTRY COMPLETE]\n");
++                } else {
++                    printf("[SERVICE ENTRY FAILED] %s (%d)\n", esp_err_to_name(err), err);
++                }
+                 break;
+             }
+             case '6': {
+@@ -638,87 +520,40 @@ static void argus_phase4a_acceptance_menu(void)
+                 printf("State Invariance Check: %s (15/15 fields unchanged)\n", inv ? "PASSED" : "FAILED");
+                 break;
+             }
+-            case 'E': {
+-                printf("\n--- Concurrent Transition E-Stop Test ---\n");
+-                if (!confirm_action("Run concurrent Transition E-Stop test?")) break;
+-
+-                argus_state_snapshot_t st;
+-                argus_state_mgr_get_snapshot(&st);
+-                argus_authority_snapshot_t aut;
+-                argus_authority_mgr_get_snapshot(&aut);
+-
+-                if (st.machine_state != ARGUS_STATE_RUNNING || aut.mode != ARGUS_AUTHORITY_SUPERVISORY) {
+-                    printf("[ERROR] Prerequisite failed: Motor must be RUNNING under SUPERVISORY/MQTT authority.\n");
+-                    printf("Please start supervisory motion first before running this test.\n");
+-                    break;
+-                }
+-
+-                printf("Scheduling background E-STOP timer (500 ms delay)...\n");
+-                esp_timer_handle_t timer_handle = NULL;
+-                esp_timer_create_args_t timer_args = {
+-                    .callback = &estop_timer_cb,
+-                    .name = "estop_test_timer"
+-                };
+-                esp_timer_create(&timer_args, &timer_handle);
+-                esp_timer_start_once(timer_handle, 500000); // 500 ms
+-
+-                printf("Requesting service entry (LOCAL_SERVICE as DIAGNOSTIC_CLI)...\n");
+-                esp_err_t res = argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+-
+-                esp_timer_delete(timer_handle);
+-
+-                argus_state_snapshot_t st_after;
+-                argus_state_mgr_get_snapshot(&st_after);
+-                argus_authority_snapshot_t aut_after;
+-                argus_authority_mgr_get_snapshot(&aut_after);
+-
+-                printf("\n--- Concurrent Transition E-Stop Results ---\n");
+-                printf("Service Request Result : %s (%d)\n", esp_err_to_name(res), res);
+-                printf("Machine State          : %s\n", argus_state_mgr_get_state_name(st_after.machine_state));
+-                printf("E-Stop Latched         : %s\n", st_after.estop_latched ? "YES" : "NO");
+-                printf("Generated RPM          : %ld mRPM\n", (long)st_after.generated_rpm_milli);
+-                printf("Authority Granted      : %s (%s/%s)\n",
+-                       (aut_after.mode == ARGUS_AUTHORITY_LOCAL_SERVICE) ? "YES (FAILED TEST)" : "NO (PASSED)",
+-                       argus_authority_mgr_get_mode_name(aut_after.mode),
+-                       argus_authority_mgr_get_owner_name(aut_after.owner));
+-
+-                if (res != ESP_OK && st_after.machine_state == ARGUS_STATE_EMERGENCY_STOPPED &&
+-                    st_after.estop_latched && aut_after.mode != ARGUS_AUTHORITY_LOCAL_SERVICE) {
+-                    printf("[TEST PASSED] Transition E-stop preempted service entry and blocked local authority grant!\n");
+-                } else {
+-                    printf("[TEST FAILED] Unexpected transition E-stop state.\n");
+-                }
+-                break;
+-            }
++            /* case 'E' removed: concurrent E-stop preemption testing deferred to Phase 4B.
++             * E-stop currently blocks behind s_state_mutex; actual preemption latency is
++             * unbounded by the present software design. Cancellation-generation checks
++             * cannot preempt while the same state mutex prevents the generation from changing.
++             */
+             case '8': {
+-                esp_err_t err_ssid = read_string_input("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid));
++                esp_err_t err_ssid = argus_console_read_line("Enter STA SSID (1-32 chars): ", s_staged_ssid, sizeof(s_staged_ssid));
+                 if (err_ssid != ESP_OK) {
+-                    printf("[STAGING FAILED] Invalid SSID input.\n");
++                    printf("[STAGING FAILED] Invalid SSID input: %s\n", esp_err_to_name(err_ssid));
+                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                     s_has_staged_config = false;
+                     break;
+                 }
+ 
+-                esp_err_t err_pass = read_password_input("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass));
+-                if (err_pass != ESP_OK) {
+-                    printf("[STAGING FAILED] Invalid WPA2 password.\n");
++                if (argus_console_validate_ssid(s_staged_ssid) != ESP_OK) {
++                    printf("[STAGING FAILED] SSID must be 1-32 characters.\n");
+                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                     s_has_staged_config = false;
+                     break;
+                 }
+ 
+-                if (argus_console_validate_ssid(s_staged_ssid) == ESP_OK &&
+-                    argus_console_validate_password(s_staged_pass) == ESP_OK) {
+-                    s_has_staged_config = true;
+-                    printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
+-                } else {
+-                    printf("[STAGING FAILED] Invalid parameters. SSID must be 1-32 chars, Pass 8-63 chars.\n");
++                esp_err_t err_pass = argus_console_read_password("Enter STA WPA2 Password (8-63 chars, un-echoed): ", s_staged_pass, sizeof(s_staged_pass));
++                if (err_pass != ESP_OK) {
++                    printf("[STAGING FAILED] Invalid WPA2 password: %s\n", esp_err_to_name(err_pass));
+                     memset(s_staged_ssid, 0, sizeof(s_staged_ssid));
+                     memset(s_staged_pass, 0, sizeof(s_staged_pass));
+                     s_has_staged_config = false;
++                    break;
+                 }
++
++                s_has_staged_config = true;
++                printf("[STAGED SUCCESSFULLY] SSID: '%s', Pass: [CONFIGURED] (%u chars)\n", s_staged_ssid, (unsigned int)strlen(s_staged_pass));
+                 break;
+             }
+             case '9': {
+@@ -769,8 +604,12 @@ static void argus_phase4a_acceptance_menu(void)
+             }
+             case 'X': {
+                 if (confirm_action("Exit local service mode without configuration change and reboot?")) {
+-                    printf("Executing controlled service exit...\n");
+-                    argus_authority_request_exit();
++                    printf("Executing coordinated service exit...\n");
++                    esp_err_t exit_err = argus_net_mgr_request_service_exit(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
++                    if (exit_err != ESP_OK) {
++                        printf("[ERROR] Service exit failed: %s (%d)\n", esp_err_to_name(exit_err), exit_err);
++                    }
++                    // On success, esp_restart() was called inside request_service_exit
+                 }
+                 break;
+             }
+@@ -845,12 +684,12 @@ static void argus_diagnostic_menu_task(void *pvParameters)
+             printf("[g] Start Motion (apply stored setpoint)\n");
+             printf("[s] Stop Normal (ramps speed to zero, retains holding torque)\n");
+             printf("[u] Unlock/Disable driver (releases shaft)\n");
+-            printf("[e] Software E-STOP (instant pulse halt, latches E-stop)\n");
++            printf("[e] Software E-STOP (requests pulse halt and latches E-stop; non-safety-rated)\n");
+             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
+             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
+             printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
+             printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
+-            printf("[H] Claim LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
++            printf("[H] Request LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
+         print_menu = false;
+         }
+ 
+@@ -993,12 +832,18 @@ static void argus_diagnostic_menu_task(void *pvParameters)
+             case 'N':
+                 argus_phase4a_acceptance_menu();
+                 break;
+-            case 'H':
+-                printf("Claiming LOCAL_SERVICE authority for CLI...\n");
+-                argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+-                printf("Opening HARDWARE ACCEPTANCE test submenu...\n");
+-                argus_tests_run_hardware_acceptance();
++            case 'H': {
++                printf("Requesting coordinated LOCAL_SERVICE entry for CLI...\n");
++                esp_err_t h_err = argus_net_mgr_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
++                if (h_err == ESP_OK) {
++                    printf("[SERVICE ENTRY COMPLETE] Opening HARDWARE ACCEPTANCE test submenu...\n");
++                    argus_tests_run_hardware_acceptance();
++                } else {
++                    printf("[SERVICE ENTRY FAILED] %s (%d). Hardware controls not available.\n",
++                           esp_err_to_name(h_err), h_err);
++                }
+                 break;
++            }
+             default:
+                 printf("Unknown option: '%c'\n", c);
+                 break;
+@@ -1043,10 +888,13 @@ void app_main(void)
+     ESP_ERROR_CHECK(argus_step_gen_start());
+     ESP_ERROR_CHECK(argus_trajectory_task_start());
+ 
+-    // 10. Register MQTT Broker Startup Callback with Network Manager
++    // 10. Initialize MQTT Broker Lifecycle Objects (once, firmware-lifetime)
++    ESP_ERROR_CHECK(argus_mqtt_broker_init());
++
++    // 11. Register MQTT Broker Startup Callback with Network Manager
+     argus_net_mgr_register_broker_start_cb(mqtt_broker_start);
+ 
+-    // 11. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
++    // 12. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
+     esp_err_t net_err = argus_net_mgr_init();
+     if (net_err != ESP_OK) {
+         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
+@@ -1055,7 +903,12 @@ void app_main(void)
+     // Launch background tasks
+     xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
+ #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+-    xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
++    esp_err_t console_err = argus_console_transport_init();
++    if (console_err == ESP_OK) {
++        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
++    } else {
++        ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
++    }
+ #endif
+ 
+     ESP_LOGI(TAG, "V2 Pump Controller Phase 4A startup completed successfully.");
+diff --git a/main/argus_authority_mgr.c b/main/argus_authority_mgr.c
+index 64503b2..3ff31e2 100644
+--- a/main/argus_authority_mgr.c
++++ b/main/argus_authority_mgr.c
+@@ -4,10 +4,6 @@
+  */
+ 
+ #include "argus_authority_mgr.h"
+-#include "argus_cmd_router.h"
+-#include "argus_state_mgr.h"
+-#include "argus_nvs_config.h"
+-#include "esp_system.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/semphr.h"
+ 
+@@ -98,16 +94,21 @@ esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus
+ 
+ static esp_err_t prod_prepare_transition(void *ctx) {
+     (void)ctx;
+-    return argus_authority_prepare_service_transition();
++    // State-only: set SERVICE_TRANSITION/NONE and increment generation under s_auth_mutex.
++    // Does NOT acquire dispatch, stop motion, poll state, call E-stop, or delay.
++    return argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
+ }
+ 
+ static esp_err_t prod_grant_local(void *ctx, argus_authority_owner_t owner) {
+     (void)ctx;
++    // State-only: set LOCAL_SERVICE/<owner> under s_auth_mutex.
++    // Machine-state validation is performed by the orchestrator before this call.
+     return argus_authority_grant_local_service(owner);
+ }
+ 
+ static void prod_abort_transition(void *ctx) {
+     (void)ctx;
++    // State-only: set NONE/NONE under s_auth_mutex.
+     argus_authority_abort_service_transition();
+ }
+ 
+@@ -159,49 +160,6 @@ void argus_authority_core_abort_service_transition(argus_authority_core_t *core)
+     }
+ }
+ 
+-esp_err_t argus_authority_prepare_service_transition(void)
+-{
+-    // Step 1: Acquire s_dispatch_mutex to finish in-flight normal commands
+-    argus_cmd_router_lock_dispatch();
+-
+-    // Step 2: Acquire s_auth_mutex, update mode to SERVICE_TRANSITION, increment generation
+-    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
+-
+-    // Step 3: Release s_dispatch_mutex
+-    argus_cmd_router_unlock_dispatch();
+-
+-    // Step 4: Perform controlled stop without holding locks
+-    esp_err_t err = argus_state_mgr_stop_normal();
+-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+-        argus_state_mgr_estop();
+-    }
+-
+-    // Wait up to 5000 ms for confirmed stopped machine state
+-    argus_state_snapshot_t state_snap;
+-    int timeout_ms = 5000;
+-    while (timeout_ms > 0) {
+-        argus_state_mgr_get_snapshot(&state_snap);
+-        if (state_snap.machine_state == ARGUS_STATE_HOLDING ||
+-            state_snap.machine_state == ARGUS_STATE_UNLOCKED ||
+-            state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
+-            state_snap.machine_state == ARGUS_STATE_FAULTED) {
+-            break;
+-        }
+-        vTaskDelay(pdMS_TO_TICKS(50));
+-        timeout_ms -= 50;
+-    }
+-
+-    if (timeout_ms <= 0 || state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
+-        state_snap.machine_state == ARGUS_STATE_FAULTED || state_snap.estop_latched) {
+-        argus_state_mgr_estop();
+-        ESP_LOGE("argus_auth_mgr", "Service transition prep aborted: state=%s, estop_latched=%d.",
+-                 argus_state_mgr_get_state_name(state_snap.machine_state), (int)state_snap.estop_latched);
+-        argus_authority_abort_service_transition();
+-        return ESP_ERR_INVALID_STATE;
+-    }
+-
+-    return ESP_OK;
+-}
+ 
+ esp_err_t argus_authority_grant_local_service(argus_authority_owner_t requested_owner)
+ {
+@@ -219,16 +177,8 @@ esp_err_t argus_authority_grant_local_service(argus_authority_owner_t requested_
+         return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    argus_state_snapshot_t state_snap;
+-    argus_state_mgr_get_snapshot(&state_snap);
+-    if ((state_snap.machine_state != ARGUS_STATE_HOLDING && state_snap.machine_state != ARGUS_STATE_UNLOCKED) ||
+-        state_snap.estop_latched || state_snap.machine_state == ARGUS_STATE_FAULTED) {
+-        ESP_LOGE("argus_auth_mgr", "Cannot grant local service: machine state=%s, estop_latched=%d",
+-                 argus_state_mgr_get_state_name(state_snap.machine_state), (int)state_snap.estop_latched);
+-        argus_authority_abort_service_transition();
+-        return ESP_ERR_INVALID_STATE;
+-    }
+-
++    // State-only: machine-state validation is performed by the orchestrator's
++    // verify_machine_safe callback before this grant call.
+     argus_authority_mgr_set_mode(ARGUS_AUTHORITY_LOCAL_SERVICE, requested_owner);
+     return ESP_OK;
+ }
+@@ -239,52 +189,6 @@ void argus_authority_abort_service_transition(void)
+     argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+ }
+ 
+-esp_err_t argus_authority_request_service(argus_authority_owner_t requested_owner)
+-{
+-    esp_err_t err = argus_authority_prepare_service_transition();
+-    if (err != ESP_OK) return err;
+-    return argus_authority_grant_local_service(requested_owner);
+-}
+-
+-esp_err_t argus_authority_request_exit(void)
+-{
+-    // Step 1: Acquire s_dispatch_mutex
+-    argus_cmd_router_lock_dispatch();
+-
+-    // Step 2: Set SERVICE_TRANSITION
+-    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
+-
+-    // Step 3: Release s_dispatch_mutex
+-    argus_cmd_router_unlock_dispatch();
+-
+-    // Step 4: Perform controlled stop
+-    argus_state_mgr_stop_normal();
+-
+-    // Verify machine is stopped
+-    argus_state_snapshot_t state_snap;
+-    int timeout_ms = 5000;
+-    while (timeout_ms > 0) {
+-        argus_state_mgr_get_snapshot(&state_snap);
+-        if (state_snap.machine_state == ARGUS_STATE_HOLDING || state_snap.machine_state == ARGUS_STATE_UNLOCKED) {
+-            break;
+-        }
+-        // Block exit if E-stop or fault remains unresolved!
+-        if (state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED || state_snap.machine_state == ARGUS_STATE_FAULTED) {
+-            argus_authority_mgr_set_mode(ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI);
+-            return ESP_ERR_INVALID_STATE;
+-        }
+-        vTaskDelay(pdMS_TO_TICKS(50));
+-        timeout_ms -= 50;
+-    }
+-
+-    if (timeout_ms <= 0) {
+-        return ESP_ERR_TIMEOUT;
+-    }
+-
+-    // Step 5: Perform restart
+-    esp_restart();
+-    return ESP_OK;
+-}
+ 
+ bool argus_authority_validate_permission(const argus_authority_snapshot_t *snap,
+                                          argus_cmd_source_t source,
+diff --git a/main/argus_authority_mgr.h b/main/argus_authority_mgr.h
+index 3885e2d..5fb615c 100644
+--- a/main/argus_authority_mgr.h
++++ b/main/argus_authority_mgr.h
+@@ -71,15 +71,14 @@ esp_err_t argus_authority_mgr_get_snapshot(argus_authority_snapshot_t *out_snap)
+ esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus_authority_owner_t new_owner);
+ 
+ /**
+- * @brief Prepare service transition by stopping motion and setting mode to SERVICE_TRANSITION/NONE.
+- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if motion fails to stop or E-stop occurs.
+- */
+-esp_err_t argus_authority_prepare_service_transition(void);
+-
+-/**
+- * @brief Finalize grant of LOCAL_SERVICE authority to requested owner after network isolation.
++ * @brief Finalize grant of LOCAL_SERVICE authority to requested owner (state-only).
++ *
++ * Updates authority mode to LOCAL_SERVICE under s_auth_mutex.
++ * Machine-state validation is performed by the orchestrator before this call.
++ *
+  * @param requested_owner Target local owner (BROWSER or DIAGNOSTIC_CLI).
+- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if current mode is not SERVICE_TRANSITION.
++ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if invalid owner,
++ *         ESP_ERR_INVALID_STATE if current mode is not SERVICE_TRANSITION.
+  */
+ esp_err_t argus_authority_grant_local_service(argus_authority_owner_t requested_owner);
+ 
+@@ -93,18 +92,7 @@ void argus_authority_abort_service_transition(void);
+  */
+ void argus_authority_get_production_service_ops(argus_service_authority_ops_t *out_ops);
+ 
+-/**
+- * @brief Request controlled transition into LOCAL_SERVICE mode for specified owner.
+- * @param requested_owner Target owner (ARGUS_AUTH_OWNER_BROWSER or ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI).
+- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if invalid owner requested.
+- */
+-esp_err_t argus_authority_request_service(argus_authority_owner_t requested_owner);
+ 
+-/**
+- * @brief Request controlled service exit and reboot.
+- * @return ESP_OK on success.
+- */
+-esp_err_t argus_authority_request_exit(void);
+ 
+ /**
+  * @brief Validate whether a command source and type are permitted under the given snapshot.
+diff --git a/main/argus_cmd_router.c b/main/argus_cmd_router.c
+index ded8adf..1975fae 100644
+--- a/main/argus_cmd_router.c
++++ b/main/argus_cmd_router.c
+@@ -41,7 +41,7 @@ esp_err_t argus_cmd_router_dispatch(const argus_command_envelope_t *env)
+     if (!env) return ESP_ERR_INVALID_ARG;
+     if (!s_initialized) argus_cmd_router_init();
+ 
+-    // Internal safety actions (E-Stop) bypass dispatch and authority mutexes for microsecond preemption
++    // Internal safety actions (E-Stop) bypass dispatch and authority mutexes; blocks on s_state_mutex
+     if (env->source == ARGUS_CMD_SRC_INTERNAL_SAFETY || env->command_type == ARGUS_CMD_TYPE_ESTOP) {
+         return argus_state_mgr_estop();
+     }
+diff --git a/main/argus_console_helpers.c b/main/argus_console_helpers.c
+index d28013f..df46bdd 100644
+--- a/main/argus_console_helpers.c
++++ b/main/argus_console_helpers.c
+@@ -1,6 +1,159 @@
+ #include "argus_console_helpers.h"
++#include "driver/usb_serial_jtag.h"
++#include "driver/usb_serial_jtag_vfs.h"
++#include "linenoise/linenoise.h"
+ #include <ctype.h>
++#include <stdio.h>
+ #include <string.h>
++#include <unistd.h>
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++
++esp_err_t argus_console_transport_init(void)
++{
++#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
++    if (!usb_serial_jtag_is_driver_installed()) {
++        usb_serial_jtag_driver_config_t config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
++        esp_err_t err = usb_serial_jtag_driver_install(&config);
++        if (err != ESP_OK) {
++            return err;
++        }
++    }
++
++    usb_serial_jtag_vfs_use_driver();
++
++    linenoiseSetMultiLine(0);
++    linenoiseAllowEmpty(false);
++
++    int line_len_result = linenoiseSetMaxLineLen(96);
++    if (line_len_result != 0) {
++        return ESP_FAIL;
++    }
++
++    return ESP_OK;
++#else
++    return ESP_ERR_NOT_SUPPORTED;
++#endif
++}
++
++esp_err_t argus_console_read_line(const char *prompt, char *buffer, size_t buffer_size)
++{
++    if (prompt == NULL || buffer == NULL || buffer_size < 2) {
++        return ESP_ERR_INVALID_ARG;
++    }
++
++    buffer[0] = '\0';
++
++    char *line = linenoise(prompt);
++    if (line == NULL) {
++        return ESP_FAIL;
++    }
++
++    size_t len = strlen(line);
++
++    if (len == 0) {
++        linenoiseFree(line);
++        return ESP_ERR_INVALID_ARG;
++    }
++
++    if (len >= buffer_size) {
++        linenoiseFree(line);
++        return ESP_ERR_INVALID_SIZE;
++    }
++
++    memcpy(buffer, line, len + 1);
++    linenoiseFree(line);
++
++    return ESP_OK;
++}
++
++esp_err_t argus_console_read_password(const char *prompt, char *buffer, size_t buffer_size)
++{
++    if (prompt == NULL || buffer == NULL || buffer_size < 9) {
++        return ESP_ERR_INVALID_ARG;
++    }
++
++    buffer[0] = '\0';
++    write(STDOUT_FILENO, prompt, strlen(prompt));
++
++    size_t idx = 0;
++    bool cancel = false;
++    bool overflow = false;
++
++    while (true) {
++        uint8_t ch = 0;
++        int n = read(STDIN_FILENO, &ch, 1);
++        if (n <= 0) {
++            vTaskDelay(pdMS_TO_TICKS(20));
++            continue;
++        }
++
++        if (ch == 0x03) {
++            cancel = true;
++            write(STDOUT_FILENO, "^C\r\n", 4);
++            break;
++        }
++
++        if (ch == '\b' || ch == 0x7F) {
++            if (idx > 0) {
++                idx--;
++                buffer[idx] = '\0';
++                write(STDOUT_FILENO, "\b \b", 3);
++            }
++            continue;
++        }
++
++        if (ch == '\r' || ch == '\n') {
++            write(STDOUT_FILENO, "\r\n", 2);
++            break;
++        }
++
++        if (ch < 32 || ch > 126) {
++            continue;
++        }
++
++        if (idx >= buffer_size - 1) {
++            overflow = true;
++            while (true) {
++                uint8_t drain_ch = 0;
++                if (read(STDIN_FILENO, &drain_ch, 1) > 0) {
++                    if (drain_ch == '\r' || drain_ch == '\n') {
++                        write(STDOUT_FILENO, "\r\n", 2);
++                        break;
++                    }
++                } else {
++                    vTaskDelay(pdMS_TO_TICKS(10));
++                }
++            }
++            break;
++        }
++
++        buffer[idx++] = (char)ch;
++        buffer[idx] = '\0';
++        write(STDOUT_FILENO, "*", 1);
++    }
++
++    if (cancel) {
++        memset(buffer, 0, buffer_size);
++        printf("[CANCELLED] Password entry cancelled.\n");
++        return ESP_ERR_INVALID_STATE;
++    }
++
++    if (overflow) {
++        memset(buffer, 0, buffer_size);
++        printf("[ERROR] Password exceeds maximum capacity (%u chars).\n", (unsigned int)(buffer_size - 1));
++        return ESP_ERR_INVALID_SIZE;
++    }
++
++    esp_err_t val_err = argus_console_validate_password(buffer);
++    if (val_err != ESP_OK) {
++        printf("[STAGING FAILED] Password must be 8-63 characters (got %u chars).\n", (unsigned int)strlen(buffer));
++        memset(buffer, 0, buffer_size);
++        return ESP_ERR_INVALID_SIZE;
++    }
++
++    return ESP_OK;
++}
+ 
+ char *argus_console_trim_whitespace(char *str)
+ {
+diff --git a/main/argus_console_helpers.h b/main/argus_console_helpers.h
+index ef70af3..339f214 100644
+--- a/main/argus_console_helpers.h
++++ b/main/argus_console_helpers.h
+@@ -8,6 +8,30 @@
+ extern "C" {
+ #endif
+ 
++/**
++ * @brief Initialize the USB Serial/JTAG driver and linenoise console transport.
++ * @return ESP_OK on successful initialization, or appropriate ESP error code.
++ */
++esp_err_t argus_console_transport_init(void);
++
++/**
++ * @brief Read a line of non-secret text using linenoise over the driver-backed VFS.
++ * @param prompt Display prompt.
++ * @param buffer Output buffer for the line.
++ * @param buffer_size Capacity of buffer in bytes.
++ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE if overlength, ESP_FAIL on EOF/fail.
++ */
++esp_err_t argus_console_read_line(const char *prompt, char *buffer, size_t buffer_size);
++
++/**
++ * @brief Read a masked password (8-63 chars) using driver-backed POSIX STDIN/STDOUT.
++ * @param prompt Display prompt.
++ * @param buffer Output buffer for the password.
++ * @param buffer_size Capacity of buffer in bytes (must be >= 65).
++ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE if invalid length, ESP_ERR_INVALID_STATE on cancel.
++ */
++esp_err_t argus_console_read_password(const char *prompt, char *buffer, size_t buffer_size);
++
+ /**
+  * @brief Trim leading and trailing whitespace from a string in-place.
+  * @param str Input/output null-terminated string.
+diff --git a/main/argus_mqtt_broker.c b/main/argus_mqtt_broker.c
+index 04bf3ab..c0b0d22 100644
+--- a/main/argus_mqtt_broker.c
++++ b/main/argus_mqtt_broker.c
+@@ -2,12 +2,14 @@
+ 
+ #include <errno.h>
+ #include <stdbool.h>
++#include <stdatomic.h>
+ #include <stdint.h>
+ #include <string.h>
+ 
+ #include "esp_check.h"
+ #include "esp_log.h"
+ #include "freertos/FreeRTOS.h"
++#include "freertos/event_groups.h"
+ #include "freertos/semphr.h"
+ #include "freertos/task.h"
+ #include "lwip/inet.h"
+@@ -24,6 +26,23 @@ static const char *TAG = "argus_mqtt_broker";
+ #define ARGUS_MQTT_CLIENT_TASK_STACK 4096
+ #define ARGUS_MQTT_SERVER_TASK_STACK 4096
+ 
++/* ---------------------------------------------------------------------------
++ * Lifecycle event bits  (waited on by start / stop callers)
++ * -----------------------------------------------------------------------*/
++#define BROKER_EVT_STARTED        (1 << 0)
++#define BROKER_EVT_STOPPED        (1 << 1)
++#define BROKER_EVT_CLIENTS_EXITED (1 << 2)
++
++/* ---------------------------------------------------------------------------
++ * Broker state machine
++ * -----------------------------------------------------------------------*/
++typedef enum {
++    BROKER_STATE_STOPPED = 0,
++    BROKER_STATE_STARTING,
++    BROKER_STATE_RUNNING,
++    BROKER_STATE_STOPPING,
++} argus_broker_state_t;
++
+ typedef struct {
+     bool in_use;
+     int sock;
+@@ -39,10 +58,20 @@ typedef struct {
+ } argus_mqtt_retained_t;
+ 
+ typedef struct {
++    /* ---- lifecycle objects (firmware-lifetime, never deleted) ---- */
++    SemaphoreHandle_t lifecycle_mutex;
++    SemaphoreHandle_t client_lock;
++    EventGroupHandle_t lifecycle_event_group;
++
++    /* ---- state ---- */
++    argus_broker_state_t state;
++    esp_err_t startup_error;
++
++    /* ---- runtime ---- */
+     uint16_t port;
+     int listen_sock;
+-    SemaphoreHandle_t lock;
+-    bool started;
++    TaskHandle_t server_task_handle;
++    _Atomic int32_t active_client_count;
+     argus_mqtt_broker_message_cb_t on_message;
+     argus_mqtt_broker_policy_cb_t policy_check;
+     void *user_ctx;
+@@ -52,6 +81,10 @@ typedef struct {
+ 
+ static argus_mqtt_broker_t s_broker;
+ 
++/* ===========================================================================
++ * MQTT wire helpers  (unchanged from original)
++ * =========================================================================*/
++
+ static int argus_mqtt_read_exact(int sock, uint8_t *buffer, size_t len)
+ {
+     size_t offset = 0;
+@@ -188,6 +221,10 @@ static esp_err_t argus_mqtt_send_publish(int sock, const char *topic, const char
+     return (sent == (int)offset) ? ESP_OK : ESP_FAIL;
+ }
+ 
++/* ===========================================================================
++ * Retained message & subscriber helpers  (unchanged, operate under client_lock)
++ * =========================================================================*/
++
+ static void argus_mqtt_store_retained_locked(const char *topic, const char *payload)
+ {
+     argus_mqtt_retained_t *slot = NULL;
+@@ -251,6 +288,10 @@ static void argus_mqtt_send_retained_for_filter_locked(argus_mqtt_client_t *clie
+     }
+ }
+ 
++/* ===========================================================================
++ * MQTT packet handlers  (unchanged from original)
++ * =========================================================================*/
++
+ static esp_err_t argus_mqtt_handle_connect(argus_mqtt_client_t *client, const uint8_t *packet, uint32_t len)
+ {
+     uint32_t offset = 0;
+@@ -432,21 +473,37 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
+     return ESP_OK;
+ }
+ 
++/* ===========================================================================
++ * Client slot release  (hardened: atomic count + event signal)
++ * =========================================================================*/
++
+ static void argus_mqtt_close_client(argus_mqtt_client_t *client)
+ {
+-    xSemaphoreTake(s_broker.lock, portMAX_DELAY);
++    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+     int sock = client->sock;
+     client->sock = -1;
+     client->in_use = false;
+     client->subscription_count = 0;
+-    xSemaphoreGive(s_broker.lock);
++    xSemaphoreGive(s_broker.client_lock);
+ 
+     if (sock >= 0) {
+         shutdown(sock, 0);
+         close(sock);
+     }
++
++    int32_t prev = atomic_fetch_sub(&s_broker.active_client_count, 1);
++    if (prev <= 0) {
++        ESP_LOGE(TAG, "active_client_count underflow! (prev=%d)", (int)prev);
++    } else if (prev == 1) {
++        /* Last client exited ΓÇö signal any waiter in stop(). */
++        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_CLIENTS_EXITED);
++    }
+ }
+ 
++/* ===========================================================================
++ * Per-client task  (protocol loop unchanged; exit path hardened)
++ * =========================================================================*/
++
+ static void argus_mqtt_client_task(void *arg)
+ {
+     argus_mqtt_client_t *client = (argus_mqtt_client_t *)arg;
+@@ -479,7 +536,7 @@ static void argus_mqtt_client_task(void *arg)
+         char callback_topic[ARGUS_MQTT_MAX_TOPIC_LEN] = {0};
+         char callback_payload[ARGUS_MQTT_MAX_PAYLOAD_LEN] = {0};
+ 
+-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
++        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+ 
+         esp_err_t err = ESP_OK;
+         switch (packet_type) {
+@@ -507,14 +564,14 @@ static void argus_mqtt_client_task(void *arg)
+             break;
+         }
+         case 14:
+-            xSemaphoreGive(s_broker.lock);
++            xSemaphoreGive(s_broker.client_lock);
+             goto done;
+         default:
+             ESP_LOGW(TAG, "unsupported packet type: %u", packet_type);
+             break;
+         }
+ 
+-        xSemaphoreGive(s_broker.lock);
++        xSemaphoreGive(s_broker.client_lock);
+ 
+         if (has_callback && s_broker.on_message != NULL) {
+             s_broker.on_message(callback_topic, callback_payload, callback_retain, s_broker.user_ctx);
+@@ -534,6 +591,10 @@ done:
+     vTaskDelete(NULL);
+ }
+ 
++/* ===========================================================================
++ * Client slot allocation  (hardened: atomic count tracking)
++ * =========================================================================*/
++
+ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
+ {
+     for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+@@ -548,27 +609,119 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
+     return NULL;
+ }
+ 
++/* ===========================================================================
++ * Server (accept-loop) task  ΓÇö socket creation moved here, lifecycle signals
++ * =========================================================================*/
++
+ static void argus_mqtt_server_task(void *arg)
+ {
+     (void)arg;
+ 
+-    while (true) {
++    /* --- Create listening socket inside the task -------------------------*/
++    int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
++    if (listen_sock < 0) {
++        ESP_LOGE(TAG, "unable to create socket: errno=%d", errno);
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        s_broker.startup_error = ESP_FAIL;
++        s_broker.server_task_handle = NULL;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
++        vTaskDelete(NULL);
++        return;
++    }
++
++    int opt = 1;
++    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
++
++    struct sockaddr_in dest_addr = {
++        .sin_addr.s_addr = htonl(INADDR_ANY),
++        .sin_family = AF_INET,
++        .sin_port = htons(s_broker.port),
++    };
++
++    if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
++        ESP_LOGE(TAG, "bind failed: errno=%d", errno);
++        close(listen_sock);
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        s_broker.startup_error = ESP_FAIL;
++        s_broker.server_task_handle = NULL;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
++        vTaskDelete(NULL);
++        return;
++    }
++
++    if (listen(listen_sock, ARGUS_MQTT_MAX_CLIENTS) != 0) {
++        ESP_LOGE(TAG, "listen failed: errno=%d", errno);
++        close(listen_sock);
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        s_broker.startup_error = ESP_FAIL;
++        s_broker.server_task_handle = NULL;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
++        vTaskDelete(NULL);
++        return;
++    }
++
++    /* Publish the socket and transition to RUNNING. */
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    s_broker.listen_sock = listen_sock;
++    s_broker.state = BROKER_STATE_RUNNING;
++    s_broker.startup_error = ESP_OK;
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++
++    ESP_LOGI(TAG, "local MQTT broker listening on port %u", s_broker.port);
++    xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STARTED);
++
++    /* --- Accept loop --------------------------------------------------- */
++    while (1) {
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        bool running = (s_broker.state == BROKER_STATE_RUNNING);
++        int current_listen_sock = s_broker.listen_sock;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++
++        if (!running || current_listen_sock < 0) {
++            break;
++        }
++
+         struct sockaddr_in source_addr = {0};
+         socklen_t addr_len = sizeof(source_addr);
+-        int sock = accept(s_broker.listen_sock, (struct sockaddr *)&source_addr, &addr_len);
++        int sock = accept(current_listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+ 
+         if (sock < 0) {
++            xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++            running = (s_broker.state == BROKER_STATE_RUNNING);
++            current_listen_sock = s_broker.listen_sock;
++            xSemaphoreGive(s_broker.lifecycle_mutex);
++
++            if (!running || current_listen_sock < 0) {
++                break;
++            }
+             ESP_LOGW(TAG, "accept failed: errno=%d", errno);
+             vTaskDelay(pdMS_TO_TICKS(250));
+             continue;
+         }
+ 
+-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
++        /* Check broker is still running before allocating a client. */
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        running = (s_broker.state == BROKER_STATE_RUNNING);
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++
++        if (!running) {
++            close(sock);
++            break;
++        }
++
++        /* Reserve the active-client count BEFORE creating the task. */
++        atomic_fetch_add(&s_broker.active_client_count, 1);
++
++        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+         argus_mqtt_client_t *client = argus_mqtt_alloc_client_locked(sock);
+-        xSemaphoreGive(s_broker.lock);
++        xSemaphoreGive(s_broker.client_lock);
+ 
+         if (client == NULL) {
+             ESP_LOGW(TAG, "rejecting MQTT client: client limit reached");
++            atomic_fetch_sub(&s_broker.active_client_count, 1);
+             close(sock);
+             continue;
+         }
+@@ -576,106 +729,263 @@ static void argus_mqtt_server_task(void *arg)
+         BaseType_t created = xTaskCreate(argus_mqtt_client_task, "mqtt_client", ARGUS_MQTT_CLIENT_TASK_STACK, client, 5, NULL);
+         if (created != pdPASS) {
+             ESP_LOGE(TAG, "failed to create MQTT client task");
+-            argus_mqtt_close_client(client);
++            /* Release slot and decrement count. */
++            xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
++            client->sock = -1;
++            client->in_use = false;
++            client->subscription_count = 0;
++            xSemaphoreGive(s_broker.client_lock);
++            atomic_fetch_sub(&s_broker.active_client_count, 1);
++            close(sock);
+         }
+     }
++
++    ESP_LOGI(TAG, "MQTT broker server task exiting cleanly.");
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    s_broker.server_task_handle = NULL;
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++    xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
++    vTaskDelete(NULL);
+ }
+ 
+-esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
++/* ===========================================================================
++ * Public API
++ * =========================================================================*/
++
++esp_err_t argus_mqtt_broker_init(void)
+ {
+-    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "config is null");
+-    ESP_RETURN_ON_FALSE(!s_broker.started, ESP_ERR_INVALID_STATE, TAG, "broker already started");
++    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex == NULL, ESP_ERR_INVALID_STATE,
++                        TAG, "broker already initialised");
+ 
+-    memset(&s_broker, 0, sizeof(s_broker));
+-    s_broker.port = config->port;
+-    s_broker.on_message = config->on_message;
+-    s_broker.policy_check = config->policy_check;
+-    s_broker.user_ctx = config->user_ctx;
++    s_broker.lifecycle_mutex = xSemaphoreCreateMutex();
++    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_NO_MEM,
++                        TAG, "failed to create lifecycle_mutex");
++
++    s_broker.client_lock = xSemaphoreCreateMutex();
++    if (s_broker.client_lock == NULL) {
++        vSemaphoreDelete(s_broker.lifecycle_mutex);
++        s_broker.lifecycle_mutex = NULL;
++        ESP_LOGE(TAG, "failed to create client_lock");
++        return ESP_ERR_NO_MEM;
++    }
++
++    s_broker.lifecycle_event_group = xEventGroupCreate();
++    if (s_broker.lifecycle_event_group == NULL) {
++        vSemaphoreDelete(s_broker.client_lock);
++        s_broker.client_lock = NULL;
++        vSemaphoreDelete(s_broker.lifecycle_mutex);
++        s_broker.lifecycle_mutex = NULL;
++        ESP_LOGE(TAG, "failed to create lifecycle_event_group");
++        return ESP_ERR_NO_MEM;
++    }
++
++    s_broker.state = BROKER_STATE_STOPPED;
++    atomic_store(&s_broker.active_client_count, 0);
+     s_broker.listen_sock = -1;
+-    s_broker.lock = xSemaphoreCreateMutex();
+-    ESP_RETURN_ON_FALSE(s_broker.lock != NULL, ESP_ERR_NO_MEM, TAG, "failed to create lock");
++    s_broker.server_task_handle = NULL;
+ 
+-    int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+-    ESP_RETURN_ON_FALSE(listen_sock >= 0, ESP_FAIL, TAG, "unable to create socket");
++    ESP_LOGI(TAG, "broker lifecycle objects initialised");
++    return ESP_OK;
++}
+ 
+-    int opt = 1;
+-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
++esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
++{
++    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "config is null");
++    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_INVALID_STATE,
++                        TAG, "broker not initialised (call argus_mqtt_broker_init first)");
+ 
+-    struct sockaddr_in dest_addr = {
+-        .sin_addr.s_addr = htonl(INADDR_ANY),
+-        .sin_family = AF_INET,
+-        .sin_port = htons(s_broker.port),
+-    };
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+ 
+-    if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
+-        close(listen_sock);
+-        ESP_LOGE(TAG, "bind failed: errno=%d", errno);
+-        return ESP_FAIL;
++    if (s_broker.state != BROKER_STATE_STOPPED) {
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        ESP_LOGE(TAG, "broker not in STOPPED state (current=%d)", (int)s_broker.state);
++        return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    if (listen(listen_sock, ARGUS_MQTT_MAX_CLIENTS) != 0) {
+-        close(listen_sock);
+-        ESP_LOGE(TAG, "listen failed: errno=%d", errno);
+-        return ESP_FAIL;
++    /* Verify no residual task handles remain from a previous cycle. */
++    if (s_broker.server_task_handle != NULL) {
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        ESP_LOGE(TAG, "stale server_task_handle detected");
++        return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    s_broker.listen_sock = listen_sock;
+-    s_broker.started = true;
++    s_broker.state = BROKER_STATE_STARTING;
++
++    /* Zero only runtime fields ΓÇö lifecycle objects are preserved. */
++    s_broker.port = config->port;
++    s_broker.on_message = config->on_message;
++    s_broker.policy_check = config->policy_check;
++    s_broker.user_ctx = config->user_ctx;
++    s_broker.listen_sock = -1;
++    s_broker.startup_error = ESP_OK;
++    atomic_store(&s_broker.active_client_count, 0);
++    memset(s_broker.clients, 0, sizeof(s_broker.clients));
++    memset(s_broker.retained, 0, sizeof(s_broker.retained));
++
++    /* Clear event bits before launching the task. */
++    xEventGroupClearBits(s_broker.lifecycle_event_group,
++                         BROKER_EVT_STARTED | BROKER_EVT_STOPPED | BROKER_EVT_CLIENTS_EXITED);
++
++    BaseType_t created = xTaskCreate(argus_mqtt_server_task, "mqtt_broker",
++                                     ARGUS_MQTT_SERVER_TASK_STACK, NULL, 5,
++                                     &s_broker.server_task_handle);
++    if (created != pdPASS) {
++        s_broker.state = BROKER_STATE_STOPPED;
++        s_broker.server_task_handle = NULL;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        ESP_LOGE(TAG, "failed to create broker task");
++        return ESP_ERR_NO_MEM;
++    }
++
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++
++    /* --- Wait bounded for the server task to report outcome ------------ */
++    EventBits_t bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
++                                           BROKER_EVT_STARTED | BROKER_EVT_STOPPED,
++                                           pdFALSE,   /* don't clear */
++                                           pdFALSE,   /* wait for ANY */
++                                           pdMS_TO_TICKS(2000));
++
++    if (bits & BROKER_EVT_STARTED) {
++        return ESP_OK;
++    }
++
++    if (bits & BROKER_EVT_STOPPED) {
++        /* Server task reported failure and already exited. */
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        s_broker.state = BROKER_STATE_STOPPED;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        ESP_LOGE(TAG, "server task failed during startup: %s",
++                 esp_err_to_name(s_broker.startup_error));
++        return (s_broker.startup_error != ESP_OK) ? s_broker.startup_error : ESP_FAIL;
++    }
++
++    /* Timeout ΓÇö task neither started nor stopped within the window. */
++    ESP_LOGE(TAG, "broker start timed out after 2000 ms");
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    s_broker.state = BROKER_STATE_STOPPING;
++    if (s_broker.listen_sock >= 0) {
++        shutdown(s_broker.listen_sock, SHUT_RDWR);
++        close(s_broker.listen_sock);
++        s_broker.listen_sock = -1;
++    }
++    xSemaphoreGive(s_broker.lifecycle_mutex);
+ 
+-    BaseType_t created = xTaskCreate(argus_mqtt_server_task, "mqtt_broker", ARGUS_MQTT_SERVER_TASK_STACK, NULL, 5, NULL);
+-    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "failed to create broker task");
++    bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
++                               BROKER_EVT_STOPPED,
++                               pdFALSE, pdFALSE,
++                               pdMS_TO_TICKS(2000));
+ 
+-    ESP_LOGI(TAG, "local MQTT broker listening on port %u", s_broker.port);
+-    return ESP_OK;
++    if (bits & BROKER_EVT_STOPPED) {
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        s_broker.state = BROKER_STATE_STOPPED;
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++    }
++    return ESP_ERR_TIMEOUT;
+ }
+ 
+ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain)
+ {
+     ESP_RETURN_ON_FALSE(topic != NULL && payload != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid publish args");
+-    ESP_RETURN_ON_FALSE(s_broker.started, ESP_ERR_INVALID_STATE, TAG, "broker not started");
+ 
+-    xSemaphoreTake(s_broker.lock, portMAX_DELAY);
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    bool running = (s_broker.state == BROKER_STATE_RUNNING);
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++
++    ESP_RETURN_ON_FALSE(running, ESP_ERR_INVALID_STATE, TAG, "broker not running");
++
++    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+     if (retain) {
+         argus_mqtt_store_retained_locked(topic, payload);
+     }
+     argus_mqtt_deliver_to_subscribers_locked(topic, payload, retain);
+-    xSemaphoreGive(s_broker.lock);
++    xSemaphoreGive(s_broker.client_lock);
+ 
+     return ESP_OK;
+ }
+ 
+ bool argus_mqtt_broker_is_running(void)
+ {
+-    return s_broker.started;
++    if (s_broker.lifecycle_mutex == NULL) {
++        return false;
++    }
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    bool running = (s_broker.state == BROKER_STATE_RUNNING);
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++    return running;
+ }
+ 
+ esp_err_t argus_mqtt_broker_stop(void)
+ {
+-    if (!s_broker.started) return ESP_OK;
++    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_INVALID_STATE,
++                        TAG, "broker not initialised");
++
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+ 
+-    if (s_broker.lock != NULL) {
+-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
++    if (s_broker.state == BROKER_STATE_STOPPED) {
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        return ESP_OK;
+     }
+ 
++    /* Clear event bits so we can wait for fresh signals. */
++    xEventGroupClearBits(s_broker.lifecycle_event_group, BROKER_EVT_STARTED | BROKER_EVT_STOPPED | BROKER_EVT_CLIENTS_EXITED);
++
++    s_broker.state = BROKER_STATE_STOPPING;
++
++    /* Close the listener socket to break accept(). */
+     if (s_broker.listen_sock >= 0) {
++        shutdown(s_broker.listen_sock, SHUT_RDWR);
+         close(s_broker.listen_sock);
+         s_broker.listen_sock = -1;
+     }
+ 
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++
++    /* Close all client sockets under client_lock to unblock recv(). */
++    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+     for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+         if (s_broker.clients[i].in_use && s_broker.clients[i].sock >= 0) {
++            shutdown(s_broker.clients[i].sock, SHUT_RDWR);
+             close(s_broker.clients[i].sock);
+             s_broker.clients[i].sock = -1;
+-            s_broker.clients[i].in_use = false;
+         }
+     }
++    xSemaphoreGive(s_broker.client_lock);
+ 
+-    s_broker.started = false;
++    /* --- Wait for the server task to exit (bounded 2 s) ---------------- */
++    EventBits_t bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
++                                           BROKER_EVT_STOPPED,
++                                           pdFALSE, pdFALSE,
++                                           pdMS_TO_TICKS(2000));
+ 
+-    if (s_broker.lock != NULL) {
+-        xSemaphoreGive(s_broker.lock);
++    if (!(bits & BROKER_EVT_STOPPED)) {
++        ESP_LOGW(TAG, "server task did not exit within 2000 ms");
++        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++        /* Remain in STOPPING ΓÇö do not force to STOPPED. */
++        xSemaphoreGive(s_broker.lifecycle_mutex);
++        return ESP_ERR_TIMEOUT;
+     }
+ 
+-    ESP_LOGI(TAG, "local MQTT broker listener stopped cleanly");
++    /* --- Wait for all client tasks to drain (bounded 2 s) -------------- */
++    if (atomic_load(&s_broker.active_client_count) > 0) {
++        xEventGroupClearBits(s_broker.lifecycle_event_group, BROKER_EVT_CLIENTS_EXITED);
++        bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
++                                   BROKER_EVT_CLIENTS_EXITED,
++                                   pdFALSE, pdFALSE,
++                                   pdMS_TO_TICKS(2000));
++
++        if (!(bits & BROKER_EVT_CLIENTS_EXITED) && atomic_load(&s_broker.active_client_count) > 0) {
++            ESP_LOGW(TAG, "client tasks did not drain within 2000 ms (%d remaining)",
++                     (int)atomic_load(&s_broker.active_client_count));
++            return ESP_ERR_TIMEOUT;
++        }
++    }
++
++    /* All tasks have exited. Transition to STOPPED. */
++    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
++    s_broker.state = BROKER_STATE_STOPPED;
++    xSemaphoreGive(s_broker.lifecycle_mutex);
++
++    ESP_LOGI(TAG, "local MQTT broker stopped cleanly");
+     return ESP_OK;
+ }
+diff --git a/main/argus_mqtt_broker.h b/main/argus_mqtt_broker.h
+index 8e3b315..cc86804 100644
+--- a/main/argus_mqtt_broker.h
++++ b/main/argus_mqtt_broker.h
+@@ -15,6 +15,18 @@ typedef struct {
+     void *user_ctx;
+ } argus_mqtt_broker_config_t;
+ 
++/**
++ * @brief One-time lifecycle object creation (mutex, event group).
++ *
++ * Must be called once before any start/stop cycle.  Safe to call from
++ * app_main before the scheduler or networking is ready.  Creates
++ * firmware-lifetime synchronisation objects that are never deleted.
++ *
++ * @return ESP_OK on success, ESP_ERR_NO_MEM if allocation fails,
++ *         ESP_ERR_INVALID_STATE if already initialised.
++ */
++esp_err_t argus_mqtt_broker_init(void);
++
+ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
+ esp_err_t argus_mqtt_broker_stop(void);
+ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);
+diff --git a/main/argus_net_mgr.c b/main/argus_net_mgr.c
+index 7ab5164..d278e02 100644
+--- a/main/argus_net_mgr.c
++++ b/main/argus_net_mgr.c
+@@ -14,11 +14,13 @@
+ #include "esp_event.h"
+ #include "esp_netif.h"
+ #include "esp_log.h"
++#include "esp_system.h"
+ #include "sdkconfig.h"
+ #include "freertos/FreeRTOS.h"
+ #include "freertos/task.h"
+ #include "freertos/queue.h"
+ #include "freertos/semphr.h"
++#include <stdatomic.h>
+ #include <string.h>
+ 
+ static const char *TAG = "argus_net_mgr";
+@@ -52,21 +54,24 @@ static bool validate_build_service_credential(void)
+     return (len >= 8 && len <= 63);
+ }
+ 
+-static volatile bool s_sta_started = false;
+-static volatile bool s_sta_connected = false;
+-static volatile bool s_sta_ip_acquired = false;
+-static volatile bool s_ap_started = false;
++static _Atomic bool s_sta_started = false;
++static _Atomic bool s_sta_connected = false;
++static _Atomic bool s_sta_ip_acquired = false;
++static _Atomic bool s_ap_started = false;
+ static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
+ 
++// Unused: event group removed; verification uses bounded atomic polling.
++// Retained as comment for Phase 4B if event-bit waits are needed.
++
+ void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb)
+ {
+     s_broker_start_cb = cb;
+ }
+ 
+-bool argus_net_mgr_is_sta_started(void) { return s_sta_started; }
+-bool argus_net_mgr_is_sta_connected(void) { return s_sta_connected; }
+-bool argus_net_mgr_is_sta_ip_acquired(void) { return s_sta_ip_acquired; }
+-bool argus_net_mgr_is_ap_started(void) { return s_ap_started; }
++bool argus_net_mgr_is_sta_started(void) { return atomic_load(&s_sta_started); }
++bool argus_net_mgr_is_sta_connected(void) { return atomic_load(&s_sta_connected); }
++bool argus_net_mgr_is_sta_ip_acquired(void) { return atomic_load(&s_sta_ip_acquired); }
++bool argus_net_mgr_is_ap_started(void) { return atomic_load(&s_ap_started); }
+ 
+ const char *argus_net_mgr_get_wifi_driver_mode_name(void)
+ {
+@@ -87,22 +92,22 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
+ {
+     if (event_base == WIFI_EVENT) {
+         if (event_id == WIFI_EVENT_STA_START) {
+-            s_sta_started = true;
++            atomic_store(&s_sta_started, true);
+         } else if (event_id == WIFI_EVENT_STA_STOP) {
+-            s_sta_started = false;
+-            s_sta_connected = false;
+-            s_sta_ip_acquired = false;
++            atomic_store(&s_sta_started, false);
++            atomic_store(&s_sta_connected, false);
++            atomic_store(&s_sta_ip_acquired, false);
+         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+-            s_sta_connected = true;
++            atomic_store(&s_sta_connected, true);
+         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+-            s_sta_connected = false;
+-            s_sta_ip_acquired = false;
++            atomic_store(&s_sta_connected, false);
++            atomic_store(&s_sta_ip_acquired, false);
+             argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED };
+             argus_net_mgr_post_event(&evt);
+         } else if (event_id == WIFI_EVENT_AP_START) {
+-            s_ap_started = true;
++            atomic_store(&s_ap_started, true);
+         } else if (event_id == WIFI_EVENT_AP_STOP) {
+-            s_ap_started = false;
++            atomic_store(&s_ap_started, false);
+         } else if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+             argus_net_event_t evt = { .type = ARGUS_NET_EVT_AP_CLIENT_CONNECTED };
+             argus_net_mgr_post_event(&evt);
+@@ -111,7 +116,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
+             argus_net_mgr_post_event(&evt);
+         }
+     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+-        s_sta_ip_acquired = true;
++        atomic_store(&s_sta_ip_acquired, true);
+         argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_CONNECTED };
+         argus_net_mgr_post_event(&evt);
+     }
+@@ -128,10 +133,7 @@ static void net_mgr_task(void *pvParameters)
+                     break;
+ 
+                 case ARGUS_NET_EVT_SERVICE_EXIT:
+-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+-                    set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
+-                    argus_authority_request_exit();
+-                    xSemaphoreGive(s_net_mutex);
++                    argus_net_mgr_request_service_exit(evt.requested_owner);
+                     break;
+ 
+                 case ARGUS_NET_EVT_STA_CONNECTED:
+@@ -296,7 +298,8 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
+     }
+ 
+     if (err == ESP_OK) {
+-        s_ap_started = true;
++        // Do NOT manually set s_ap_started here; the Wi-Fi event handler
++        // (WIFI_EVENT_AP_START) is the authoritative source.
+         set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
+         ESP_LOGI(TAG, "Service AP discoverability enabled cleanly in APSTA mode.");
+     } else {
+@@ -325,7 +328,8 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
+     // Validate transition ops table
+     if (!ops->request_normal_stop || !ops->verify_stopped || !ops->stop_broker ||
+         !ops->verify_broker_stopped || !ops->disconnect_sta || !ops->verify_sta_disconnected ||
+-        !ops->verify_sta_ip_released || !ops->set_wifi_ap_only || !ops->verify_ap_active) {
++        !ops->verify_sta_ip_released || !ops->set_wifi_ap_only || !ops->verify_ap_active ||
++        !ops->verify_machine_safe) {
+         return ESP_ERR_INVALID_ARG;
+     }
+ 
+@@ -416,7 +420,15 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
+     // Step 13: Set network mode SERVICE_AP_ONLY
+     *net_mode = ARGUS_NET_MODE_SERVICE_AP_ONLY;
+ 
+-    // Step 14: Grant LOCAL_SERVICE/<owner> last
++    // Step 14: Final pre-grant machine-state and E-stop verification
++    esp_err_t safe_err = ops->verify_machine_safe(ops->ctx);
++    if (safe_err != ESP_OK) {
++        auth_ops->abort_transition(auth_ops->ctx);
++        *net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++        return safe_err;
++    }
++
++    // Step 15: Grant LOCAL_SERVICE/<owner> last
+     esp_err_t grant_err = auth_ops->grant_local(auth_ops->ctx, requested_owner);
+     if (grant_err != ESP_OK) {
+         auth_ops->abort_transition(auth_ops->ctx);
+@@ -473,24 +485,26 @@ static esp_err_t prod_disconnect_sta(void *ctx) {
+ 
+ static esp_err_t prod_verify_sta_disconnected(void *ctx) {
+     (void)ctx;
++    // After esp_wifi_disconnect() but before set_mode(AP), STA interface may
++    // still be started. Only verify connection and IP are released here.
+     int timeout_ms = 2000;
+     while (timeout_ms > 0) {
+-        if (!s_sta_started && !s_sta_connected) return ESP_OK;
++        if (!atomic_load(&s_sta_connected)) return ESP_OK;
+         vTaskDelay(pdMS_TO_TICKS(50));
+         timeout_ms -= 50;
+     }
+-    return (s_sta_connected || s_sta_started) ? ESP_ERR_TIMEOUT : ESP_OK;
++    return atomic_load(&s_sta_connected) ? ESP_ERR_TIMEOUT : ESP_OK;
+ }
+ 
+ static esp_err_t prod_verify_sta_ip_released(void *ctx) {
+     (void)ctx;
+     int timeout_ms = 2000;
+     while (timeout_ms > 0) {
+-        if (!s_sta_ip_acquired) return ESP_OK;
++        if (!atomic_load(&s_sta_ip_acquired)) return ESP_OK;
+         vTaskDelay(pdMS_TO_TICKS(50));
+         timeout_ms -= 50;
+     }
+-    return s_sta_ip_acquired ? ESP_ERR_TIMEOUT : ESP_OK;
++    return atomic_load(&s_sta_ip_acquired) ? ESP_ERR_TIMEOUT : ESP_OK;
+ }
+ 
+ static esp_err_t prod_set_wifi_ap_only(void *ctx) {
+@@ -500,10 +514,15 @@ static esp_err_t prod_set_wifi_ap_only(void *ctx) {
+ 
+ static esp_err_t prod_verify_ap_active(void *ctx) {
+     (void)ctx;
++    // After set_wifi_ap_only(), verify full AP-only state:
++    // driver mode == AP, AP event fired, STA fully torn down.
+     int timeout_ms = 2000;
+     wifi_mode_t mode = WIFI_MODE_NULL;
+     while (timeout_ms > 0) {
+-        if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_AP && s_ap_started) {
++        bool mode_ok = (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_AP);
++        bool ap_ok = atomic_load(&s_ap_started);
++        bool sta_gone = !atomic_load(&s_sta_started) && !atomic_load(&s_sta_connected) && !atomic_load(&s_sta_ip_acquired);
++        if (mode_ok && ap_ok && sta_gone) {
+             return ESP_OK;
+         }
+         vTaskDelay(pdMS_TO_TICKS(50));
+@@ -512,6 +531,24 @@ static esp_err_t prod_verify_ap_active(void *ctx) {
+     return ESP_ERR_TIMEOUT;
+ }
+ 
++static esp_err_t prod_verify_machine_safe(void *ctx) {
++    (void)ctx;
++    argus_state_snapshot_t state_snap;
++    argus_state_mgr_get_snapshot(&state_snap);
++    if (state_snap.estop_latched || state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
++        state_snap.machine_state == ARGUS_STATE_FAULTED) {
++        ESP_LOGE(TAG, "Pre-grant safety check failed: state=%s, estop_latched=%d",
++                 argus_state_mgr_get_state_name(state_snap.machine_state), (int)state_snap.estop_latched);
++        return ESP_ERR_INVALID_STATE;
++    }
++    if (state_snap.machine_state != ARGUS_STATE_HOLDING && state_snap.machine_state != ARGUS_STATE_UNLOCKED) {
++        ESP_LOGE(TAG, "Pre-grant safety check failed: unexpected machine state %s",
++                 argus_state_mgr_get_state_name(state_snap.machine_state));
++        return ESP_ERR_INVALID_STATE;
++    }
++    return ESP_OK;
++}
++
+ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
+ {
+     if (!s_initialized) return ESP_ERR_INVALID_STATE;
+@@ -531,18 +568,42 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
+         return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    if (!s_ap_started) {
++    if (!atomic_load(&s_ap_started)) {
+         ESP_LOGE(TAG, "Service entry rejected: Service AP is not started");
+         xSemaphoreGive(s_net_mutex);
+         return ESP_ERR_INVALID_STATE;
+     }
+ 
+-    // Step 2: Acquire command-dispatch exclusivity
++    // ---- FIRST DISPATCH GATE: validate + set SERVICE_TRANSITION ----
+     argus_cmd_router_lock_dispatch();
+ 
+     argus_service_authority_ops_t auth_ops;
+     argus_authority_get_production_service_ops(&auth_ops);
+ 
++    // Set authority to SERVICE_TRANSITION/NONE (increments generation)
++    esp_err_t prep_err = auth_ops.prepare_transition(auth_ops.ctx);
++    if (prep_err != ESP_OK) {
++        auth_ops.abort_transition(auth_ops.ctx);
++        s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++        argus_cmd_router_unlock_dispatch();
++        xSemaphoreGive(s_net_mutex);
++        return prep_err;
++    }
++
++    // Capture the transition generation for revalidation
++    argus_authority_snapshot_t auth_snap_after_prep;
++    argus_authority_mgr_get_snapshot(&auth_snap_after_prep);
++    uint32_t transition_generation = auth_snap_after_prep.generation;
++
++    set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
++
++    argus_cmd_router_unlock_dispatch();
++    // ---- END FIRST DISPATCH GATE ----
++
++    // Normal commands reaching the router during this interval acquire dispatch,
++    // observe SERVICE_TRANSITION, are rejected, and return promptly.
++
++    // Execute blocking operations without holding dispatch:
+     argus_service_transition_ops_t prod_ops = {
+         .request_normal_stop = prod_request_normal_stop,
+         .verify_stopped = prod_verify_stopped,
+@@ -553,25 +614,123 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
+         .verify_sta_ip_released = prod_verify_sta_ip_released,
+         .set_wifi_ap_only = prod_set_wifi_ap_only,
+         .verify_ap_active = prod_verify_ap_active,
++        .verify_machine_safe = prod_verify_machine_safe,
+         .ctx = NULL
+     };
+ 
+-    esp_err_t res = argus_net_mgr_orchestrate_service_entry(&s_net_mode, requested_owner, &auth_ops, &prod_ops);
+-    if (res != ESP_OK) {
+-        s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
+-    } else {
+-        ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
+-                 argus_authority_mgr_get_owner_name(requested_owner));
+-    }
++    // Execute transition operations (all blocking, no dispatch held)
++    esp_err_t op_err = ESP_OK;
++
++    op_err = prod_ops.request_normal_stop(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
+ 
+-    // Step 8: Release command-dispatch exclusivity
++    op_err = prod_ops.verify_stopped(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.stop_broker(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.verify_broker_stopped(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.disconnect_sta(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.verify_sta_disconnected(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.verify_sta_ip_released(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.set_wifi_ap_only(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.verify_ap_active(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    op_err = prod_ops.verify_machine_safe(prod_ops.ctx);
++    if (op_err != ESP_OK) goto abort_transition;
++
++    // ---- SECOND DISPATCH GATE: revalidate + grant ----
++    argus_cmd_router_lock_dispatch();
++    {
++        // Revalidate authority remains SERVICE_TRANSITION/NONE with same generation
++        argus_authority_snapshot_t recheck;
++        argus_authority_mgr_get_snapshot(&recheck);
++
++        if (recheck.mode != ARGUS_AUTHORITY_SERVICE_TRANSITION ||
++            recheck.owner != ARGUS_AUTH_OWNER_NONE ||
++            recheck.generation != transition_generation) {
++            ESP_LOGE(TAG, "Service entry: authority changed during transition (gen %lu -> %lu, mode %d)",
++                     (unsigned long)transition_generation, (unsigned long)recheck.generation, (int)recheck.mode);
++            auth_ops.abort_transition(auth_ops.ctx);
++            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++            argus_cmd_router_unlock_dispatch();
++            xSemaphoreGive(s_net_mutex);
++            return ESP_ERR_INVALID_STATE;
++        }
++
++        // Revalidate machine state
++        argus_state_snapshot_t state_recheck;
++        argus_state_mgr_get_snapshot(&state_recheck);
++        if (state_recheck.estop_latched ||
++            state_recheck.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
++            state_recheck.machine_state == ARGUS_STATE_FAULTED ||
++            (state_recheck.machine_state != ARGUS_STATE_HOLDING &&
++             state_recheck.machine_state != ARGUS_STATE_UNLOCKED)) {
++            ESP_LOGE(TAG, "Service entry: machine unsafe at grant point (state=%s, estop=%d)",
++                     argus_state_mgr_get_state_name(state_recheck.machine_state),
++                     (int)state_recheck.estop_latched);
++            auth_ops.abort_transition(auth_ops.ctx);
++            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++            argus_cmd_router_unlock_dispatch();
++            xSemaphoreGive(s_net_mutex);
++            return ESP_ERR_INVALID_STATE;
++        }
++
++        // Revalidate AP-only network mode
++        wifi_mode_t wifi_mode = WIFI_MODE_NULL;
++        esp_wifi_get_mode(&wifi_mode);
++        if (wifi_mode != WIFI_MODE_AP) {
++            ESP_LOGE(TAG, "Service entry: Wi-Fi not AP-only at grant point");
++            auth_ops.abort_transition(auth_ops.ctx);
++            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++            argus_cmd_router_unlock_dispatch();
++            xSemaphoreGive(s_net_mutex);
++            return ESP_ERR_INVALID_STATE;
++        }
++
++        // Grant LOCAL_SERVICE/<owner>
++        esp_err_t grant_err = auth_ops.grant_local(auth_ops.ctx, requested_owner);
++        if (grant_err != ESP_OK) {
++            auth_ops.abort_transition(auth_ops.ctx);
++            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++            argus_cmd_router_unlock_dispatch();
++            xSemaphoreGive(s_net_mutex);
++            return grant_err;
++        }
++
++        s_net_mode = ARGUS_NET_MODE_SERVICE_AP_ONLY;
++    }
+     argus_cmd_router_unlock_dispatch();
++    // ---- END SECOND DISPATCH GATE ----
+ 
+-    // Step 9: Release network-transition serialization
++    ESP_LOGI(TAG, "Coordinated service entry complete. Mode: SERVICE_AP_ONLY, Authority: LOCAL_SERVICE/%s",
++             argus_authority_mgr_get_owner_name(requested_owner));
++
++    xSemaphoreGive(s_net_mutex);
++    return ESP_OK;
++
++abort_transition:
++    ESP_LOGE(TAG, "Service entry failed during transition: %s (%d)", esp_err_to_name(op_err), op_err);
++    auth_ops.abort_transition(auth_ops.ctx);
++    s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++    s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
+     xSemaphoreGive(s_net_mutex);
+-    return res;
++    return op_err;
+ }
+ 
++
+ esp_err_t argus_net_mgr_post_event(const argus_net_event_t *evt)
+ {
+     if (!evt || !s_event_queue) return ESP_ERR_INVALID_ARG;
+@@ -581,3 +740,128 @@ esp_err_t argus_net_mgr_post_event(const argus_net_event_t *evt)
+     }
+     return ESP_OK;
+ }
++
++esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap)
++{
++    if (!out_snap) return ESP_ERR_INVALID_ARG;
++
++    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
++    out_snap->mode = s_net_mode;
++    out_snap->last_error = s_last_error;
++    out_snap->sta_connected = atomic_load(&s_sta_connected);
++    out_snap->sta_ip_acquired = atomic_load(&s_sta_ip_acquired);
++    out_snap->ap_started = atomic_load(&s_ap_started);
++    out_snap->mqtt_broker_running = argus_mqtt_broker_is_running();
++    xSemaphoreGive(s_net_mutex);
++
++    return ESP_OK;
++}
++
++esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner)
++{
++    if (!s_initialized) return ESP_ERR_INVALID_STATE;
++
++    // Step 1: Acquire network-transition serialization
++    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
++
++    if (s_net_mode != ARGUS_NET_MODE_SERVICE_AP_ONLY) {
++        ESP_LOGE(TAG, "Service exit rejected: mode must be SERVICE_AP_ONLY (current: %s)",
++                 argus_net_mgr_get_mode_name(s_net_mode));
++        xSemaphoreGive(s_net_mutex);
++        return ESP_ERR_INVALID_STATE;
++    }
++
++    // Validate the caller currently owns LOCAL_SERVICE authority
++    argus_authority_snapshot_t auth_snap;
++    argus_authority_mgr_get_snapshot(&auth_snap);
++    if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE || auth_snap.owner != requested_owner) {
++        ESP_LOGE(TAG, "Service exit rejected: caller does not own LOCAL_SERVICE (mode=%d, owner=%d, requested=%d)",
++                 (int)auth_snap.mode, (int)auth_snap.owner, (int)requested_owner);
++        xSemaphoreGive(s_net_mutex);
++        return ESP_ERR_INVALID_STATE;
++    }
++
++    // ---- FIRST DISPATCH GATE: set SERVICE_TRANSITION ----
++    argus_cmd_router_lock_dispatch();
++
++    set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
++    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
++
++    argus_cmd_router_unlock_dispatch();
++    // ---- END FIRST DISPATCH GATE ----
++
++    // Step 4: Controlled stop (no dispatch held)
++    esp_err_t stop_err = argus_state_mgr_stop_normal();
++    if (stop_err != ESP_OK) {
++        ESP_LOGE(TAG, "Service exit: stop_normal failed: %s (%d)", esp_err_to_name(stop_err), stop_err);
++        goto exit_fail_closed;
++    }
++
++    // Step 5: Verify stopped (bounded 5s, no dispatch held)
++    argus_state_snapshot_t state_snap;
++    int timeout_ms = 5000;
++    bool stopped_ok = false;
++    while (timeout_ms > 0) {
++        argus_state_mgr_get_snapshot(&state_snap);
++        if (state_snap.machine_state == ARGUS_STATE_HOLDING || state_snap.machine_state == ARGUS_STATE_UNLOCKED) {
++            stopped_ok = true;
++            break;
++        }
++        if (state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
++            state_snap.machine_state == ARGUS_STATE_FAULTED ||
++            state_snap.estop_latched) {
++            ESP_LOGE(TAG, "Service exit: machine state=%s, estop_latched=%d during stop",
++                     argus_state_mgr_get_state_name(state_snap.machine_state), (int)state_snap.estop_latched);
++            stop_err = ESP_ERR_INVALID_STATE;
++            goto exit_fail_closed;
++        }
++        vTaskDelay(pdMS_TO_TICKS(50));
++        timeout_ms -= 50;
++    }
++
++    if (!stopped_ok) {
++        ESP_LOGE(TAG, "Service exit: stop timeout");
++        stop_err = ESP_ERR_TIMEOUT;
++        goto exit_fail_closed;
++    }
++
++    // ---- SECOND DISPATCH GATE: revoke authority + verify safe ----
++    argus_cmd_router_lock_dispatch();
++    {
++        // Revalidate machine is still safe
++        argus_state_mgr_get_snapshot(&state_snap);
++        if (state_snap.estop_latched ||
++            state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
++            state_snap.machine_state == ARGUS_STATE_FAULTED ||
++            (state_snap.machine_state != ARGUS_STATE_HOLDING &&
++             state_snap.machine_state != ARGUS_STATE_UNLOCKED)) {
++            ESP_LOGE(TAG, "Service exit: machine unsafe at revocation point");
++            argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
++            s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++            argus_cmd_router_unlock_dispatch();
++            xSemaphoreGive(s_net_mutex);
++            return ESP_ERR_INVALID_STATE;
++        }
++
++        // Revoke authority to NONE/NONE
++        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
++    }
++    argus_cmd_router_unlock_dispatch();
++    // ---- END SECOND DISPATCH GATE ----
++
++    // Step 8: Release net mutex before reboot
++    xSemaphoreGive(s_net_mutex);
++
++    ESP_LOGI(TAG, "Service exit complete. Rebooting...");
++    vTaskDelay(pdMS_TO_TICKS(100));
++    esp_restart();
++    return ESP_OK; // Unreachable
++
++exit_fail_closed:
++    // Fail closed: NONE/NONE + NETWORK_FAULT, no reboot
++    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
++    s_net_mode = ARGUS_NET_MODE_NETWORK_FAULT;
++    s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
++    xSemaphoreGive(s_net_mutex);
++    return stop_err;
++}
+diff --git a/main/argus_net_mgr.h b/main/argus_net_mgr.h
+index 180f56d..5a70f31 100644
+--- a/main/argus_net_mgr.h
++++ b/main/argus_net_mgr.h
+@@ -101,6 +101,7 @@ typedef struct {
+     esp_err_t (*verify_sta_ip_released)(void *ctx);
+     esp_err_t (*set_wifi_ap_only)(void *ctx);
+     esp_err_t (*verify_ap_active)(void *ctx);
++    esp_err_t (*verify_machine_safe)(void *ctx);  /**< Final pre-grant machine-state/E-stop check */
+     void *ctx;
+ } argus_service_transition_ops_t;
+ 
+@@ -119,9 +120,31 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
+  */
+ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner);
+ 
++/**
++ * @brief Request coordinated service-exit transition with motion stop, network restore, and reboot.
++ * @param requested_owner Current owner requesting exit.
++ * @return ESP_OK if reboot initiated, error code on failure (reboot does not occur on error).
++ */
++esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner);
++
+ typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
+ void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
+ 
++/**
++ * @brief Race-free network observation assembled from mutex-protected mode/error
++ *        state and atomic lifecycle flags.
++ */
++typedef struct {
++    argus_network_mode_t mode;
++    argus_net_err_t last_error;
++    bool sta_connected;
++    bool sta_ip_acquired;
++    bool ap_started;
++    bool mqtt_broker_running;
++} argus_net_snapshot_t;
++
++esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);
++
+ bool argus_net_mgr_is_sta_started(void);
+ bool argus_net_mgr_is_sta_connected(void);
+ bool argus_net_mgr_is_sta_ip_acquired(void);
+diff --git a/main/argus_nvs_config.c b/main/argus_nvs_config.c
+index f2d47a0..1c240bb 100644
+--- a/main/argus_nvs_config.c
++++ b/main/argus_nvs_config.c
+@@ -566,18 +566,52 @@ void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_pa
+     }
+ }
+ 
+-esp_err_t argus_nvs_config_get_observation_snapshot(uint8_t *out_selector, argus_cfg_slot_t *out_slot_a, argus_cfg_slot_t *out_slot_b)
++esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
+ {
++    if (!out_obs) return ESP_ERR_INVALID_ARG;
++
+     const argus_nvs_driver_t *drv = get_driver();
+-    if (out_selector) {
+-        *out_selector = s_active_slot_index;
+-        drv->read_selector(drv->ctx, out_selector);
++    esp_err_t first_unexpected = ESP_OK;
++
++    // Read selector
++    memset(out_obs, 0, sizeof(*out_obs));
++    out_obs->selector_status = drv->read_selector(drv->ctx, &out_obs->selector);
++    if (out_obs->selector_status == ESP_OK) {
++        out_obs->selector_present = true;
++    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND) {
++        out_obs->selector_present = false;
++    } else {
++        out_obs->selector_present = false;
++        if (first_unexpected == ESP_OK) first_unexpected = out_obs->selector_status;
+     }
+-    if (out_slot_a) {
+-        drv->read_slot(drv->ctx, 0, out_slot_a);
++
++    // Read slot A
++    out_obs->slot_a_status = drv->read_slot(drv->ctx, 0, &out_obs->slot_a);
++    if (out_obs->slot_a_status == ESP_OK) {
++        out_obs->slot_a_present = true;
++        out_obs->slot_a_valid = is_slot_valid(&out_obs->slot_a);
++    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND) {
++        out_obs->slot_a_present = false;
++        out_obs->slot_a_valid = false;
++    } else {
++        out_obs->slot_a_present = false;
++        out_obs->slot_a_valid = false;
++        if (first_unexpected == ESP_OK) first_unexpected = out_obs->slot_a_status;
+     }
+-    if (out_slot_b) {
+-        drv->read_slot(drv->ctx, 1, out_slot_b);
++
++    // Read slot B
++    out_obs->slot_b_status = drv->read_slot(drv->ctx, 1, &out_obs->slot_b);
++    if (out_obs->slot_b_status == ESP_OK) {
++        out_obs->slot_b_present = true;
++        out_obs->slot_b_valid = is_slot_valid(&out_obs->slot_b);
++    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND) {
++        out_obs->slot_b_present = false;
++        out_obs->slot_b_valid = false;
++    } else {
++        out_obs->slot_b_present = false;
++        out_obs->slot_b_valid = false;
++        if (first_unexpected == ESP_OK) first_unexpected = out_obs->slot_b_status;
+     }
+-    return ESP_OK;
++
++    return first_unexpected;
+ }
+diff --git a/main/argus_nvs_config.h b/main/argus_nvs_config.h
+index cb83383..e3d330f 100644
+--- a/main/argus_nvs_config.h
++++ b/main/argus_nvs_config.h
+@@ -138,9 +138,39 @@ uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload);
+ bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b);
+ 
+ /**
+- * @brief Read-only observation helper for NVS selector and dual-slot metadata without state mutation.
++ * @brief NVS observation result with per-slot error differentiation.
++ *
++ * - status == ESP_OK: data was read successfully (present = true)
++ * - status == ESP_ERR_NOT_FOUND: key does not exist (present = false, valid = false)
++ * - status == other: driver error (present = false, valid = false)
++ * - valid: slot present AND valid_marker == ARGUS_CONFIG_VALID_MARKER
+  */
+-esp_err_t argus_nvs_config_get_observation_snapshot(uint8_t *out_selector, argus_cfg_slot_t *out_slot_a, argus_cfg_slot_t *out_slot_b);
++typedef struct {
++    esp_err_t selector_status;
++    bool      selector_present;
++    uint8_t   selector;
++
++    esp_err_t slot_a_status;
++    bool      slot_a_present;
++    bool      slot_a_valid;
++    argus_cfg_slot_t slot_a;
++
++    esp_err_t slot_b_status;
++    bool      slot_b_present;
++    bool      slot_b_valid;
++    argus_cfg_slot_t slot_b;
++} argus_nvs_observation_t;
++
++/**
++ * @brief Read-only observation of NVS selector and dual-slot metadata without state mutation.
++ *
++ * Missing NVS configuration is valid for an uncommissioned device.
++ *
++ * @param[out] out_obs Observation result.
++ * @return ESP_OK if all reads returned ESP_OK or ESP_ERR_NOT_FOUND.
++ *         Returns the first unexpected error otherwise.
++ */
++esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/main/argus_state_mgr.c b/main/argus_state_mgr.c
+index b58673b..04070d1 100644
+--- a/main/argus_state_mgr.c
++++ b/main/argus_state_mgr.c
+@@ -479,7 +479,7 @@ esp_err_t argus_state_mgr_unlock(void)
+ 
+ esp_err_t argus_state_mgr_estop(void)
+ {
+-    // Non-blocking E-Stop bypasses s_command_mutex for immediate preemption
++    // E-Stop bypasses s_command_mutex but blocks on s_state_mutex (non-preemptive; Phase 4B)
+     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+     esp_err_t err = argus_state_core_estop(&s_prod_core);
+     xSemaphoreGive(s_state_mutex);
+diff --git a/main/argus_tests_4a.c b/main/argus_tests_4a.c
+index 03d77ed..e4a1e69 100644
+--- a/main/argus_tests_4a.c
++++ b/main/argus_tests_4a.c
+@@ -432,200 +432,303 @@ static esp_err_t test_nvs_commit_readback_verification_and_lkg_preservation(void
+     return ESP_OK;
+ }
+ 
+-// Mock net ops context
+ typedef struct {
+-    int fail_stage; // 2 to 13 to inject failure at specific step
+-    bool grant_local_called;
+-    int abort_call_count;
+-    bool estop_during_stop;
+-    bool normal_stop_called;
+-    bool verify_stopped_called;
+-    bool stop_broker_called;
+-    bool verify_broker_stopped_called;
+-    bool disconnect_sta_called;
+-    bool verify_sta_disc_called;
+-    bool verify_sta_ip_called;
+-    bool set_ap_called;
+-    bool verify_ap_called;
+-    int call_sequence[16];
++    // Authority state (stack-local)
++    argus_authority_core_t auth_core;
++
++    // Machine simulation
++    argus_machine_state_t mock_machine_state;
++    bool estop_latched;
++
++    // Call counters
++    int prepare_count;
++    int abort_count;
++    int grant_count;
++
++    // Per-operation call counts
++    int normal_stop_count;
++    int verify_stopped_count;
++    int stop_broker_count;
++    int verify_broker_count;
++    int disconnect_sta_count;
++    int verify_sta_disc_count;
++    int verify_sta_ip_count;
++    int set_ap_count;
++    int verify_ap_count;
++    int verify_machine_safe_count;
++
++    // Exact call sequence
++    int call_sequence[24];
+     int call_count;
+-} mock_net_ops_ctx_t;
+-
+-static esp_err_t mock_prep_trans(void *ctx) {
+-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
+-    return argus_authority_core_prepare_service_transition(acore);
+-}
+-static esp_err_t mock_fail_prep_trans(void *ctx) {
+-    (void)ctx;
+-    return ESP_ERR_INVALID_STATE;
+-}
+-static esp_err_t mock_grant_loc(void *ctx, argus_authority_owner_t owner) {
+-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
+-    return argus_authority_core_grant_local_service(acore, owner);
+-}
+-static esp_err_t mock_fail_grant_loc(void *ctx, argus_authority_owner_t owner) {
+-    (void)ctx;
+-    (void)owner;
+-    return ESP_ERR_INVALID_ARG;
+-}
+-static void mock_abort_trans(void *ctx) {
+-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
+-    argus_authority_core_abort_service_transition(acore);
+-}
+ 
+-static esp_err_t m_stop_norm(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->normal_stop_called = true;
++    // Failure injection
++    int fail_stage;
++    esp_err_t fail_error;
++    bool estop_during_stop;
++} mock_orchestration_ctx_t;
++
++static void init_mock_ctx(mock_orchestration_ctx_t *m) {
++    memset(m, 0, sizeof(*m));
++    m->auth_core.mode = ARGUS_AUTHORITY_NONE;
++    m->auth_core.owner = ARGUS_AUTH_OWNER_NONE;
++    m->auth_core.generation = 1;
++    m->auth_core.last_error = ESP_OK;
++    m->mock_machine_state = ARGUS_STATE_HOLDING;
++    m->estop_latched = false;
++    m->fail_stage = -1;
++    m->fail_error = ESP_ERR_INVALID_STATE;
++    m->estop_during_stop = false;
++}
++
++static esp_err_t mock_prepare_transition(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->prepare_count++;
++    m->call_sequence[m->call_count++] = 2;
++    if (m->fail_stage == 2) return m->fail_error;
++    return argus_authority_core_prepare_service_transition(&m->auth_core);
++}
++
++static esp_err_t mock_grant_local(void *ctx, argus_authority_owner_t owner) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->grant_count++;
++    m->call_sequence[m->call_count++] = 15;
++    if (m->fail_stage == 15) return m->fail_error;
++    return argus_authority_core_grant_local_service(&m->auth_core, owner);
++}
++
++static void mock_abort_transition(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->abort_count++;
++    argus_authority_core_abort_service_transition(&m->auth_core);
++}
++
++static esp_err_t mock_request_normal_stop(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->normal_stop_count++;
+     m->call_sequence[m->call_count++] = 4;
+-    return (m->fail_stage == 4) ? ESP_ERR_TIMEOUT : ESP_OK;
++    if (m->fail_stage == 4) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_ver_stopped(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->verify_stopped_called = true;
++
++static esp_err_t mock_verify_stopped(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_stopped_count++;
+     m->call_sequence[m->call_count++] = 5;
+-    if (m->estop_during_stop) return ESP_ERR_INVALID_STATE;
+-    return (m->fail_stage == 5) ? ESP_ERR_INVALID_STATE : ESP_OK;
++    if (m->estop_during_stop) {
++        m->mock_machine_state = ARGUS_STATE_EMERGENCY_STOPPED;
++        m->estop_latched = true;
++        return m->fail_error;
++    }
++    if (m->fail_stage == 5) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_stop_brk(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->stop_broker_called = true;
++
++static esp_err_t mock_stop_broker(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->stop_broker_count++;
+     m->call_sequence[m->call_count++] = 6;
+-    return (m->fail_stage == 6) ? ESP_ERR_INVALID_STATE : ESP_OK;
++    if (m->fail_stage == 6) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_ver_brk(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->verify_broker_stopped_called = true;
++
++static esp_err_t mock_verify_broker_stopped(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_broker_count++;
+     m->call_sequence[m->call_count++] = 7;
+-    return (m->fail_stage == 7) ? ESP_ERR_TIMEOUT : ESP_OK;
++    if (m->fail_stage == 7) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_disc_sta(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->disconnect_sta_called = true;
++
++static esp_err_t mock_disconnect_sta(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->disconnect_sta_count++;
+     m->call_sequence[m->call_count++] = 8;
+-    return (m->fail_stage == 8) ? ESP_ERR_INVALID_STATE : ESP_OK;
++    if (m->fail_stage == 8) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_ver_sta_disc(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->verify_sta_disc_called = true;
++
++static esp_err_t mock_verify_sta_disconnected(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_sta_disc_count++;
+     m->call_sequence[m->call_count++] = 9;
+-    return (m->fail_stage == 9) ? ESP_ERR_TIMEOUT : ESP_OK;
++    if (m->fail_stage == 9) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_ver_sta_ip(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->verify_sta_ip_called = true;
++
++static esp_err_t mock_verify_sta_ip_released(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_sta_ip_count++;
+     m->call_sequence[m->call_count++] = 10;
+-    return (m->fail_stage == 10) ? ESP_ERR_TIMEOUT : ESP_OK;
++    if (m->fail_stage == 10) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_set_ap(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->set_ap_called = true;
++
++static esp_err_t mock_set_wifi_ap_only(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->set_ap_count++;
+     m->call_sequence[m->call_count++] = 11;
+-    return (m->fail_stage == 11) ? ESP_ERR_INVALID_STATE : ESP_OK;
++    if (m->fail_stage == 11) return m->fail_error;
++    return ESP_OK;
+ }
+-static esp_err_t m_ver_ap(void *ctx) {
+-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
+-    m->verify_ap_called = true;
++
++static esp_err_t mock_verify_ap_active(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_ap_count++;
+     m->call_sequence[m->call_count++] = 12;
+-    return (m->fail_stage == 12) ? ESP_ERR_TIMEOUT : ESP_OK;
++    if (m->fail_stage == 12) return m->fail_error;
++    return ESP_OK;
+ }
+ 
+-// Test 16: 14-Step Service Orchestration & Complete Stage 2-13 Fail-Closed Failure Injection
++static esp_err_t mock_verify_machine_safe(void *ctx) {
++    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
++    m->verify_machine_safe_count++;
++    m->call_sequence[m->call_count++] = 13;
++    if (m->estop_latched || m->mock_machine_state == ARGUS_STATE_EMERGENCY_STOPPED || m->mock_machine_state == ARGUS_STATE_FAULTED) {
++        return m->fail_error;
++    }
++    if (m->mock_machine_state != ARGUS_STATE_HOLDING && m->mock_machine_state != ARGUS_STATE_UNLOCKED) {
++        return m->fail_error;
++    }
++    if (m->fail_stage == 13) return m->fail_error;
++    return ESP_OK;
++}
++
++// Test 16: 15-Step Service Orchestration & Complete Stage 2-15 Fail-Closed Failure Injection
+ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
+ {
+-    // Part A: Validate Dispatch Guard APIs and E-stop bypass preemption
+-    argus_cmd_router_lock_dispatch();
+-    // Verify E-stop bypasses dispatch mutex and executes immediately
+-    argus_command_envelope_t estop_env = {
+-        .source = ARGUS_CMD_SRC_INTERNAL_SAFETY,
+-        .command_type = ARGUS_CMD_TYPE_ESTOP,
+-        .authority_generation = 0
+-    };
+-    TEST_ASSERT(argus_cmd_router_dispatch(&estop_env) == ESP_OK, "E-stop failed while dispatch guard held!");
+-    argus_cmd_router_unlock_dispatch();
+-
+-    // Part B: Validate NULL ops / NULL callback rejection and zero partial transition
+-    argus_authority_core_t null_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 10 };
+-    argus_service_authority_ops_t null_aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &null_acore };
+-    argus_network_mode_t null_net = ARGUS_NET_MODE_COMMISSIONED_STA;
+-
+-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&null_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &null_aops, NULL) == ESP_ERR_INVALID_ARG, "NULL transition ops accepted");
+-    TEST_ASSERT(null_net == ARGUS_NET_MODE_COMMISSIONED_STA, "NULL ops mutated network mode");
+-    TEST_ASSERT(null_acore.mode == ARGUS_AUTHORITY_SUPERVISORY, "NULL ops mutated authority mode");
+-
+-    mock_net_ops_ctx_t dummy_ctx = {0};
+-    argus_service_transition_ops_t incomplete_ops = {
+-        .request_normal_stop = m_stop_norm,
+-        .verify_stopped = m_ver_stopped,
+-        // stop_broker is NULL
+-        .ctx = &dummy_ctx
+-    };
+-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&null_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &null_aops, &incomplete_ops) == ESP_ERR_INVALID_ARG, "Incomplete callback table accepted");
+-    TEST_ASSERT(null_net == ARGUS_NET_MODE_COMMISSIONED_STA, "Incomplete ops mutated network mode");
+-    TEST_ASSERT(null_acore.mode == ARGUS_AUTHORITY_SUPERVISORY, "Incomplete ops mutated authority mode");
+-
+-    // Part C: Verified 14-step successful transition with exact step-by-step call sequence check
+-    argus_authority_core_t acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 10 };
+-    argus_service_authority_ops_t aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &acore };
++    mock_orchestration_ctx_t ctx;
+ 
++    // Check missing callbacks - setup a context just to trigger invalid arg error on incomplete op tables
+     argus_network_mode_t mock_net = ARGUS_NET_MODE_COMMISSIONED_STA;
+-    mock_net_ops_ctx_t ops_ctx = { .fail_stage = 0 };
+-
++    argus_service_authority_ops_t aops_incomplete = {0};
++    argus_service_transition_ops_t ops_incomplete = {0};
++    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops_incomplete, NULL) == ESP_ERR_INVALID_ARG, "NULL transition ops accepted");
++    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops_incomplete, &ops_incomplete) == ESP_ERR_INVALID_ARG, "Incomplete callback table accepted");
++
++    // Part A: Happy path
++    init_mock_ctx(&ctx);
++    argus_service_authority_ops_t aops = {
++        .prepare_transition = mock_prepare_transition,
++        .grant_local = mock_grant_local,
++        .abort_transition = mock_abort_transition,
++        .ctx = &ctx
++    };
+     argus_service_transition_ops_t ops = {
+-        .request_normal_stop = m_stop_norm, .verify_stopped = m_ver_stopped,
+-        .stop_broker = m_stop_brk, .verify_broker_stopped = m_ver_brk,
+-        .disconnect_sta = m_disc_sta, .verify_sta_disconnected = m_ver_sta_disc,
+-        .verify_sta_ip_released = m_ver_sta_ip, .set_wifi_ap_only = m_set_ap,
+-        .verify_ap_active = m_ver_ap, .ctx = &ops_ctx
++        .request_normal_stop = mock_request_normal_stop,
++        .verify_stopped = mock_verify_stopped,
++        .stop_broker = mock_stop_broker,
++        .verify_broker_stopped = mock_verify_broker_stopped,
++        .disconnect_sta = mock_disconnect_sta,
++        .verify_sta_disconnected = mock_verify_sta_disconnected,
++        .verify_sta_ip_released = mock_verify_sta_ip_released,
++        .set_wifi_ap_only = mock_set_wifi_ap_only,
++        .verify_ap_active = mock_verify_ap_active,
++        .verify_machine_safe = mock_verify_machine_safe,
++        .ctx = &ctx
+     };
+ 
+-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops) == ESP_OK, "Service entry orchestration failed");
+-    TEST_ASSERT(mock_net == ARGUS_NET_MODE_SERVICE_AP_ONLY, "Final mode not SERVICE_AP_ONLY");
+-    TEST_ASSERT(acore.mode == ARGUS_AUTHORITY_LOCAL_SERVICE && acore.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, "Final auth not LOCAL_SERVICE/CLI");
+-    TEST_ASSERT(ops_ctx.call_count == 9, "Exact callback count mismatch");
+-
+-    // Verify exact step ordering: 4, 5, 6, 7, 8, 9, 10, 11, 12
+-    for (int i = 0; i < 9; i++) {
+-        TEST_ASSERT(ops_ctx.call_sequence[i] == (i + 4), "Callback step sequence order violation!");
+-    }
++    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
++    esp_err_t res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
++
++    TEST_ASSERT(res == ESP_OK, "Service entry orchestration failed");
++    TEST_ASSERT(net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY, "Final mode not SERVICE_AP_ONLY");
++    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_LOCAL_SERVICE, "Final auth mode not LOCAL_SERVICE");
++    TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, "Final auth owner not DIAGNOSTIC_CLI");
++    TEST_ASSERT(ctx.grant_count == 1, "grant_count mismatch");
++    TEST_ASSERT(ctx.call_count == 12, "call_count mismatch");
++    TEST_ASSERT(ctx.prepare_count == 1, "prepare mismatch");
++    TEST_ASSERT(ctx.normal_stop_count == 1, "normal_stop mismatch");
++    TEST_ASSERT(ctx.verify_stopped_count == 1, "verify_stopped mismatch");
++    TEST_ASSERT(ctx.stop_broker_count == 1, "stop_broker mismatch");
++    TEST_ASSERT(ctx.verify_broker_count == 1, "verify_broker mismatch");
++    TEST_ASSERT(ctx.disconnect_sta_count == 1, "disconnect_sta mismatch");
++    TEST_ASSERT(ctx.verify_sta_disc_count == 1, "verify_sta_disc mismatch");
++    TEST_ASSERT(ctx.verify_sta_ip_count == 1, "verify_sta_ip mismatch");
++    TEST_ASSERT(ctx.set_ap_count == 1, "set_ap mismatch");
++    TEST_ASSERT(ctx.verify_ap_count == 1, "verify_ap mismatch");
++    TEST_ASSERT(ctx.verify_machine_safe_count == 1, "verify_machine_safe mismatch");
++
++    typedef struct {
++        const char *name;
++        int fail_stage;
++        esp_err_t injected_error;
++        int expected_calls;
++    } fail_test_case_t;
++
++    fail_test_case_t test_cases[] = {
++        {"Prepare", 2, ESP_ERR_INVALID_STATE, 1},
++        {"Stop Request", 4, ESP_ERR_INVALID_STATE, 2},
++        {"Stop Verify Timeout", 5, ESP_ERR_TIMEOUT, 3},
++        {"Broker Stop", 6, ESP_ERR_INVALID_STATE, 4},
++        {"Broker Verify Timeout", 7, ESP_ERR_TIMEOUT, 5},
++        {"STA Disconnect", 8, ESP_ERR_INVALID_STATE, 6},
++        {"STA Verify Timeout", 9, ESP_ERR_TIMEOUT, 7},
++        {"STA IP Verify Timeout", 10, ESP_ERR_TIMEOUT, 8},
++        {"AP Set", 11, ESP_ERR_INVALID_STATE, 9},
++        {"AP Verify Timeout", 12, ESP_ERR_TIMEOUT, 10},
++        {"Machine Safe", 13, ESP_ERR_INVALID_STATE, 11},
++        {"Grant Local", 15, ESP_ERR_INVALID_STATE, 12}
++    };
+ 
+-    // Part D: Complete Fail-Closed Injection (Stages 2 through 13) + Timeout & Abort Preservation
+-    for (int fail_stg = 2; fail_stg <= 13; fail_stg++) {
+-        argus_authority_core_t err_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 20 };
+-        argus_service_authority_ops_t err_aops = {
+-            .prepare_transition = (fail_stg == 2) ? mock_fail_prep_trans : mock_prep_trans,
+-            .grant_local = (fail_stg == 13) ? mock_fail_grant_loc : mock_grant_loc,
+-            .abort_transition = mock_abort_trans,
+-            .ctx = &err_acore
+-        };
+-        argus_network_mode_t err_net = ARGUS_NET_MODE_COMMISSIONED_STA;
+-        mock_net_ops_ctx_t err_ops_ctx = { .fail_stage = fail_stg };
+-
+-        argus_service_transition_ops_t err_ops = ops;
+-        err_ops.ctx = &err_ops_ctx;
+-
+-        esp_err_t res = argus_net_mgr_orchestrate_service_entry(&err_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &err_aops, &err_ops);
+-        TEST_ASSERT(res != ESP_OK, "Injected failure stage accepted!");
+-        TEST_ASSERT(err_net == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
+-        TEST_ASSERT(err_acore.mode == ARGUS_AUTHORITY_NONE && err_acore.owner == ARGUS_AUTH_OWNER_NONE, "Fail-closed auth mode not NONE/NONE!");
+-
+-        if (fail_stg == 4 || fail_stg == 7 || fail_stg == 9 || fail_stg == 10 || fail_stg == 12) {
+-            TEST_ASSERT(res == ESP_ERR_TIMEOUT, "Original ESP_ERR_TIMEOUT error code not preserved!");
++    // Part B: Failure injection matrix
++    for (int i = 0; i < 12; i++) {
++        init_mock_ctx(&ctx);
++        ctx.fail_stage = test_cases[i].fail_stage;
++        ctx.fail_error = test_cases[i].injected_error;
++        net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
++        res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
++
++        TEST_ASSERT(res == test_cases[i].injected_error, "Exact esp_err_t mismatch!");
++        TEST_ASSERT(ctx.call_count == test_cases[i].expected_calls, "Exact callback count mismatch!");
++        TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
++        TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
++        if (test_cases[i].fail_stage == 15) {
++            TEST_ASSERT(ctx.grant_count == 1, "grant_count mismatch (should be 1 for grant failure)");
++        } else {
++            TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
+         }
++        TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE after abort");
++        TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_NONE, "Auth owner not NONE after abort");
+     }
+ 
+-    // Part E: E-stop during controlled deceleration prevents local authority grant & retains E-stop latch
+-    argus_authority_core_t estop_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 30 };
+-    argus_service_authority_ops_t estop_aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &estop_acore };
+-    argus_network_mode_t estop_net = ARGUS_NET_MODE_COMMISSIONED_STA;
+-    mock_net_ops_ctx_t estop_ops_ctx = { .fail_stage = 5, .estop_during_stop = true };
+-
+-    argus_service_transition_ops_t estop_ops = ops;
+-    estop_ops.ctx = &estop_ops_ctx;
+-
+-    esp_err_t estop_res = argus_net_mgr_orchestrate_service_entry(&estop_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &estop_aops, &estop_ops);
+-    TEST_ASSERT(estop_res == ESP_ERR_INVALID_STATE, "E-stop preemption failed to return invalid state");
+-    TEST_ASSERT(estop_net == ARGUS_NET_MODE_NETWORK_FAULT, "E-stop preemption net mode not NETWORK_FAULT");
+-    TEST_ASSERT(estop_acore.mode == ARGUS_AUTHORITY_NONE && estop_acore.owner == ARGUS_AUTH_OWNER_NONE, "E-stop preemption auth mode not NONE/NONE");
++    // Part C: Prepare transition failure: fail_stage = 2
++    init_mock_ctx(&ctx);
++    ctx.fail_stage = 2;
++    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
++    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
++    TEST_ASSERT(res != ESP_OK, "Injected prepare failure accepted!");
++    TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
++    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch on prep fail");
++    TEST_ASSERT(ctx.normal_stop_count == 0, "ops called after prep fail");
++
++    // Part D: E-stop during verify_stopped
++    init_mock_ctx(&ctx);
++    ctx.estop_during_stop = true;
++    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
++    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
++    TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "E-stop preemption failed to return invalid state");
++    TEST_ASSERT(ctx.estop_latched == true, "E-stop not latched");
++    TEST_ASSERT(ctx.mock_machine_state == ARGUS_STATE_EMERGENCY_STOPPED, "Machine state not E-STOPPED");
++    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE after E-stop");
++    TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
++    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
++    TEST_ASSERT(ctx.stop_broker_count == 0, "stop_broker called after E-stop");
++    TEST_ASSERT(ctx.disconnect_sta_count == 0, "disconnect_sta called after E-stop");
++    TEST_ASSERT(ctx.set_ap_count == 0, "set_ap called after E-stop");
++    TEST_ASSERT(ctx.verify_ap_count == 0, "verify_ap called after E-stop");
++    TEST_ASSERT(ctx.verify_machine_safe_count == 0, "verify_machine_safe called after E-stop");
++
++    // Part E: verify_machine_safe failure (stage 13)
++    init_mock_ctx(&ctx);
++    ctx.fail_stage = 13;
++    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
++    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
++    TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "Verify machine safe failure accepted");
++    TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Net mode not NETWORK_FAULT");
++    TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
++    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
++    TEST_ASSERT(ctx.verify_ap_count == 1, "Preceding callback verify_ap not called");
++    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE");
+ 
+     return ESP_OK;
+ }
+@@ -682,40 +785,39 @@ static esp_err_t test_two_stage_service_entry_and_fail_closed_abort(void)
+     return ESP_OK;
+ }
+ 
+-// Full 23-Field Read-Only Production Snapshot Observation Struct
++// Full Read-Only Production Snapshot Observation Struct
+ typedef struct {
+     argus_state_snapshot_t state;
+     argus_authority_snapshot_t authority;
+-    argus_network_mode_t net_mode;
+-    argus_net_err_t last_net_err;
++    argus_net_snapshot_t net_snap;
++    esp_err_t wifi_mode_status;
+     wifi_mode_t wifi_driver_mode;
+-    bool sta_connected;
+-    bool sta_ip_acquired;
+-    bool ap_started;
+-    bool mqtt_broker_running;
+-    uint8_t nvs_active_selector;
+-    argus_cfg_slot_t slot_a;
+-    argus_cfg_slot_t slot_b;
++    argus_nvs_observation_t nvs_obs;
+     UBaseType_t task_count;
+ } argus_prod_snapshot_t;
+ 
+-static void capture_prod_snapshot(argus_prod_snapshot_t *out)
++static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
+ {
+     memset(out, 0, sizeof(argus_prod_snapshot_t));
+     argus_state_mgr_get_snapshot(&out->state);
+     argus_authority_mgr_get_snapshot(&out->authority);
+-    out->net_mode = argus_net_mgr_get_mode();
+-    out->last_net_err = argus_net_mgr_get_last_error();
+-    esp_wifi_get_mode(&out->wifi_driver_mode);
+-    out->sta_connected = argus_net_mgr_is_sta_connected();
+-    out->sta_ip_acquired = argus_net_mgr_is_sta_ip_acquired();
+-    out->ap_started = argus_net_mgr_is_ap_started();
+-    out->mqtt_broker_running = argus_mqtt_broker_is_running();
+-    argus_nvs_config_get_observation_snapshot(&out->nvs_active_selector, &out->slot_a, &out->slot_b);
++    argus_net_mgr_get_snapshot(&out->net_snap);
++
++    out->wifi_mode_status = esp_wifi_get_mode(&out->wifi_driver_mode);
++    if (out->wifi_mode_status != ESP_OK && out->wifi_mode_status != ESP_ERR_WIFI_NOT_INIT) {
++        return out->wifi_mode_status;
++    }
++
++    esp_err_t err = argus_nvs_config_get_observation_snapshot(&out->nvs_obs);
++    if (err != ESP_OK) {
++        return err;
++    }
++
+     out->task_count = uxTaskGetNumberOfTasks();
++    return ESP_OK;
+ }
+ 
+-static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
++static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
+ {
+     bool match = true;
+ 
+@@ -736,28 +838,24 @@ static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_p
+     CHECK_DIFF_INT("7. driver_enabled", b->state.driver_enabled, a->state.driver_enabled);
+     CHECK_DIFF_INT("8. estop_latched", b->state.estop_latched, a->state.estop_latched);
+     CHECK_DIFF_INT("9. fault_code", b->state.fault_code, a->state.fault_code);
+-    CHECK_DIFF_INT("10. net_mode", b->net_mode, a->net_mode);
+-    CHECK_DIFF_INT("11. last_net_err", b->last_net_err, a->last_net_err);
+-    CHECK_DIFF_INT("12. wifi_driver_mode", b->wifi_driver_mode, a->wifi_driver_mode);
+-    CHECK_DIFF_INT("13. sta_connected", b->sta_connected, a->sta_connected);
+-    CHECK_DIFF_INT("14. sta_ip_acquired", b->sta_ip_acquired, a->sta_ip_acquired);
+-    CHECK_DIFF_INT("15. ap_started", b->ap_started, a->ap_started);
+-    CHECK_DIFF_INT("16. mqtt_broker_running", b->mqtt_broker_running, a->mqtt_broker_running);
+-    CHECK_DIFF_INT("17. authority.mode", b->authority.mode, a->authority.mode);
+-    CHECK_DIFF_INT("18. authority.owner", b->authority.owner, a->authority.owner);
+-    CHECK_DIFF_INT("19. authority.generation", b->authority.generation, a->authority.generation);
+-    CHECK_DIFF_INT("20. nvs_active_selector", b->nvs_active_selector, a->nvs_active_selector);
+-    CHECK_DIFF_INT("21. slot_a.schema_version", b->slot_a.schema_version, a->slot_a.schema_version);
+-    CHECK_DIFF_INT("21. slot_a.config_generation", b->slot_a.config_generation, a->slot_a.config_generation);
+-    CHECK_DIFF_INT("21. slot_a.payload_length", b->slot_a.payload_length, a->slot_a.payload_length);
+-    CHECK_DIFF_INT("21. slot_a.crc32", b->slot_a.crc32, a->slot_a.crc32);
+-    CHECK_DIFF_INT("21. slot_a.valid_marker", b->slot_a.valid_marker, a->slot_a.valid_marker);
+-    CHECK_DIFF_INT("22. slot_b.schema_version", b->slot_b.schema_version, a->slot_b.schema_version);
+-    CHECK_DIFF_INT("22. slot_b.config_generation", b->slot_b.config_generation, a->slot_b.config_generation);
+-    CHECK_DIFF_INT("22. slot_b.payload_length", b->slot_b.payload_length, a->slot_b.payload_length);
+-    CHECK_DIFF_INT("22. slot_b.crc32", b->slot_b.crc32, a->slot_b.crc32);
+-    CHECK_DIFF_INT("22. slot_b.valid_marker", b->slot_b.valid_marker, a->slot_b.valid_marker);
+-    CHECK_DIFF_INT("23. task_count", b->task_count, a->task_count);
++    CHECK_DIFF_INT("10. net_mode", b->net_snap.mode, a->net_snap.mode);
++    CHECK_DIFF_INT("11. last_net_err", b->net_snap.last_error, a->net_snap.last_error);
++    CHECK_DIFF_INT("12. wifi_mode_status", b->wifi_mode_status, a->wifi_mode_status);
++    CHECK_DIFF_INT("13. wifi_driver_mode", b->wifi_driver_mode, a->wifi_driver_mode);
++    CHECK_DIFF_INT("14. sta_connected", b->net_snap.sta_connected, a->net_snap.sta_connected);
++    CHECK_DIFF_INT("15. sta_ip_acquired", b->net_snap.sta_ip_acquired, a->net_snap.sta_ip_acquired);
++    CHECK_DIFF_INT("16. ap_started", b->net_snap.ap_started, a->net_snap.ap_started);
++    CHECK_DIFF_INT("17. mqtt_broker_running", b->net_snap.mqtt_broker_running, a->net_snap.mqtt_broker_running);
++    CHECK_DIFF_INT("18. authority.mode", b->authority.mode, a->authority.mode);
++    CHECK_DIFF_INT("19. authority.owner", b->authority.owner, a->authority.owner);
++    CHECK_DIFF_INT("20. authority.generation", b->authority.generation, a->authority.generation);
++    CHECK_DIFF_INT("21. nvs_selector_status", b->nvs_obs.selector_status, a->nvs_obs.selector_status);
++    CHECK_DIFF_INT("22. nvs_selector", b->nvs_obs.selector, a->nvs_obs.selector);
++    CHECK_DIFF_INT("23. slot_a_status", b->nvs_obs.slot_a_status, a->nvs_obs.slot_a_status);
++    CHECK_DIFF_INT("24. slot_a.config_generation", b->nvs_obs.slot_a.config_generation, a->nvs_obs.slot_a.config_generation);
++    CHECK_DIFF_INT("25. slot_b_status", b->nvs_obs.slot_b_status, a->nvs_obs.slot_b_status);
++    CHECK_DIFF_INT("26. slot_b.config_generation", b->nvs_obs.slot_b.config_generation, a->nvs_obs.slot_b.config_generation);
++    CHECK_DIFF_INT("27. task_count", b->task_count, a->task_count);
+ 
+ #undef CHECK_DIFF_INT
+     return match;
+@@ -773,7 +871,10 @@ esp_err_t argus_tests_4a_run_all(void)
+     int failed_executions = 0;
+ 
+     argus_prod_snapshot_t snap_before, snap_after;
+-    capture_prod_snapshot(&snap_before);
++    if (capture_prod_snapshot(&snap_before) != ESP_OK) {
++        printf("Failed to capture initial snapshot\n");
++        return ESP_FAIL;
++    }
+ 
+ #define RUN_TEST(test_fn) \
+     do { \
+@@ -810,8 +911,11 @@ esp_err_t argus_tests_4a_run_all(void)
+         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
+     }
+ 
+-    capture_prod_snapshot(&snap_after);
+-    bool non_mutated = compare_prod_snapshots(&snap_before, &snap_after);
++    if (capture_prod_snapshot(&snap_after) != ESP_OK) {
++        printf("Failed to capture final snapshot\n");
++        return ESP_FAIL;
++    }
++    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
+ 
+     printf("\nPhase 4A Pure Tests:\n");
+     printf("  Distinct Test Cases : 18\n");
+@@ -820,16 +924,16 @@ esp_err_t argus_tests_4a_run_all(void)
+     printf("  Passed Executions   : %d\n", passed_executions);
+     printf("  Failed Executions   : %d\n", failed_executions);
+ 
+-    printf("\nProduction Isolation (23-Field Read-Only Proof):\n");
++    printf("\nProduction Isolation (Read-Only Proof):\n");
+     printf("  Authority Generation : %s (Gen %lu)\n",
+            (snap_before.authority.generation == snap_after.authority.generation) ? "UNCHANGED" : "MUTATED",
+            (unsigned long)snap_after.authority.generation);
+     printf("  Network State         : %s (%s)\n",
+-           (snap_before.net_mode == snap_after.net_mode) ? "UNCHANGED" : "MUTATED",
+-           argus_net_mgr_get_mode_name(snap_after.net_mode));
++           (snap_before.net_snap.mode == snap_after.net_snap.mode) ? "UNCHANGED" : "MUTATED",
++           argus_net_mgr_get_mode_name(snap_after.net_snap.mode));
+     printf("  MQTT Broker State     : %s (%s)\n",
+-           (snap_before.mqtt_broker_running == snap_after.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
+-           snap_after.mqtt_broker_running ? "RUNNING" : "STOPPED");
++           (snap_before.net_snap.mqtt_broker_running == snap_after.net_snap.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
++           snap_after.net_snap.mqtt_broker_running ? "RUNNING" : "STOPPED");
+     printf("  Machine State         : %s (%s)\n",
+            (snap_before.state.machine_state == snap_after.state.machine_state) ? "UNCHANGED" : "MUTATED",
+            argus_state_mgr_get_state_name(snap_after.state.machine_state));

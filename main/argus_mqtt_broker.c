@@ -2,12 +2,14 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/inet.h"
@@ -24,6 +26,23 @@ static const char *TAG = "argus_mqtt_broker";
 #define ARGUS_MQTT_CLIENT_TASK_STACK 4096
 #define ARGUS_MQTT_SERVER_TASK_STACK 4096
 
+/* ---------------------------------------------------------------------------
+ * Lifecycle event bits  (waited on by start / stop callers)
+ * -----------------------------------------------------------------------*/
+#define BROKER_EVT_STARTED        (1 << 0)
+#define BROKER_EVT_STOPPED        (1 << 1)
+#define BROKER_EVT_CLIENTS_EXITED (1 << 2)
+
+/* ---------------------------------------------------------------------------
+ * Broker state machine
+ * -----------------------------------------------------------------------*/
+typedef enum {
+    BROKER_STATE_STOPPED = 0,
+    BROKER_STATE_STARTING,
+    BROKER_STATE_RUNNING,
+    BROKER_STATE_STOPPING,
+} argus_broker_state_t;
+
 typedef struct {
     bool in_use;
     int sock;
@@ -39,10 +58,20 @@ typedef struct {
 } argus_mqtt_retained_t;
 
 typedef struct {
+    /* ---- lifecycle objects (firmware-lifetime, never deleted) ---- */
+    SemaphoreHandle_t lifecycle_mutex;
+    SemaphoreHandle_t client_lock;
+    EventGroupHandle_t lifecycle_event_group;
+
+    /* ---- state ---- */
+    argus_broker_state_t state;
+    esp_err_t startup_error;
+
+    /* ---- runtime ---- */
     uint16_t port;
     int listen_sock;
-    SemaphoreHandle_t lock;
-    bool started;
+    TaskHandle_t server_task_handle;
+    _Atomic int32_t active_client_count;
     argus_mqtt_broker_message_cb_t on_message;
     argus_mqtt_broker_policy_cb_t policy_check;
     void *user_ctx;
@@ -51,6 +80,10 @@ typedef struct {
 } argus_mqtt_broker_t;
 
 static argus_mqtt_broker_t s_broker;
+
+/* ===========================================================================
+ * MQTT wire helpers  (unchanged from original)
+ * =========================================================================*/
 
 static int argus_mqtt_read_exact(int sock, uint8_t *buffer, size_t len)
 {
@@ -188,6 +221,10 @@ static esp_err_t argus_mqtt_send_publish(int sock, const char *topic, const char
     return (sent == (int)offset) ? ESP_OK : ESP_FAIL;
 }
 
+/* ===========================================================================
+ * Retained message & subscriber helpers  (unchanged, operate under client_lock)
+ * =========================================================================*/
+
 static void argus_mqtt_store_retained_locked(const char *topic, const char *payload)
 {
     argus_mqtt_retained_t *slot = NULL;
@@ -250,6 +287,10 @@ static void argus_mqtt_send_retained_for_filter_locked(argus_mqtt_client_t *clie
         }
     }
 }
+
+/* ===========================================================================
+ * MQTT packet handlers  (unchanged from original)
+ * =========================================================================*/
 
 static esp_err_t argus_mqtt_handle_connect(argus_mqtt_client_t *client, const uint8_t *packet, uint32_t len)
 {
@@ -432,20 +473,36 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
     return ESP_OK;
 }
 
+/* ===========================================================================
+ * Client slot release  (hardened: atomic count + event signal)
+ * =========================================================================*/
+
 static void argus_mqtt_close_client(argus_mqtt_client_t *client)
 {
-    xSemaphoreTake(s_broker.lock, portMAX_DELAY);
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     int sock = client->sock;
     client->sock = -1;
     client->in_use = false;
     client->subscription_count = 0;
-    xSemaphoreGive(s_broker.lock);
+    xSemaphoreGive(s_broker.client_lock);
 
     if (sock >= 0) {
         shutdown(sock, 0);
         close(sock);
     }
+
+    int32_t prev = atomic_fetch_sub(&s_broker.active_client_count, 1);
+    if (prev <= 0) {
+        ESP_LOGE(TAG, "active_client_count underflow! (prev=%d)", (int)prev);
+    } else if (prev == 1) {
+        /* Last client exited — signal any waiter in stop(). */
+        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_CLIENTS_EXITED);
+    }
 }
+
+/* ===========================================================================
+ * Per-client task  (protocol loop unchanged; exit path hardened)
+ * =========================================================================*/
 
 static void argus_mqtt_client_task(void *arg)
 {
@@ -479,7 +536,7 @@ static void argus_mqtt_client_task(void *arg)
         char callback_topic[ARGUS_MQTT_MAX_TOPIC_LEN] = {0};
         char callback_payload[ARGUS_MQTT_MAX_PAYLOAD_LEN] = {0};
 
-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
 
         esp_err_t err = ESP_OK;
         switch (packet_type) {
@@ -507,14 +564,14 @@ static void argus_mqtt_client_task(void *arg)
             break;
         }
         case 14:
-            xSemaphoreGive(s_broker.lock);
+            xSemaphoreGive(s_broker.client_lock);
             goto done;
         default:
             ESP_LOGW(TAG, "unsupported packet type: %u", packet_type);
             break;
         }
 
-        xSemaphoreGive(s_broker.lock);
+        xSemaphoreGive(s_broker.client_lock);
 
         if (has_callback && s_broker.on_message != NULL) {
             s_broker.on_message(callback_topic, callback_payload, callback_retain, s_broker.user_ctx);
@@ -534,6 +591,10 @@ done:
     vTaskDelete(NULL);
 }
 
+/* ===========================================================================
+ * Client slot allocation  (hardened: atomic count tracking)
+ * =========================================================================*/
+
 static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
 {
     for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
@@ -548,55 +609,26 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
     return NULL;
 }
 
+/* ===========================================================================
+ * Server (accept-loop) task  — socket creation moved here, lifecycle signals
+ * =========================================================================*/
+
 static void argus_mqtt_server_task(void *arg)
 {
     (void)arg;
 
-    while (true) {
-        struct sockaddr_in source_addr = {0};
-        socklen_t addr_len = sizeof(source_addr);
-        int sock = accept(s_broker.listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-
-        if (sock < 0) {
-            ESP_LOGW(TAG, "accept failed: errno=%d", errno);
-            vTaskDelay(pdMS_TO_TICKS(250));
-            continue;
-        }
-
-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
-        argus_mqtt_client_t *client = argus_mqtt_alloc_client_locked(sock);
-        xSemaphoreGive(s_broker.lock);
-
-        if (client == NULL) {
-            ESP_LOGW(TAG, "rejecting MQTT client: client limit reached");
-            close(sock);
-            continue;
-        }
-
-        BaseType_t created = xTaskCreate(argus_mqtt_client_task, "mqtt_client", ARGUS_MQTT_CLIENT_TASK_STACK, client, 5, NULL);
-        if (created != pdPASS) {
-            ESP_LOGE(TAG, "failed to create MQTT client task");
-            argus_mqtt_close_client(client);
-        }
-    }
-}
-
-esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
-{
-    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "config is null");
-    ESP_RETURN_ON_FALSE(!s_broker.started, ESP_ERR_INVALID_STATE, TAG, "broker already started");
-
-    memset(&s_broker, 0, sizeof(s_broker));
-    s_broker.port = config->port;
-    s_broker.on_message = config->on_message;
-    s_broker.policy_check = config->policy_check;
-    s_broker.user_ctx = config->user_ctx;
-    s_broker.listen_sock = -1;
-    s_broker.lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_broker.lock != NULL, ESP_ERR_NO_MEM, TAG, "failed to create lock");
-
+    /* --- Create listening socket inside the task -------------------------*/
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    ESP_RETURN_ON_FALSE(listen_sock >= 0, ESP_FAIL, TAG, "unable to create socket");
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "unable to create socket: errno=%d", errno);
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        s_broker.startup_error = ESP_FAIL;
+        s_broker.server_task_handle = NULL;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
+        vTaskDelete(NULL);
+        return;
+    }
 
     int opt = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -608,74 +640,352 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
     };
 
     if (bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) != 0) {
-        close(listen_sock);
         ESP_LOGE(TAG, "bind failed: errno=%d", errno);
-        return ESP_FAIL;
+        close(listen_sock);
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        s_broker.startup_error = ESP_FAIL;
+        s_broker.server_task_handle = NULL;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
+        vTaskDelete(NULL);
+        return;
     }
 
     if (listen(listen_sock, ARGUS_MQTT_MAX_CLIENTS) != 0) {
-        close(listen_sock);
         ESP_LOGE(TAG, "listen failed: errno=%d", errno);
-        return ESP_FAIL;
+        close(listen_sock);
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        s_broker.startup_error = ESP_FAIL;
+        s_broker.server_task_handle = NULL;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
+        vTaskDelete(NULL);
+        return;
     }
 
+    /* Publish the socket and transition to RUNNING. */
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
     s_broker.listen_sock = listen_sock;
-    s_broker.started = true;
-
-    BaseType_t created = xTaskCreate(argus_mqtt_server_task, "mqtt_broker", ARGUS_MQTT_SERVER_TASK_STACK, NULL, 5, NULL);
-    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "failed to create broker task");
+    s_broker.state = BROKER_STATE_RUNNING;
+    s_broker.startup_error = ESP_OK;
+    xSemaphoreGive(s_broker.lifecycle_mutex);
 
     ESP_LOGI(TAG, "local MQTT broker listening on port %u", s_broker.port);
+    xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STARTED);
+
+    /* --- Accept loop --------------------------------------------------- */
+    while (1) {
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        bool running = (s_broker.state == BROKER_STATE_RUNNING);
+        int current_listen_sock = s_broker.listen_sock;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+
+        if (!running || current_listen_sock < 0) {
+            break;
+        }
+
+        struct sockaddr_in source_addr = {0};
+        socklen_t addr_len = sizeof(source_addr);
+        int sock = accept(current_listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+
+        if (sock < 0) {
+            xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+            running = (s_broker.state == BROKER_STATE_RUNNING);
+            current_listen_sock = s_broker.listen_sock;
+            xSemaphoreGive(s_broker.lifecycle_mutex);
+
+            if (!running || current_listen_sock < 0) {
+                break;
+            }
+            ESP_LOGW(TAG, "accept failed: errno=%d", errno);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        /* Check broker is still running before allocating a client. */
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        running = (s_broker.state == BROKER_STATE_RUNNING);
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+
+        if (!running) {
+            close(sock);
+            break;
+        }
+
+        /* Reserve the active-client count BEFORE creating the task. */
+        atomic_fetch_add(&s_broker.active_client_count, 1);
+
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        argus_mqtt_client_t *client = argus_mqtt_alloc_client_locked(sock);
+        xSemaphoreGive(s_broker.client_lock);
+
+        if (client == NULL) {
+            ESP_LOGW(TAG, "rejecting MQTT client: client limit reached");
+            atomic_fetch_sub(&s_broker.active_client_count, 1);
+            close(sock);
+            continue;
+        }
+
+        BaseType_t created = xTaskCreate(argus_mqtt_client_task, "mqtt_client", ARGUS_MQTT_CLIENT_TASK_STACK, client, 5, NULL);
+        if (created != pdPASS) {
+            ESP_LOGE(TAG, "failed to create MQTT client task");
+            /* Release slot and decrement count. */
+            xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+            client->sock = -1;
+            client->in_use = false;
+            client->subscription_count = 0;
+            xSemaphoreGive(s_broker.client_lock);
+            atomic_fetch_sub(&s_broker.active_client_count, 1);
+            close(sock);
+        }
+    }
+
+    ESP_LOGI(TAG, "MQTT broker server task exiting cleanly.");
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+    s_broker.server_task_handle = NULL;
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+    xEventGroupSetBits(s_broker.lifecycle_event_group, BROKER_EVT_STOPPED);
+    vTaskDelete(NULL);
+}
+
+/* ===========================================================================
+ * Public API
+ * =========================================================================*/
+
+esp_err_t argus_mqtt_broker_init(void)
+{
+    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex == NULL, ESP_ERR_INVALID_STATE,
+                        TAG, "broker already initialised");
+
+    s_broker.lifecycle_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_NO_MEM,
+                        TAG, "failed to create lifecycle_mutex");
+
+    s_broker.client_lock = xSemaphoreCreateMutex();
+    if (s_broker.client_lock == NULL) {
+        vSemaphoreDelete(s_broker.lifecycle_mutex);
+        s_broker.lifecycle_mutex = NULL;
+        ESP_LOGE(TAG, "failed to create client_lock");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_broker.lifecycle_event_group = xEventGroupCreate();
+    if (s_broker.lifecycle_event_group == NULL) {
+        vSemaphoreDelete(s_broker.client_lock);
+        s_broker.client_lock = NULL;
+        vSemaphoreDelete(s_broker.lifecycle_mutex);
+        s_broker.lifecycle_mutex = NULL;
+        ESP_LOGE(TAG, "failed to create lifecycle_event_group");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_broker.state = BROKER_STATE_STOPPED;
+    atomic_store(&s_broker.active_client_count, 0);
+    s_broker.listen_sock = -1;
+    s_broker.server_task_handle = NULL;
+
+    ESP_LOGI(TAG, "broker lifecycle objects initialised");
     return ESP_OK;
+}
+
+esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
+{
+    ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "config is null");
+    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_INVALID_STATE,
+                        TAG, "broker not initialised (call argus_mqtt_broker_init first)");
+
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+
+    if (s_broker.state != BROKER_STATE_STOPPED) {
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        ESP_LOGE(TAG, "broker not in STOPPED state (current=%d)", (int)s_broker.state);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Verify no residual task handles remain from a previous cycle. */
+    if (s_broker.server_task_handle != NULL) {
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        ESP_LOGE(TAG, "stale server_task_handle detected");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_broker.state = BROKER_STATE_STARTING;
+
+    /* Zero only runtime fields — lifecycle objects are preserved. */
+    s_broker.port = config->port;
+    s_broker.on_message = config->on_message;
+    s_broker.policy_check = config->policy_check;
+    s_broker.user_ctx = config->user_ctx;
+    s_broker.listen_sock = -1;
+    s_broker.startup_error = ESP_OK;
+    atomic_store(&s_broker.active_client_count, 0);
+    memset(s_broker.clients, 0, sizeof(s_broker.clients));
+    memset(s_broker.retained, 0, sizeof(s_broker.retained));
+
+    /* Clear event bits before launching the task. */
+    xEventGroupClearBits(s_broker.lifecycle_event_group,
+                         BROKER_EVT_STARTED | BROKER_EVT_STOPPED | BROKER_EVT_CLIENTS_EXITED);
+
+    BaseType_t created = xTaskCreate(argus_mqtt_server_task, "mqtt_broker",
+                                     ARGUS_MQTT_SERVER_TASK_STACK, NULL, 5,
+                                     &s_broker.server_task_handle);
+    if (created != pdPASS) {
+        s_broker.state = BROKER_STATE_STOPPED;
+        s_broker.server_task_handle = NULL;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        ESP_LOGE(TAG, "failed to create broker task");
+        return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+
+    /* --- Wait bounded for the server task to report outcome ------------ */
+    EventBits_t bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
+                                           BROKER_EVT_STARTED | BROKER_EVT_STOPPED,
+                                           pdFALSE,   /* don't clear */
+                                           pdFALSE,   /* wait for ANY */
+                                           pdMS_TO_TICKS(2000));
+
+    if (bits & BROKER_EVT_STARTED) {
+        return ESP_OK;
+    }
+
+    if (bits & BROKER_EVT_STOPPED) {
+        /* Server task reported failure and already exited. */
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        s_broker.state = BROKER_STATE_STOPPED;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        ESP_LOGE(TAG, "server task failed during startup: %s",
+                 esp_err_to_name(s_broker.startup_error));
+        return (s_broker.startup_error != ESP_OK) ? s_broker.startup_error : ESP_FAIL;
+    }
+
+    /* Timeout — task neither started nor stopped within the window. */
+    ESP_LOGE(TAG, "broker start timed out after 2000 ms");
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+    s_broker.state = BROKER_STATE_STOPPING;
+    if (s_broker.listen_sock >= 0) {
+        shutdown(s_broker.listen_sock, SHUT_RDWR);
+        close(s_broker.listen_sock);
+        s_broker.listen_sock = -1;
+    }
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+
+    bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
+                               BROKER_EVT_STOPPED,
+                               pdFALSE, pdFALSE,
+                               pdMS_TO_TICKS(2000));
+
+    if (bits & BROKER_EVT_STOPPED) {
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        s_broker.state = BROKER_STATE_STOPPED;
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain)
 {
     ESP_RETURN_ON_FALSE(topic != NULL && payload != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid publish args");
-    ESP_RETURN_ON_FALSE(s_broker.started, ESP_ERR_INVALID_STATE, TAG, "broker not started");
 
-    xSemaphoreTake(s_broker.lock, portMAX_DELAY);
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+    bool running = (s_broker.state == BROKER_STATE_RUNNING);
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+
+    ESP_RETURN_ON_FALSE(running, ESP_ERR_INVALID_STATE, TAG, "broker not running");
+
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     if (retain) {
         argus_mqtt_store_retained_locked(topic, payload);
     }
     argus_mqtt_deliver_to_subscribers_locked(topic, payload, retain);
-    xSemaphoreGive(s_broker.lock);
+    xSemaphoreGive(s_broker.client_lock);
 
     return ESP_OK;
 }
 
 bool argus_mqtt_broker_is_running(void)
 {
-    return s_broker.started;
+    if (s_broker.lifecycle_mutex == NULL) {
+        return false;
+    }
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+    bool running = (s_broker.state == BROKER_STATE_RUNNING);
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+    return running;
 }
 
 esp_err_t argus_mqtt_broker_stop(void)
 {
-    if (!s_broker.started) return ESP_OK;
+    ESP_RETURN_ON_FALSE(s_broker.lifecycle_mutex != NULL, ESP_ERR_INVALID_STATE,
+                        TAG, "broker not initialised");
 
-    if (s_broker.lock != NULL) {
-        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+
+    if (s_broker.state == BROKER_STATE_STOPPED) {
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        return ESP_OK;
     }
 
+    /* Clear event bits so we can wait for fresh signals. */
+    xEventGroupClearBits(s_broker.lifecycle_event_group, BROKER_EVT_STARTED | BROKER_EVT_STOPPED | BROKER_EVT_CLIENTS_EXITED);
+
+    s_broker.state = BROKER_STATE_STOPPING;
+
+    /* Close the listener socket to break accept(). */
     if (s_broker.listen_sock >= 0) {
+        shutdown(s_broker.listen_sock, SHUT_RDWR);
         close(s_broker.listen_sock);
         s_broker.listen_sock = -1;
     }
 
+    xSemaphoreGive(s_broker.lifecycle_mutex);
+
+    /* Close all client sockets under client_lock to unblock recv(). */
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
         if (s_broker.clients[i].in_use && s_broker.clients[i].sock >= 0) {
+            shutdown(s_broker.clients[i].sock, SHUT_RDWR);
             close(s_broker.clients[i].sock);
             s_broker.clients[i].sock = -1;
-            s_broker.clients[i].in_use = false;
+        }
+    }
+    xSemaphoreGive(s_broker.client_lock);
+
+    /* --- Wait for the server task to exit (bounded 2 s) ---------------- */
+    EventBits_t bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
+                                           BROKER_EVT_STOPPED,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(2000));
+
+    if (!(bits & BROKER_EVT_STOPPED)) {
+        ESP_LOGW(TAG, "server task did not exit within 2000 ms");
+        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+        /* Remain in STOPPING — do not force to STOPPED. */
+        xSemaphoreGive(s_broker.lifecycle_mutex);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* --- Wait for all client tasks to drain (bounded 2 s) -------------- */
+    if (atomic_load(&s_broker.active_client_count) > 0) {
+        xEventGroupClearBits(s_broker.lifecycle_event_group, BROKER_EVT_CLIENTS_EXITED);
+        bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
+                                   BROKER_EVT_CLIENTS_EXITED,
+                                   pdFALSE, pdFALSE,
+                                   pdMS_TO_TICKS(2000));
+
+        if (!(bits & BROKER_EVT_CLIENTS_EXITED) && atomic_load(&s_broker.active_client_count) > 0) {
+            ESP_LOGW(TAG, "client tasks did not drain within 2000 ms (%d remaining)",
+                     (int)atomic_load(&s_broker.active_client_count));
+            return ESP_ERR_TIMEOUT;
         }
     }
 
-    s_broker.started = false;
+    /* All tasks have exited. Transition to STOPPED. */
+    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
+    s_broker.state = BROKER_STATE_STOPPED;
+    xSemaphoreGive(s_broker.lifecycle_mutex);
 
-    if (s_broker.lock != NULL) {
-        xSemaphoreGive(s_broker.lock);
-    }
-
-    ESP_LOGI(TAG, "local MQTT broker listener stopped cleanly");
+    ESP_LOGI(TAG, "local MQTT broker stopped cleanly");
     return ESP_OK;
 }

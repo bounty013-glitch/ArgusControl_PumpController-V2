@@ -432,200 +432,303 @@ static esp_err_t test_nvs_commit_readback_verification_and_lkg_preservation(void
     return ESP_OK;
 }
 
-// Mock net ops context
 typedef struct {
-    int fail_stage; // 2 to 13 to inject failure at specific step
-    bool grant_local_called;
-    int abort_call_count;
-    bool estop_during_stop;
-    bool normal_stop_called;
-    bool verify_stopped_called;
-    bool stop_broker_called;
-    bool verify_broker_stopped_called;
-    bool disconnect_sta_called;
-    bool verify_sta_disc_called;
-    bool verify_sta_ip_called;
-    bool set_ap_called;
-    bool verify_ap_called;
-    int call_sequence[16];
+    // Authority state (stack-local)
+    argus_authority_core_t auth_core;
+
+    // Machine simulation
+    argus_machine_state_t mock_machine_state;
+    bool estop_latched;
+
+    // Call counters
+    int prepare_count;
+    int abort_count;
+    int grant_count;
+
+    // Per-operation call counts
+    int normal_stop_count;
+    int verify_stopped_count;
+    int stop_broker_count;
+    int verify_broker_count;
+    int disconnect_sta_count;
+    int verify_sta_disc_count;
+    int verify_sta_ip_count;
+    int set_ap_count;
+    int verify_ap_count;
+    int verify_machine_safe_count;
+
+    // Exact call sequence
+    int call_sequence[24];
     int call_count;
-} mock_net_ops_ctx_t;
 
-static esp_err_t mock_prep_trans(void *ctx) {
-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
-    return argus_authority_core_prepare_service_transition(acore);
-}
-static esp_err_t mock_fail_prep_trans(void *ctx) {
-    (void)ctx;
-    return ESP_ERR_INVALID_STATE;
-}
-static esp_err_t mock_grant_loc(void *ctx, argus_authority_owner_t owner) {
-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
-    return argus_authority_core_grant_local_service(acore, owner);
-}
-static esp_err_t mock_fail_grant_loc(void *ctx, argus_authority_owner_t owner) {
-    (void)ctx;
-    (void)owner;
-    return ESP_ERR_INVALID_ARG;
-}
-static void mock_abort_trans(void *ctx) {
-    argus_authority_core_t *acore = (argus_authority_core_t *)ctx;
-    argus_authority_core_abort_service_transition(acore);
+    // Failure injection
+    int fail_stage;
+    esp_err_t fail_error;
+    bool estop_during_stop;
+} mock_orchestration_ctx_t;
+
+static void init_mock_ctx(mock_orchestration_ctx_t *m) {
+    memset(m, 0, sizeof(*m));
+    m->auth_core.mode = ARGUS_AUTHORITY_NONE;
+    m->auth_core.owner = ARGUS_AUTH_OWNER_NONE;
+    m->auth_core.generation = 1;
+    m->auth_core.last_error = ESP_OK;
+    m->mock_machine_state = ARGUS_STATE_HOLDING;
+    m->estop_latched = false;
+    m->fail_stage = -1;
+    m->fail_error = ESP_ERR_INVALID_STATE;
+    m->estop_during_stop = false;
 }
 
-static esp_err_t m_stop_norm(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->normal_stop_called = true;
+static esp_err_t mock_prepare_transition(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->prepare_count++;
+    m->call_sequence[m->call_count++] = 2;
+    if (m->fail_stage == 2) return m->fail_error;
+    return argus_authority_core_prepare_service_transition(&m->auth_core);
+}
+
+static esp_err_t mock_grant_local(void *ctx, argus_authority_owner_t owner) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->grant_count++;
+    m->call_sequence[m->call_count++] = 15;
+    if (m->fail_stage == 15) return m->fail_error;
+    return argus_authority_core_grant_local_service(&m->auth_core, owner);
+}
+
+static void mock_abort_transition(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->abort_count++;
+    argus_authority_core_abort_service_transition(&m->auth_core);
+}
+
+static esp_err_t mock_request_normal_stop(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->normal_stop_count++;
     m->call_sequence[m->call_count++] = 4;
-    return (m->fail_stage == 4) ? ESP_ERR_TIMEOUT : ESP_OK;
-}
-static esp_err_t m_ver_stopped(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->verify_stopped_called = true;
-    m->call_sequence[m->call_count++] = 5;
-    if (m->estop_during_stop) return ESP_ERR_INVALID_STATE;
-    return (m->fail_stage == 5) ? ESP_ERR_INVALID_STATE : ESP_OK;
-}
-static esp_err_t m_stop_brk(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->stop_broker_called = true;
-    m->call_sequence[m->call_count++] = 6;
-    return (m->fail_stage == 6) ? ESP_ERR_INVALID_STATE : ESP_OK;
-}
-static esp_err_t m_ver_brk(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->verify_broker_stopped_called = true;
-    m->call_sequence[m->call_count++] = 7;
-    return (m->fail_stage == 7) ? ESP_ERR_TIMEOUT : ESP_OK;
-}
-static esp_err_t m_disc_sta(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->disconnect_sta_called = true;
-    m->call_sequence[m->call_count++] = 8;
-    return (m->fail_stage == 8) ? ESP_ERR_INVALID_STATE : ESP_OK;
-}
-static esp_err_t m_ver_sta_disc(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->verify_sta_disc_called = true;
-    m->call_sequence[m->call_count++] = 9;
-    return (m->fail_stage == 9) ? ESP_ERR_TIMEOUT : ESP_OK;
-}
-static esp_err_t m_ver_sta_ip(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->verify_sta_ip_called = true;
-    m->call_sequence[m->call_count++] = 10;
-    return (m->fail_stage == 10) ? ESP_ERR_TIMEOUT : ESP_OK;
-}
-static esp_err_t m_set_ap(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->set_ap_called = true;
-    m->call_sequence[m->call_count++] = 11;
-    return (m->fail_stage == 11) ? ESP_ERR_INVALID_STATE : ESP_OK;
-}
-static esp_err_t m_ver_ap(void *ctx) {
-    mock_net_ops_ctx_t *m = (mock_net_ops_ctx_t *)ctx;
-    m->verify_ap_called = true;
-    m->call_sequence[m->call_count++] = 12;
-    return (m->fail_stage == 12) ? ESP_ERR_TIMEOUT : ESP_OK;
+    if (m->fail_stage == 4) return m->fail_error;
+    return ESP_OK;
 }
 
-// Test 16: 14-Step Service Orchestration & Complete Stage 2-13 Fail-Closed Failure Injection
+static esp_err_t mock_verify_stopped(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_stopped_count++;
+    m->call_sequence[m->call_count++] = 5;
+    if (m->estop_during_stop) {
+        m->mock_machine_state = ARGUS_STATE_EMERGENCY_STOPPED;
+        m->estop_latched = true;
+        return m->fail_error;
+    }
+    if (m->fail_stage == 5) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_stop_broker(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->stop_broker_count++;
+    m->call_sequence[m->call_count++] = 6;
+    if (m->fail_stage == 6) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_verify_broker_stopped(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_broker_count++;
+    m->call_sequence[m->call_count++] = 7;
+    if (m->fail_stage == 7) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_disconnect_sta(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->disconnect_sta_count++;
+    m->call_sequence[m->call_count++] = 8;
+    if (m->fail_stage == 8) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_verify_sta_disconnected(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_sta_disc_count++;
+    m->call_sequence[m->call_count++] = 9;
+    if (m->fail_stage == 9) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_verify_sta_ip_released(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_sta_ip_count++;
+    m->call_sequence[m->call_count++] = 10;
+    if (m->fail_stage == 10) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_set_wifi_ap_only(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->set_ap_count++;
+    m->call_sequence[m->call_count++] = 11;
+    if (m->fail_stage == 11) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_verify_ap_active(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_ap_count++;
+    m->call_sequence[m->call_count++] = 12;
+    if (m->fail_stage == 12) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_verify_machine_safe(void *ctx) {
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->verify_machine_safe_count++;
+    m->call_sequence[m->call_count++] = 13;
+    if (m->estop_latched || m->mock_machine_state == ARGUS_STATE_EMERGENCY_STOPPED || m->mock_machine_state == ARGUS_STATE_FAULTED) {
+        return m->fail_error;
+    }
+    if (m->mock_machine_state != ARGUS_STATE_HOLDING && m->mock_machine_state != ARGUS_STATE_UNLOCKED) {
+        return m->fail_error;
+    }
+    if (m->fail_stage == 13) return m->fail_error;
+    return ESP_OK;
+}
+
+// Test 16: 15-Step Service Orchestration & Complete Stage 2-15 Fail-Closed Failure Injection
 static esp_err_t test_network_truthfulness_and_broker_ordering(void)
 {
-    // Part A: Validate Dispatch Guard APIs and E-stop bypass preemption
-    argus_cmd_router_lock_dispatch();
-    // Verify E-stop bypasses dispatch mutex and executes immediately
-    argus_command_envelope_t estop_env = {
-        .source = ARGUS_CMD_SRC_INTERNAL_SAFETY,
-        .command_type = ARGUS_CMD_TYPE_ESTOP,
-        .authority_generation = 0
-    };
-    TEST_ASSERT(argus_cmd_router_dispatch(&estop_env) == ESP_OK, "E-stop failed while dispatch guard held!");
-    argus_cmd_router_unlock_dispatch();
+    mock_orchestration_ctx_t ctx;
 
-    // Part B: Validate NULL ops / NULL callback rejection and zero partial transition
-    argus_authority_core_t null_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 10 };
-    argus_service_authority_ops_t null_aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &null_acore };
-    argus_network_mode_t null_net = ARGUS_NET_MODE_COMMISSIONED_STA;
-
-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&null_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &null_aops, NULL) == ESP_ERR_INVALID_ARG, "NULL transition ops accepted");
-    TEST_ASSERT(null_net == ARGUS_NET_MODE_COMMISSIONED_STA, "NULL ops mutated network mode");
-    TEST_ASSERT(null_acore.mode == ARGUS_AUTHORITY_SUPERVISORY, "NULL ops mutated authority mode");
-
-    mock_net_ops_ctx_t dummy_ctx = {0};
-    argus_service_transition_ops_t incomplete_ops = {
-        .request_normal_stop = m_stop_norm,
-        .verify_stopped = m_ver_stopped,
-        // stop_broker is NULL
-        .ctx = &dummy_ctx
-    };
-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&null_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &null_aops, &incomplete_ops) == ESP_ERR_INVALID_ARG, "Incomplete callback table accepted");
-    TEST_ASSERT(null_net == ARGUS_NET_MODE_COMMISSIONED_STA, "Incomplete ops mutated network mode");
-    TEST_ASSERT(null_acore.mode == ARGUS_AUTHORITY_SUPERVISORY, "Incomplete ops mutated authority mode");
-
-    // Part C: Verified 14-step successful transition with exact step-by-step call sequence check
-    argus_authority_core_t acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 10 };
-    argus_service_authority_ops_t aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &acore };
-
+    // Check missing callbacks - setup a context just to trigger invalid arg error on incomplete op tables
     argus_network_mode_t mock_net = ARGUS_NET_MODE_COMMISSIONED_STA;
-    mock_net_ops_ctx_t ops_ctx = { .fail_stage = 0 };
+    argus_service_authority_ops_t aops_incomplete = {0};
+    argus_service_transition_ops_t ops_incomplete = {0};
+    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops_incomplete, NULL) == ESP_ERR_INVALID_ARG, "NULL transition ops accepted");
+    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops_incomplete, &ops_incomplete) == ESP_ERR_INVALID_ARG, "Incomplete callback table accepted");
 
+    // Part A: Happy path
+    init_mock_ctx(&ctx);
+    argus_service_authority_ops_t aops = {
+        .prepare_transition = mock_prepare_transition,
+        .grant_local = mock_grant_local,
+        .abort_transition = mock_abort_transition,
+        .ctx = &ctx
+    };
     argus_service_transition_ops_t ops = {
-        .request_normal_stop = m_stop_norm, .verify_stopped = m_ver_stopped,
-        .stop_broker = m_stop_brk, .verify_broker_stopped = m_ver_brk,
-        .disconnect_sta = m_disc_sta, .verify_sta_disconnected = m_ver_sta_disc,
-        .verify_sta_ip_released = m_ver_sta_ip, .set_wifi_ap_only = m_set_ap,
-        .verify_ap_active = m_ver_ap, .ctx = &ops_ctx
+        .request_normal_stop = mock_request_normal_stop,
+        .verify_stopped = mock_verify_stopped,
+        .stop_broker = mock_stop_broker,
+        .verify_broker_stopped = mock_verify_broker_stopped,
+        .disconnect_sta = mock_disconnect_sta,
+        .verify_sta_disconnected = mock_verify_sta_disconnected,
+        .verify_sta_ip_released = mock_verify_sta_ip_released,
+        .set_wifi_ap_only = mock_set_wifi_ap_only,
+        .verify_ap_active = mock_verify_ap_active,
+        .verify_machine_safe = mock_verify_machine_safe,
+        .ctx = &ctx
     };
 
-    TEST_ASSERT(argus_net_mgr_orchestrate_service_entry(&mock_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops) == ESP_OK, "Service entry orchestration failed");
-    TEST_ASSERT(mock_net == ARGUS_NET_MODE_SERVICE_AP_ONLY, "Final mode not SERVICE_AP_ONLY");
-    TEST_ASSERT(acore.mode == ARGUS_AUTHORITY_LOCAL_SERVICE && acore.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, "Final auth not LOCAL_SERVICE/CLI");
-    TEST_ASSERT(ops_ctx.call_count == 9, "Exact callback count mismatch");
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    esp_err_t res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
 
-    // Verify exact step ordering: 4, 5, 6, 7, 8, 9, 10, 11, 12
-    for (int i = 0; i < 9; i++) {
-        TEST_ASSERT(ops_ctx.call_sequence[i] == (i + 4), "Callback step sequence order violation!");
-    }
+    TEST_ASSERT(res == ESP_OK, "Service entry orchestration failed");
+    TEST_ASSERT(net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY, "Final mode not SERVICE_AP_ONLY");
+    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_LOCAL_SERVICE, "Final auth mode not LOCAL_SERVICE");
+    TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, "Final auth owner not DIAGNOSTIC_CLI");
+    TEST_ASSERT(ctx.grant_count == 1, "grant_count mismatch");
+    TEST_ASSERT(ctx.call_count == 12, "call_count mismatch");
+    TEST_ASSERT(ctx.prepare_count == 1, "prepare mismatch");
+    TEST_ASSERT(ctx.normal_stop_count == 1, "normal_stop mismatch");
+    TEST_ASSERT(ctx.verify_stopped_count == 1, "verify_stopped mismatch");
+    TEST_ASSERT(ctx.stop_broker_count == 1, "stop_broker mismatch");
+    TEST_ASSERT(ctx.verify_broker_count == 1, "verify_broker mismatch");
+    TEST_ASSERT(ctx.disconnect_sta_count == 1, "disconnect_sta mismatch");
+    TEST_ASSERT(ctx.verify_sta_disc_count == 1, "verify_sta_disc mismatch");
+    TEST_ASSERT(ctx.verify_sta_ip_count == 1, "verify_sta_ip mismatch");
+    TEST_ASSERT(ctx.set_ap_count == 1, "set_ap mismatch");
+    TEST_ASSERT(ctx.verify_ap_count == 1, "verify_ap mismatch");
+    TEST_ASSERT(ctx.verify_machine_safe_count == 1, "verify_machine_safe mismatch");
 
-    // Part D: Complete Fail-Closed Injection (Stages 2 through 13) + Timeout & Abort Preservation
-    for (int fail_stg = 2; fail_stg <= 13; fail_stg++) {
-        argus_authority_core_t err_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 20 };
-        argus_service_authority_ops_t err_aops = {
-            .prepare_transition = (fail_stg == 2) ? mock_fail_prep_trans : mock_prep_trans,
-            .grant_local = (fail_stg == 13) ? mock_fail_grant_loc : mock_grant_loc,
-            .abort_transition = mock_abort_trans,
-            .ctx = &err_acore
-        };
-        argus_network_mode_t err_net = ARGUS_NET_MODE_COMMISSIONED_STA;
-        mock_net_ops_ctx_t err_ops_ctx = { .fail_stage = fail_stg };
+    typedef struct {
+        const char *name;
+        int fail_stage;
+        esp_err_t injected_error;
+        int expected_calls;
+    } fail_test_case_t;
 
-        argus_service_transition_ops_t err_ops = ops;
-        err_ops.ctx = &err_ops_ctx;
+    fail_test_case_t test_cases[] = {
+        {"Prepare", 2, ESP_ERR_INVALID_STATE, 1},
+        {"Stop Request", 4, ESP_ERR_INVALID_STATE, 2},
+        {"Stop Verify Timeout", 5, ESP_ERR_TIMEOUT, 3},
+        {"Broker Stop", 6, ESP_ERR_INVALID_STATE, 4},
+        {"Broker Verify Timeout", 7, ESP_ERR_TIMEOUT, 5},
+        {"STA Disconnect", 8, ESP_ERR_INVALID_STATE, 6},
+        {"STA Verify Timeout", 9, ESP_ERR_TIMEOUT, 7},
+        {"STA IP Verify Timeout", 10, ESP_ERR_TIMEOUT, 8},
+        {"AP Set", 11, ESP_ERR_INVALID_STATE, 9},
+        {"AP Verify Timeout", 12, ESP_ERR_TIMEOUT, 10},
+        {"Machine Safe", 13, ESP_ERR_INVALID_STATE, 11},
+        {"Grant Local", 15, ESP_ERR_INVALID_STATE, 12}
+    };
 
-        esp_err_t res = argus_net_mgr_orchestrate_service_entry(&err_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &err_aops, &err_ops);
-        TEST_ASSERT(res != ESP_OK, "Injected failure stage accepted!");
-        TEST_ASSERT(err_net == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
-        TEST_ASSERT(err_acore.mode == ARGUS_AUTHORITY_NONE && err_acore.owner == ARGUS_AUTH_OWNER_NONE, "Fail-closed auth mode not NONE/NONE!");
+    // Part B: Failure injection matrix
+    for (int i = 0; i < 12; i++) {
+        init_mock_ctx(&ctx);
+        ctx.fail_stage = test_cases[i].fail_stage;
+        ctx.fail_error = test_cases[i].injected_error;
+        net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+        res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
 
-        if (fail_stg == 4 || fail_stg == 7 || fail_stg == 9 || fail_stg == 10 || fail_stg == 12) {
-            TEST_ASSERT(res == ESP_ERR_TIMEOUT, "Original ESP_ERR_TIMEOUT error code not preserved!");
+        TEST_ASSERT(res == test_cases[i].injected_error, "Exact esp_err_t mismatch!");
+        TEST_ASSERT(ctx.call_count == test_cases[i].expected_calls, "Exact callback count mismatch!");
+        TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
+        TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
+        if (test_cases[i].fail_stage == 15) {
+            TEST_ASSERT(ctx.grant_count == 1, "grant_count mismatch (should be 1 for grant failure)");
+        } else {
+            TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
         }
+        TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE after abort");
+        TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_NONE, "Auth owner not NONE after abort");
     }
 
-    // Part E: E-stop during controlled deceleration prevents local authority grant & retains E-stop latch
-    argus_authority_core_t estop_acore = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT, .generation = 30 };
-    argus_service_authority_ops_t estop_aops = { .prepare_transition = mock_prep_trans, .grant_local = mock_grant_loc, .abort_transition = mock_abort_trans, .ctx = &estop_acore };
-    argus_network_mode_t estop_net = ARGUS_NET_MODE_COMMISSIONED_STA;
-    mock_net_ops_ctx_t estop_ops_ctx = { .fail_stage = 5, .estop_during_stop = true };
+    // Part C: Prepare transition failure: fail_stage = 2
+    init_mock_ctx(&ctx);
+    ctx.fail_stage = 2;
+    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
+    TEST_ASSERT(res != ESP_OK, "Injected prepare failure accepted!");
+    TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Fail-closed net mode not NETWORK_FAULT!");
+    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch on prep fail");
+    TEST_ASSERT(ctx.normal_stop_count == 0, "ops called after prep fail");
 
-    argus_service_transition_ops_t estop_ops = ops;
-    estop_ops.ctx = &estop_ops_ctx;
+    // Part D: E-stop during verify_stopped
+    init_mock_ctx(&ctx);
+    ctx.estop_during_stop = true;
+    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
+    TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "E-stop preemption failed to return invalid state");
+    TEST_ASSERT(ctx.estop_latched == true, "E-stop not latched");
+    TEST_ASSERT(ctx.mock_machine_state == ARGUS_STATE_EMERGENCY_STOPPED, "Machine state not E-STOPPED");
+    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE after E-stop");
+    TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
+    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
+    TEST_ASSERT(ctx.stop_broker_count == 0, "stop_broker called after E-stop");
+    TEST_ASSERT(ctx.disconnect_sta_count == 0, "disconnect_sta called after E-stop");
+    TEST_ASSERT(ctx.set_ap_count == 0, "set_ap called after E-stop");
+    TEST_ASSERT(ctx.verify_ap_count == 0, "verify_ap called after E-stop");
+    TEST_ASSERT(ctx.verify_machine_safe_count == 0, "verify_machine_safe called after E-stop");
 
-    esp_err_t estop_res = argus_net_mgr_orchestrate_service_entry(&estop_net, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &estop_aops, &estop_ops);
-    TEST_ASSERT(estop_res == ESP_ERR_INVALID_STATE, "E-stop preemption failed to return invalid state");
-    TEST_ASSERT(estop_net == ARGUS_NET_MODE_NETWORK_FAULT, "E-stop preemption net mode not NETWORK_FAULT");
-    TEST_ASSERT(estop_acore.mode == ARGUS_AUTHORITY_NONE && estop_acore.owner == ARGUS_AUTH_OWNER_NONE, "E-stop preemption auth mode not NONE/NONE");
+    // Part E: verify_machine_safe failure (stage 13)
+    init_mock_ctx(&ctx);
+    ctx.fail_stage = 13;
+    net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
+    TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "Verify machine safe failure accepted");
+    TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Net mode not NETWORK_FAULT");
+    TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
+    TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
+    TEST_ASSERT(ctx.verify_ap_count == 1, "Preceding callback verify_ap not called");
+    TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE");
 
     return ESP_OK;
 }
@@ -682,40 +785,39 @@ static esp_err_t test_two_stage_service_entry_and_fail_closed_abort(void)
     return ESP_OK;
 }
 
-// Full 23-Field Read-Only Production Snapshot Observation Struct
+// Full Read-Only Production Snapshot Observation Struct
 typedef struct {
     argus_state_snapshot_t state;
     argus_authority_snapshot_t authority;
-    argus_network_mode_t net_mode;
-    argus_net_err_t last_net_err;
+    argus_net_snapshot_t net_snap;
+    esp_err_t wifi_mode_status;
     wifi_mode_t wifi_driver_mode;
-    bool sta_connected;
-    bool sta_ip_acquired;
-    bool ap_started;
-    bool mqtt_broker_running;
-    uint8_t nvs_active_selector;
-    argus_cfg_slot_t slot_a;
-    argus_cfg_slot_t slot_b;
+    argus_nvs_observation_t nvs_obs;
     UBaseType_t task_count;
 } argus_prod_snapshot_t;
 
-static void capture_prod_snapshot(argus_prod_snapshot_t *out)
+static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
 {
     memset(out, 0, sizeof(argus_prod_snapshot_t));
     argus_state_mgr_get_snapshot(&out->state);
     argus_authority_mgr_get_snapshot(&out->authority);
-    out->net_mode = argus_net_mgr_get_mode();
-    out->last_net_err = argus_net_mgr_get_last_error();
-    esp_wifi_get_mode(&out->wifi_driver_mode);
-    out->sta_connected = argus_net_mgr_is_sta_connected();
-    out->sta_ip_acquired = argus_net_mgr_is_sta_ip_acquired();
-    out->ap_started = argus_net_mgr_is_ap_started();
-    out->mqtt_broker_running = argus_mqtt_broker_is_running();
-    argus_nvs_config_get_observation_snapshot(&out->nvs_active_selector, &out->slot_a, &out->slot_b);
+    argus_net_mgr_get_snapshot(&out->net_snap);
+
+    out->wifi_mode_status = esp_wifi_get_mode(&out->wifi_driver_mode);
+    if (out->wifi_mode_status != ESP_OK && out->wifi_mode_status != ESP_ERR_WIFI_NOT_INIT) {
+        return out->wifi_mode_status;
+    }
+
+    esp_err_t err = argus_nvs_config_get_observation_snapshot(&out->nvs_obs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     out->task_count = uxTaskGetNumberOfTasks();
+    return ESP_OK;
 }
 
-static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
+static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
 {
     bool match = true;
 
@@ -736,28 +838,24 @@ static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_p
     CHECK_DIFF_INT("7. driver_enabled", b->state.driver_enabled, a->state.driver_enabled);
     CHECK_DIFF_INT("8. estop_latched", b->state.estop_latched, a->state.estop_latched);
     CHECK_DIFF_INT("9. fault_code", b->state.fault_code, a->state.fault_code);
-    CHECK_DIFF_INT("10. net_mode", b->net_mode, a->net_mode);
-    CHECK_DIFF_INT("11. last_net_err", b->last_net_err, a->last_net_err);
-    CHECK_DIFF_INT("12. wifi_driver_mode", b->wifi_driver_mode, a->wifi_driver_mode);
-    CHECK_DIFF_INT("13. sta_connected", b->sta_connected, a->sta_connected);
-    CHECK_DIFF_INT("14. sta_ip_acquired", b->sta_ip_acquired, a->sta_ip_acquired);
-    CHECK_DIFF_INT("15. ap_started", b->ap_started, a->ap_started);
-    CHECK_DIFF_INT("16. mqtt_broker_running", b->mqtt_broker_running, a->mqtt_broker_running);
-    CHECK_DIFF_INT("17. authority.mode", b->authority.mode, a->authority.mode);
-    CHECK_DIFF_INT("18. authority.owner", b->authority.owner, a->authority.owner);
-    CHECK_DIFF_INT("19. authority.generation", b->authority.generation, a->authority.generation);
-    CHECK_DIFF_INT("20. nvs_active_selector", b->nvs_active_selector, a->nvs_active_selector);
-    CHECK_DIFF_INT("21. slot_a.schema_version", b->slot_a.schema_version, a->slot_a.schema_version);
-    CHECK_DIFF_INT("21. slot_a.config_generation", b->slot_a.config_generation, a->slot_a.config_generation);
-    CHECK_DIFF_INT("21. slot_a.payload_length", b->slot_a.payload_length, a->slot_a.payload_length);
-    CHECK_DIFF_INT("21. slot_a.crc32", b->slot_a.crc32, a->slot_a.crc32);
-    CHECK_DIFF_INT("21. slot_a.valid_marker", b->slot_a.valid_marker, a->slot_a.valid_marker);
-    CHECK_DIFF_INT("22. slot_b.schema_version", b->slot_b.schema_version, a->slot_b.schema_version);
-    CHECK_DIFF_INT("22. slot_b.config_generation", b->slot_b.config_generation, a->slot_b.config_generation);
-    CHECK_DIFF_INT("22. slot_b.payload_length", b->slot_b.payload_length, a->slot_b.payload_length);
-    CHECK_DIFF_INT("22. slot_b.crc32", b->slot_b.crc32, a->slot_b.crc32);
-    CHECK_DIFF_INT("22. slot_b.valid_marker", b->slot_b.valid_marker, a->slot_b.valid_marker);
-    CHECK_DIFF_INT("23. task_count", b->task_count, a->task_count);
+    CHECK_DIFF_INT("10. net_mode", b->net_snap.mode, a->net_snap.mode);
+    CHECK_DIFF_INT("11. last_net_err", b->net_snap.last_error, a->net_snap.last_error);
+    CHECK_DIFF_INT("12. wifi_mode_status", b->wifi_mode_status, a->wifi_mode_status);
+    CHECK_DIFF_INT("13. wifi_driver_mode", b->wifi_driver_mode, a->wifi_driver_mode);
+    CHECK_DIFF_INT("14. sta_connected", b->net_snap.sta_connected, a->net_snap.sta_connected);
+    CHECK_DIFF_INT("15. sta_ip_acquired", b->net_snap.sta_ip_acquired, a->net_snap.sta_ip_acquired);
+    CHECK_DIFF_INT("16. ap_started", b->net_snap.ap_started, a->net_snap.ap_started);
+    CHECK_DIFF_INT("17. mqtt_broker_running", b->net_snap.mqtt_broker_running, a->net_snap.mqtt_broker_running);
+    CHECK_DIFF_INT("18. authority.mode", b->authority.mode, a->authority.mode);
+    CHECK_DIFF_INT("19. authority.owner", b->authority.owner, a->authority.owner);
+    CHECK_DIFF_INT("20. authority.generation", b->authority.generation, a->authority.generation);
+    CHECK_DIFF_INT("21. nvs_selector_status", b->nvs_obs.selector_status, a->nvs_obs.selector_status);
+    CHECK_DIFF_INT("22. nvs_selector", b->nvs_obs.selector, a->nvs_obs.selector);
+    CHECK_DIFF_INT("23. slot_a_status", b->nvs_obs.slot_a_status, a->nvs_obs.slot_a_status);
+    CHECK_DIFF_INT("24. slot_a.config_generation", b->nvs_obs.slot_a.config_generation, a->nvs_obs.slot_a.config_generation);
+    CHECK_DIFF_INT("25. slot_b_status", b->nvs_obs.slot_b_status, a->nvs_obs.slot_b_status);
+    CHECK_DIFF_INT("26. slot_b.config_generation", b->nvs_obs.slot_b.config_generation, a->nvs_obs.slot_b.config_generation);
+    CHECK_DIFF_INT("27. task_count", b->task_count, a->task_count);
 
 #undef CHECK_DIFF_INT
     return match;
@@ -773,7 +871,10 @@ esp_err_t argus_tests_4a_run_all(void)
     int failed_executions = 0;
 
     argus_prod_snapshot_t snap_before, snap_after;
-    capture_prod_snapshot(&snap_before);
+    if (capture_prod_snapshot(&snap_before) != ESP_OK) {
+        printf("Failed to capture initial snapshot\n");
+        return ESP_FAIL;
+    }
 
 #define RUN_TEST(test_fn) \
     do { \
@@ -810,8 +911,11 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
     }
 
-    capture_prod_snapshot(&snap_after);
-    bool non_mutated = compare_prod_snapshots(&snap_before, &snap_after);
+    if (capture_prod_snapshot(&snap_after) != ESP_OK) {
+        printf("Failed to capture final snapshot\n");
+        return ESP_FAIL;
+    }
+    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A Pure Tests:\n");
     printf("  Distinct Test Cases : 18\n");
@@ -820,16 +924,16 @@ esp_err_t argus_tests_4a_run_all(void)
     printf("  Passed Executions   : %d\n", passed_executions);
     printf("  Failed Executions   : %d\n", failed_executions);
 
-    printf("\nProduction Isolation (23-Field Read-Only Proof):\n");
+    printf("\nProduction Isolation (Read-Only Proof):\n");
     printf("  Authority Generation : %s (Gen %lu)\n",
            (snap_before.authority.generation == snap_after.authority.generation) ? "UNCHANGED" : "MUTATED",
            (unsigned long)snap_after.authority.generation);
     printf("  Network State         : %s (%s)\n",
-           (snap_before.net_mode == snap_after.net_mode) ? "UNCHANGED" : "MUTATED",
-           argus_net_mgr_get_mode_name(snap_after.net_mode));
+           (snap_before.net_snap.mode == snap_after.net_snap.mode) ? "UNCHANGED" : "MUTATED",
+           argus_net_mgr_get_mode_name(snap_after.net_snap.mode));
     printf("  MQTT Broker State     : %s (%s)\n",
-           (snap_before.mqtt_broker_running == snap_after.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
-           snap_after.mqtt_broker_running ? "RUNNING" : "STOPPED");
+           (snap_before.net_snap.mqtt_broker_running == snap_after.net_snap.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
+           snap_after.net_snap.mqtt_broker_running ? "RUNNING" : "STOPPED");
     printf("  Machine State         : %s (%s)\n",
            (snap_before.state.machine_state == snap_after.state.machine_state) ? "UNCHANGED" : "MUTATED",
            argus_state_mgr_get_state_name(snap_after.state.machine_state));

@@ -479,7 +479,7 @@ esp_err_t argus_state_mgr_unlock(void)
 
 esp_err_t argus_state_mgr_estop(void)
 {
-    // Non-blocking E-Stop bypasses s_command_mutex for immediate preemption
+    // E-Stop bypasses s_command_mutex but blocks on s_state_mutex (non-preemptive; Phase 4B)
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
     esp_err_t err = argus_state_core_estop(&s_prod_core);
     xSemaphoreGive(s_state_mutex);
