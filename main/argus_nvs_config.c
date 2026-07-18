@@ -264,7 +264,20 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     esp_err_t val_err = argus_nvs_config_validate(in_cfg);
     if (val_err != ESP_OK) return val_err;
 
-    uint8_t inactive_slot = (core->active_slot_index == 0) ? 1 : 0;
+    uint8_t selector = 0xFF;
+    esp_err_t sel_read_err = core->driver->read_selector(core->driver->ctx, &selector);
+
+    uint8_t inactive_slot;
+    if (sel_read_err == ESP_OK && selector <= 1) {
+        /* The selector is the source of truth for which slot the system
+         * boots from.  Always write to the OTHER slot to guarantee the
+         * selector-pointed LKG is never overwritten.                    */
+        inactive_slot = (selector == 0) ? 1 : 0;
+    } else {
+        /* Selector unreadable (first commit or corrupted).  Fall back to
+         * the core's active_slot_index.                                  */
+        inactive_slot = (core->active_slot_index == 0) ? 1 : 0;
+    }
     uint32_t next_gen = core->active_generation + 1;
 
     argus_cfg_slot_t slot = {
@@ -283,10 +296,9 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     esp_err_t readback_err = core->driver->read_slot(core->driver->ctx, inactive_slot, &verify_slot);
     if (readback_err != ESP_OK || !is_slot_valid(&verify_slot) ||
         memcmp(&verify_slot.payload, in_cfg, sizeof(argus_config_payload_t)) != 0) {
-        /* Readback verification failed. Invalidate the slot so a future
-         * init() cannot pick up the unverified higher-generation data.   */
-        argus_cfg_slot_t invalid_slot = {0};  /* valid_marker == 0 => invalid */
-        core->driver->write_slot(core->driver->ctx, inactive_slot, &invalid_slot);
+        /* Readback verification failed.  Do NOT update the selector.
+         * The selector still points to the LKG, which is in the other
+         * slot and was never overwritten.                                */
         return ESP_ERR_INVALID_STATE;
     }
 
