@@ -2,7 +2,8 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1: Read-only status and identity API with embedded mobile portal.
+ * Phase 4B.1: Status, identity, and credential-management API with embedded
+ * mobile portal.
  *
  * Lifecycle:
  *   argus_http_server_init() — One-time creation of lifecycle objects.
@@ -15,20 +16,27 @@
  * The HTTP server does NOT run in:
  *   BOOTSTRAP, COMMISSIONED_STA, SERVICE_TRANSITION, NETWORK_FAULT.
  *
- * All endpoints are read-only in Phase 4B.1. No configuration mutation,
- * no motion commands, no authority acquisition.
+ * Current scope (Phase 4B.1):
+ *   - GET endpoints for machine status, identity, and the portal dashboard.
+ *   - POST endpoint for portal password change (NVS mutation).
+ *   - GET endpoint for logout (clears browser auth cache).
+ *   - Motion-control and commissioning POST endpoints are not yet implemented.
  *
- * Interface enforcement:
- *   In APSTA mode (AP_DISCOVERABLE), connections are only accepted through
- *   the AP interface. Connections arriving on the STA interface are rejected
- *   at the session level before any handler executes.
+ * Access control:
+ *   The portal is reachable through all interfaces on which the HTTP server
+ *   listens (AP and STA when in APSTA mode). Access is protected by HTTP
+ *   Basic authentication with forced password change on first use. See
+ *   docs/DEFERRED_HARDENING_REGISTER.md for accepted security limitations.
  *
  * Security:
+ *   - HTTP Basic Auth on all endpoints (except /api/logout).
+ *   - Bootstrap credential disabled after successful password replacement.
+ *   - Credential-storage errors fail closed.
  *   - No secrets returned (passwords, AP credentials).
  *   - No permissive CORS headers.
  *   - Cache-Control: no-store on all API responses.
  *   - Method validation on all handlers.
- *   - Content-Type validation on POST (future phases).
+ *   - Content-Type: application/json required on POST /api/portal-password.
  *   - HTML escaping on all device-supplied values in the portal DOM.
  */
 

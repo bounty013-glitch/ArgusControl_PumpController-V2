@@ -42,8 +42,8 @@ See `DEFERRED_HARDENING_REGISTER.md` for the authoritative record of accepted se
 
 - **Mechanism:** HTTP Basic Auth (`WWW-Authenticate: Basic realm="Argus Service Portal"`). This is interim access control, not encrypted transport (see DHR-002).
 - **Default credentials:** `admin` / `admin`
-- **Forced password change:** When the default password is active (NVS `pw_set != 1`), the portal handler serves a password-change page instead of the dashboard. All API endpoints remain accessible with default credentials during this window — the forced-change is a UI-level gate, not an API-level block. After password change, the default `admin` password is explicitly and permanently rejected by `check_auth()` (defense-in-depth).
-- **Default wipe:** After password change, `portal_get_credentials()` uses fail-closed logic. If `pw_set == 1` but the NVS password read fails, no valid password exists (empty string). The hardcoded default is never returned after `pw_set` is recorded.
+- **Forced password change:** When the default password is active (NVS `pw_set != 1`), the portal handler serves a password-change page instead of the dashboard. All API endpoints remain accessible with default credentials during this window — the forced-change is a UI-level gate, not an API-level block. After successful password replacement, the bootstrap credential is disabled during normal operation (defense-in-depth check in `check_auth()`).
+- **Bootstrap credential after replacement:** The compiled `admin` default remains in firmware as the first-use bootstrap credential. After a successful password change, `portal_get_credentials()` uses fail-closed logic: if `pw_set == 1` but the NVS password read fails, no valid password exists (empty string). NVS read errors other than not-found also fail closed. The bootstrap credential is not re-enabled by credential-storage errors.
 - **Storage:** NVS namespace `argus_portal`, keys `pw` (plaintext password string — see DHR-003) and `pw_set` (bool flag)
 - **Validation:** Min 4 chars (see DHR-005), max 64 chars, cannot reuse "admin"
 - **Re-authentication:** After password change, the browser's cached Basic Auth credentials become invalid, triggering the native browser re-authentication prompt
@@ -56,7 +56,7 @@ See `DEFERRED_HARDENING_REGISTER.md` for the authoritative record of accepted se
 |----------|--------|
 | All endpoints require authentication | Yes |
 | Default password forced to change (UI gate) | Yes |
-| Default password permanently rejected after change | Yes |
+| Bootstrap credential disabled after replacement | Yes |
 | No secrets in API responses (passwords, AP credentials) | Yes |
 | JSON escape on all device-supplied values (prevents JSON injection) | Yes |
 | HTML escaping via JavaScript `h()` function (prevents DOM XSS) | Yes |
@@ -92,10 +92,7 @@ In this project configuration (ESP-IDF v5.5.3, ESP32-S3, lwip, `esp_http_server`
 
 ### Resolution
 
-Socket-level interface filtering is not possible on this platform. HTTP Basic Auth credential protection was added instead, which:
-- Works regardless of which network interface the connection arrives on
-- Is actually a stronger access control than subnet filtering (credentials vs. network position)
-- Satisfies the original review intent (prevent unauthorized access from LAN)
+Socket-level interface filtering was not successfully achieved in this project configuration. HTTP Basic Auth credential protection was added instead. Credential-based access control now applies regardless of whether the portal is reached through the AP or STA address.
 
 ### Operator Acceptance
 

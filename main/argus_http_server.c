@@ -101,6 +101,14 @@ static bool              s_initialized = false;
  * @brief Get the current portal password from NVS.
  * @param out_pw  Buffer to receive password (must be PORTAL_MAX_PW_LEN+1).
  * @param out_is_default  Set to true if password has never been changed.
+ *
+ * Error semantics:
+ *   - Namespace genuinely absent (first boot): return bootstrap default.
+ *   - pw_set key genuinely absent: return bootstrap default.
+ *   - pw_set == 1: return stored replacement password.
+ *   - Any NVS error other than not-found: fail closed (empty password,
+ *     is_default = false). The bootstrap credential is NOT re-enabled
+ *     by NVS read errors.
  */
 static void portal_get_credentials(char *out_pw, bool *out_is_default)
 {
@@ -108,27 +116,51 @@ static void portal_get_credentials(char *out_pw, bool *out_is_default)
     *out_is_default = true;
 
     nvs_handle_t nvs;
-    if (nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
-        /* No NVS namespace yet = first boot, use default */
+    esp_err_t err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Namespace genuinely absent = first-boot device, bootstrap default */
         strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
         out_pw[PORTAL_MAX_PW_LEN] = '\0';
         return;
     }
+    if (err != ESP_OK) {
+        /* NVS error (corruption, not initialized, etc.) — fail closed */
+        ESP_LOGE(TAG, "nvs_open(%s) failed: %s — fail closed",
+                 PORTAL_NVS_NAMESPACE, esp_err_to_name(err));
+        *out_is_default = false;
+        return;
+    }
 
-    /* Check if password has ever been changed */
+    /* Read the pw_set marker */
     uint8_t pw_set = 0;
-    nvs_get_u8(nvs, PORTAL_NVS_KEY_PW_SET, &pw_set);
+    err = nvs_get_u8(nvs, PORTAL_NVS_KEY_PW_SET, &pw_set);
+
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Key genuinely absent = password never changed, bootstrap default */
+        strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
+        out_pw[PORTAL_MAX_PW_LEN] = '\0';
+        nvs_close(nvs);
+        return;
+    }
+    if (err != ESP_OK) {
+        /* NVS read error on pw_set — fail closed, do NOT re-enable default */
+        ESP_LOGE(TAG, "nvs_get_u8(%s) failed: %s — fail closed",
+                 PORTAL_NVS_KEY_PW_SET, esp_err_to_name(err));
+        *out_is_default = false;
+        nvs_close(nvs);
+        return;
+    }
 
     if (pw_set == 1) {
         *out_is_default = false;
-        /* Read the stored password. If this fails, out_pw stays empty (fail closed) */
+        /* Read the stored replacement password */
         size_t len = PORTAL_MAX_PW_LEN + 1;
         if (nvs_get_str(nvs, PORTAL_NVS_KEY_PW, out_pw, &len) != ESP_OK) {
-            ESP_LOGE(TAG, "pw_set=1 but password read failed - fail closed");
+            ESP_LOGE(TAG, "pw_set=1 but password read failed — fail closed");
             out_pw[0] = '\0';
         }
     } else {
-        /* No password change recorded, use default */
+        /* pw_set exists but != 1 — treat as first-boot, bootstrap default */
         strncpy(out_pw, PORTAL_DEFAULT_PASS, PORTAL_MAX_PW_LEN);
         out_pw[PORTAL_MAX_PW_LEN] = '\0';
     }

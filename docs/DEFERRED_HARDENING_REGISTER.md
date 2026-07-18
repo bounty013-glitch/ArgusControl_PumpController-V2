@@ -167,6 +167,23 @@
 
 ---
 
+## DHR-010 — HTTP Basic Auth Logout Browser Behavior
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-18 |
+| **System Area** | HTTP Service Portal — Logout |
+| **Current Implementation** | `GET /api/logout` returns 401 with `WWW-Authenticate` header and a styled "Logged Out" page containing a "Log in again" link to `/`. |
+| **Known Limitation** | HTTP Basic Auth has no standard logout mechanism. Browser behavior on receiving 401 after cached credentials is inconsistent: some browsers re-prompt immediately, others retain cached credentials. Observed operator behavior (Chrome mobile): after logout, the browser credential prompt appears but the correct password is not immediately accepted; pressing Cancel shows the Logged Out page, and the "Log in again" link then works correctly. |
+| **Operator Rationale** | Operator-verified and accepted as usable. The workaround (Cancel → Log in again) reliably clears credentials and re-prompts. A session-based logout (cookie/token) would provide reliable cross-browser behavior but adds significant complexity. |
+| **Current Exposure Assumptions** | Single-operator usage. The quirk is a UX inconvenience, not a security vulnerability. |
+| **Reconsideration Trigger** | If session-based authentication is implemented in Phase 4D. If multi-user access is required. |
+| **Target Phase** | Phase 4D (Session-Based Auth) |
+| **Status** | OPEN — Accepted by operator as usable |
+| **Closure Evidence** | Not yet applicable |
+
+---
+
 ## Register Maintenance
 
 This register is maintained as a living document. New entries are appended as limitations are identified. Entries are closed when the limitation is resolved, with closure evidence documenting the specific change, test, or audit that addressed the item.
