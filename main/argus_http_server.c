@@ -43,10 +43,12 @@
  *
  * 7. SERVICE AP INTERFACE ENFORCEMENT
  *    In AP_DISCOVERABLE (APSTA), the HTTP server accepts connections on both
- *    interfaces. The open_fn session callback verifies each connection arrived
- *    on the AP interface (192.168.4.x) by comparing the socket's local
- *    address to the AP netif's IP. Connections through the STA interface are
- *    rejected before any handler executes.
+ *    interfaces. The open_fn session callback verifies the connecting client's
+ *    IP is within the AP subnet (e.g. 192.168.4.x/24) by comparing the peer
+ *    address (getpeername) masked with the AP netif's netmask. Connections from
+ *    non-AP subnets are rejected before any handler executes.
+ *    Note: getsockname() cannot be used — lwip returns 0.0.0.0 on accepted
+ *    sockets when the listener is bound to INADDR_ANY.
  */
 
 #include "argus_http_server.h"
@@ -87,9 +89,13 @@ static bool              s_initialized = false;
  * @brief Session open callback — reject connections through non-AP interfaces.
  *
  * In APSTA mode, esp_http_server binds to INADDR_ANY and would accept
- * connections on both the AP and STA interfaces. This callback compares
- * the socket's local address to the AP netif's IP. Connections arriving
- * on any other interface are rejected before any handler executes.
+ * connections on both the AP and STA interfaces. This callback verifies
+ * the connecting client's IP is within the AP subnet (e.g. 192.168.4.x/24).
+ * Connections from other subnets are rejected before any handler executes.
+ *
+ * Note: getsockname() cannot be used here — lwip returns 0.0.0.0 on accepted
+ * sockets when the listener is bound to INADDR_ANY. getpeername() returns the
+ * actual client address, which is checked against the AP netif's subnet.
  *
  * This enforces the product decision: the portal is a Service AP interface,
  * not a production-LAN HTTP service.
@@ -98,10 +104,10 @@ static esp_err_t http_session_open(httpd_handle_t hd, int sockfd)
 {
     (void)hd;
 
-    struct sockaddr_in local_addr;
-    socklen_t addr_len = sizeof(local_addr);
-    if (getsockname(sockfd, (struct sockaddr *)&local_addr, &addr_len) != 0) {
-        ESP_LOGW(TAG, "Rejected connection: getsockname failed");
+    struct sockaddr_in peer_addr;
+    socklen_t addr_len = sizeof(peer_addr);
+    if (getpeername(sockfd, (struct sockaddr *)&peer_addr, &addr_len) != 0) {
+        ESP_LOGW(TAG, "Rejected connection: getpeername failed");
         return ESP_FAIL;
     }
 
@@ -117,11 +123,16 @@ static esp_err_t http_session_open(httpd_handle_t hd, int sockfd)
         return ESP_FAIL;
     }
 
-    if (local_addr.sin_addr.s_addr != ap_ip.ip.addr) {
-        ESP_LOGW(TAG, "Rejected connection on non-AP interface (local=%s)",
-                 inet_ntoa(local_addr.sin_addr));
+    /* Check if the client is in the AP subnet */
+    uint32_t peer_subnet = peer_addr.sin_addr.s_addr & ap_ip.netmask.addr;
+    uint32_t ap_subnet   = ap_ip.ip.addr & ap_ip.netmask.addr;
+
+    if (peer_subnet != ap_subnet) {
+        ESP_LOGW(TAG, "Rejected connection from non-AP subnet (peer=%s)",
+                 inet_ntoa(peer_addr.sin_addr));
         return ESP_FAIL;
     }
+
 
     return ESP_OK;
 }
