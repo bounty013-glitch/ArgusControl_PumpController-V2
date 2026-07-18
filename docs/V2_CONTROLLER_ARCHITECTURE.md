@@ -60,7 +60,7 @@ graph TD
     *   *Integer & Remainder Scheduling*:
         *   `integer = 600,000,000,000 / (rpm_milli * steps_per_rev)`
         *   `remainder = 600,000,000,000 % (rpm_milli * steps_per_rev)`
-    *   *Active-Low STEP Waveform*: Baseline/idle state is `HIGH` (optocoupler off). Assertion drives STEP `LOW` (optocoupler on) for 6 microseconds (60 ticks at 10 MHz), deassertion returns pin `HIGH`.
+    *   *Active-Low STEP Waveform*: Baseline/idle state is `HIGH` (optocoupler off). Assertion drives STEP `LOW` (optocoupler on) for 15 microseconds (150 ticks at 10 MHz), deassertion returns pin `HIGH`.
     *   *Enable-Before-Motion ordering*: Drives GPIO 5 LOW, waits 20 ms for driver settle, and only then starts active-low STEP generation.
     *   *Stop / Unlock behaviors*:
         *   Normal Stop: stops STEP pulses, forces STEP to inactive `HIGH`, leaves ENA LOW (retaining holding torque).

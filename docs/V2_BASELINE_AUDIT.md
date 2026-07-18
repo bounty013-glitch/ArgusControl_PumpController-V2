@@ -26,22 +26,23 @@ ArgusControl_PumpController-V2/
 │   ├── V2_BASELINE_AUDIT.md   <- [THIS FILE] Baseline audit & hardware learnings
 │   ├── V2_CONTROLLER_ARCHITECTURE.md
 │   ├── V2_IMPLEMENTATION_PLAN.md
-│   ├── WHY.md
-│   └── Manuals/
-│       ├── Manual_UIM344 V5.11.pdf
-│       └── Manual_uirSDK3 V4.7.pdf
+│   ├── PHASE_3B_WALKTHROUGH.md
+│   └── WHY.md
+├── hmi/                      <- [OBSOLETE] Archival Arduino CYD HMI reference (not used in V2)
+│   └── README.md              <- Warning notice (OBSOLETE — DO NOT FLASH OR USE WITH V2)
 ├── main/                      <- ESP-IDF Application code
 │   ├── CMakeLists.txt         <- Build configuration
 │   ├── Kconfig.projbuild      <- Project-scoped configuration settings
 │   ├── app_main.c             <- Startup, Wi-Fi AP/STA, local MQTT broker, status task, CLI menu
+│   ├── argus_cmd_parser.c/h   <- Strict numeric/boolean command parser & retain policy seam
 │   ├── argus_config.c/h       <- Hardware configuration parameters & Kconfig defaults
 │   ├── argus_conversions.c/h  <- Exact fixed-point rational timing conversions
 │   ├── argus_feedback.c/h     <- Open-loop feedback seam (returns unsupported by default)
+│   ├── argus_mqtt_broker.c/h  <- Embedded local MQTT broker with transport-neutral policy seam
+│   ├── argus_state_mgr.c/h    <- [PHASE 3B] Authoritative machine state manager & permission matrix
 │   ├── argus_step_gen.c/h     <- GPTimer-based Bresenham step pulse scheduler
 │   ├── argus_trajectory.c/h   <- Phase 3A linear trajectory ramp engine (20ms periodic task)
-│   ├── argus_tests.c/h        <- Automated unit test runner
-│   ├── argus_mqtt_broker.c/h  <- Embedded local MQTT broker
-│   └── argus_stepper.c/h      <- [ARCHIVAL] Legacy LEDC-based pulse engine (removed from build)
+│   └── argus_tests.c/h        <- Pure unit test suite & interactive hardware acceptance runner
 ├── sdkconfig                  <- Build configuration
 └── sdkconfig.defaults         <- Project defaults
 ```
@@ -66,7 +67,7 @@ The physical wiring between the ESP32-S3 and the UIM344 motor driver is physical
 *   **Fix**: Expanded STEP active-low pulse duration from `6 us` (60 ticks) to `15 us` (150 ticks), giving slow optocouplers ample saturation margin.
 
 ### 2. GPTimer Alarm Misses Under Network Load
-*   **Symptom**: Pulse generation froze completely (`steps` static at 279045) under concurrent Wi-Fi / MQTT load.
+*   **Symptom**: Pulse generation froze completely under concurrent Wi-Fi / MQTT load.
 *   **Root Cause**: High-priority network interrupts introduced $>6 \text{ us}$ latencies. The alarm callback calculated `next_alarm` in the past relative to the hardware counter, causing the match interrupt to be missed permanently.
 *   **Fix**: Implemented a $3 \text{ us}$ (30 ticks) safety clamp on `gptimer_set_alarm_action()`. If `next_alarm` falls in the past or within 3 us, it is clamped to `now + 30`, guaranteeing future hardware match trigger.
 
@@ -85,9 +86,15 @@ The physical wiring between the ESP32-S3 and the UIM344 motor driver is physical
 *   **Root Cause**: Step rate outran rotor mechanical inertia.
 *   **Fix**: Implemented Phase 3A linear trajectory engine ($10.0 \text{ output RPM/sec}$, $200 \text{ mRPM}$ per $20 \text{ ms}$ tick), ensuring smooth linear acceleration and deceleration without overshoot.
 
-## Phase 3A Telemetry & Performance Summary
+## Phase 3B Authoritative State Manager Summary
 
-*   **Acceleration**: Linear ramp from $0 \to 200 \text{ RPM}$ ($26,666.666 \text{ Hz}$ step pulse frequency) over 20 seconds.
-*   **Deceleration**: Linear ramp down from $200 \to 0 \text{ RPM}$ over 20 seconds upon normal stop (`s`), maintaining driver enable (`enabled=1`) and holding torque.
-*   **Diagnostic Recovery (`r`)**: Resets targets, forces STEP inactive, drives ENA HIGH, waits 500 ms recovery interval, and leaves driver unlocked without requiring ESP32 reboot.
+*   **States**: `BOOTING`, `UNLOCKED`, `STARTING`, `RUNNING`, `DECELERATING`, `HOLDING`, `EMERGENCY_STOPPED`, `RECOVERING`, `FAULTED`.
+*   **Deterministic Initial Boot**: `BOOTING -> UNLOCKED`.
+*   **Setpoint Isolation**: `SET_TARGET` in `UNLOCKED` or `HOLDING` updates stored setpoint without enabling driver or producing STEP pulses. Motion starts only upon `START`.
+*   **Latched Software E-Stop**: `E_STOP` halts pulses immediately, preserves driver state (`ENA LOW` if enabled, `ENA HIGH` if disabled), and latches `EMERGENCY_STOPPED`. Requires explicit `RESET_ESTOP` to return to `HOLDING` or `UNLOCKED` without auto-restart.
+*   **Lock Hierarchy**:
+    1. `s_command_mutex`
+    2. `s_traj_mutex`
+    3. `s_lifecycle_mutex`
+    4. `s_timing_mux`
 *   **Open-Loop Philosophy**: Telemetry fields `target_rpm_milli`, `applied_rpm_milli`, `generated_rpm_milli`, and `generated_step_count` represent controller intent and pulse generation, not verified physical movement.

@@ -44,6 +44,7 @@ typedef struct {
     SemaphoreHandle_t lock;
     bool started;
     argus_mqtt_broker_message_cb_t on_message;
+    argus_mqtt_broker_policy_cb_t policy_check;
     void *user_ctx;
     argus_mqtt_client_t clients[ARGUS_MQTT_MAX_CLIENTS];
     argus_mqtt_retained_t retained[ARGUS_MQTT_MAX_RETAINED];
@@ -368,6 +369,7 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
                                            size_t callback_topic_len,
                                            char *callback_payload,
                                            size_t callback_payload_len,
+                                           bool *callback_retain,
                                            bool *has_callback)
 {
     uint32_t offset = 0;
@@ -397,6 +399,17 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
     memcpy(payload, packet + offset, payload_len);
     payload[payload_len] = '\0';
 
+    if (s_broker.policy_check != NULL) {
+        if (s_broker.policy_check(topic, payload, retain, s_broker.user_ctx) != ESP_OK) {
+            ESP_LOGW(TAG, "Broker policy seam rejected message: topic=%s, retain=%d", topic, retain);
+            if (qos == 1U) {
+                uint8_t puback[] = {0x40U, 0x02U, (uint8_t)(packet_id >> 8), (uint8_t)(packet_id & 0xFFU)};
+                send(client->sock, puback, sizeof(puback), 0);
+            }
+            return ESP_OK; // Rejected message is NOT stored or delivered
+        }
+    }
+
     if (retain) {
         argus_mqtt_store_retained_locked(topic, payload);
     }
@@ -407,6 +420,7 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
     if (s_broker.on_message != NULL) {
         strlcpy(callback_topic, topic, callback_topic_len);
         strlcpy(callback_payload, payload, callback_payload_len);
+        *callback_retain = retain;
         *has_callback = true;
     }
 
@@ -461,6 +475,7 @@ static void argus_mqtt_client_task(void *arg)
 
         uint8_t packet_type = fixed_header >> 4;
         bool has_callback = false;
+        bool callback_retain = false;
         char callback_topic[ARGUS_MQTT_MAX_TOPIC_LEN] = {0};
         char callback_payload[ARGUS_MQTT_MAX_PAYLOAD_LEN] = {0};
 
@@ -480,6 +495,7 @@ static void argus_mqtt_client_task(void *arg)
                                             sizeof(callback_topic),
                                             callback_payload,
                                             sizeof(callback_payload),
+                                            &callback_retain,
                                             &has_callback);
             break;
         case 8:
@@ -501,7 +517,7 @@ static void argus_mqtt_client_task(void *arg)
         xSemaphoreGive(s_broker.lock);
 
         if (has_callback && s_broker.on_message != NULL) {
-            s_broker.on_message(callback_topic, callback_payload, s_broker.user_ctx);
+            s_broker.on_message(callback_topic, callback_payload, callback_retain, s_broker.user_ctx);
         }
 
         if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
@@ -573,6 +589,7 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
     memset(&s_broker, 0, sizeof(s_broker));
     s_broker.port = config->port;
     s_broker.on_message = config->on_message;
+    s_broker.policy_check = config->policy_check;
     s_broker.user_ctx = config->user_ctx;
     s_broker.listen_sock = -1;
     s_broker.lock = xSemaphoreCreateMutex();

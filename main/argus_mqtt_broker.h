@@ -5,11 +5,13 @@
 
 #include "esp_err.h"
 
-typedef void (*argus_mqtt_broker_message_cb_t)(const char *topic, const char *payload, void *user_ctx);
+typedef void (*argus_mqtt_broker_message_cb_t)(const char *topic, const char *payload, bool retain, void *user_ctx);
+typedef esp_err_t (*argus_mqtt_broker_policy_cb_t)(const char *topic, const char *payload, bool retain, void *user_ctx);
 
 typedef struct {
     uint16_t port;
     argus_mqtt_broker_message_cb_t on_message;
+    argus_mqtt_broker_policy_cb_t policy_check;
     void *user_ctx;
 } argus_mqtt_broker_config_t;
 

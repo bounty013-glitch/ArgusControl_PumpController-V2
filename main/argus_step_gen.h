@@ -119,3 +119,23 @@ argus_step_gen_error_t argus_step_gen_get_error(void);
  * @brief Reset the step counter.
  */
 void argus_step_gen_reset_step_count(void);
+
+/**
+ * @brief Explicitly clear step generator error state.
+ */
+void argus_step_gen_clear_error(void);
+
+typedef struct {
+    int32_t requested_rpm_milli;
+    int32_t generated_rpm_milli;
+    int64_t generated_step_count;
+    bool driver_enabled;
+    bool is_running;
+    bool is_forward;
+    argus_step_gen_error_t error_state;
+} argus_step_gen_snapshot_t;
+
+/**
+ * @brief Retrieve a coherent snapshot of step generator state variables.
+ */
+void argus_step_gen_get_snapshot(argus_step_gen_snapshot_t *snapshot);

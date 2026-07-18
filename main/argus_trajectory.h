@@ -56,6 +56,11 @@ esp_err_t argus_trajectory_unlock(void);
 esp_err_t argus_trajectory_recover(void);
 
 /**
+ * @brief Explicitly clear trajectory latched errors and lower-layer errors.
+ */
+void argus_trajectory_clear_error(void);
+
+/**
  * @brief Query current supervisory target speed.
  * @return Target speed in milli-RPM.
  */
@@ -80,6 +85,28 @@ bool argus_trajectory_is_ramp_active(void);
 bool argus_trajectory_is_reversing(void);
 
 /**
+ * @brief Enable the motor driver through trajectory layer.
+ * @return ESP_OK on success.
+ */
+esp_err_t argus_trajectory_enable_driver(void);
+
+/**
  * @brief Execute a single 20 ms trajectory tick (used by task and unit tests).
  */
 void argus_trajectory_step_tick_20ms(void);
+
+typedef struct {
+    int32_t target_rpm_milli;
+    int32_t applied_rpm_milli;
+    int32_t generated_rpm_milli;
+    bool target_forward;
+    bool applied_forward;
+    bool ramp_active;
+    bool is_reversing;
+    uint32_t latched_error;
+} argus_trajectory_snapshot_t;
+
+/**
+ * @brief Retrieve a coherent snapshot of trajectory engine variables and latched errors.
+ */
+void argus_trajectory_get_snapshot(argus_trajectory_snapshot_t *snapshot);

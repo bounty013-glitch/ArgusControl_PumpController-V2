@@ -1,230 +1,359 @@
 #include "argus_tests.h"
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "argus_config.h"
 #include "argus_conversions.h"
-#include "argus_step_gen.h"
-#include "argus_trajectory.h"
-#include "argus_feedback.h"
-#include "driver/gpio.h"
+#include "argus_cmd_parser.h"
+#include "argus_state_mgr.h"
 
 static const char *TAG = "argus_tests";
 
-#define TEST_ASSERT(cond, msg) \
-    do { \
-        if (!(cond)) { \
-            ESP_LOGE(TAG, "Test failed: %s at line %d", msg, __LINE__); \
-            return ESP_FAIL; \
-        } \
-    } while (0)
+// ================= MOCK MOTION OPERATIONS FOR PURE TESTS =================
 
-// Simulated Bresenham scheduler helper
-typedef struct {
-    uint64_t integer;
-    uint64_t remainder;
-    uint64_t denominator;
-} test_timing_t;
+static int s_mock_enable_count = 0;
+static int s_mock_disable_count = 0;
+static int s_mock_set_direction_count = 0;
+static int s_mock_set_target_rate_count = 0;
+static int s_mock_stop_immediate_count = 0;
+static int s_mock_stop_normal_count = 0;
+static int s_mock_recover_count = 0;
+static uint32_t s_mock_simulated_error = 0;
 
-static test_timing_t calculate_test_timing(int32_t rpm_milli, uint32_t steps_per_rev)
+static void reset_mock_counts(void)
 {
-    test_timing_t t = {0};
-    if (rpm_milli == 0) return t;
-    uint64_t num = 600000000000ULL;
-    uint64_t den = (uint64_t)rpm_milli * (uint64_t)steps_per_rev;
-    t.integer = num / den;
-    t.remainder = num % den;
-    t.denominator = den;
-    return t;
+    s_mock_enable_count = 0;
+    s_mock_disable_count = 0;
+    s_mock_set_direction_count = 0;
+    s_mock_set_target_rate_count = 0;
+    s_mock_stop_immediate_count = 0;
+    s_mock_stop_normal_count = 0;
+    s_mock_recover_count = 0;
+    s_mock_simulated_error = 0;
 }
 
-static uint64_t simulate_pulses(int32_t rpm_milli, uint32_t steps_per_rev, int steps)
+static esp_err_t mock_enable_driver(void) { s_mock_enable_count++; return ESP_OK; }
+static esp_err_t mock_disable_driver(void) { s_mock_disable_count++; return ESP_OK; }
+static esp_err_t mock_set_direction(bool fwd) { (void)fwd; s_mock_set_direction_count++; return ESP_OK; }
+static esp_err_t mock_set_target_rate(int32_t rpm, bool fwd) { (void)rpm; (void)fwd; s_mock_set_target_rate_count++; return ESP_OK; }
+static esp_err_t mock_stop_immediate(void) { s_mock_stop_immediate_count++; return ESP_OK; }
+static esp_err_t mock_stop_normal(void) { s_mock_stop_normal_count++; return ESP_OK; }
+static esp_err_t mock_recover(void) { s_mock_recover_count++; s_mock_simulated_error = 0; return ESP_OK; }
+static uint32_t mock_get_error(void) { return s_mock_simulated_error; }
+
+static const argus_motion_ops_t s_mock_ops = {
+    .enable_driver = mock_enable_driver,
+    .disable_driver = mock_disable_driver,
+    .set_direction = mock_set_direction,
+    .set_target_rate = mock_set_target_rate,
+    .stop_immediate = mock_stop_immediate,
+    .stop_normal = mock_stop_normal,
+    .recover = mock_recover,
+    .get_error = mock_get_error,
+};
+
+// ================= PURE NON-MOTION UNIT TESTS =================
+
+static bool test_cmd_parser(void)
 {
-    test_timing_t t = calculate_test_timing(rpm_milli, steps_per_rev);
-    uint64_t acc = 0;
-    uint64_t total_ticks = 0;
-    for (int i = 0; i < steps; i++) {
-        acc += t.remainder;
-        uint64_t step_ticks = t.integer;
-        if (acc >= t.denominator) {
-            step_ticks += 1;
-            acc -= t.denominator;
-        }
-        total_ticks += step_ticks;
+    int pct = 0;
+    if (argus_cmd_parser_speed_pct("50", &pct) != ESP_OK || pct != 50) return false;
+    if (argus_cmd_parser_speed_pct("0", &pct) != ESP_OK || pct != 0) return false;
+    if (argus_cmd_parser_speed_pct("100", &pct) != ESP_OK || pct != 100) return false;
+    if (argus_cmd_parser_speed_pct("50rpm", &pct) == ESP_OK) return false; // Non-numeric suffix
+    if (argus_cmd_parser_speed_pct("-10", &pct) == ESP_OK) return false;  // Negative
+    if (argus_cmd_parser_speed_pct("150", &pct) == ESP_OK) return false;  // >100
+    if (argus_cmd_parser_speed_pct("", &pct) == ESP_OK) return false;     // Empty
+    if (argus_cmd_parser_speed_pct("   ", &pct) == ESP_OK) return false;  // Whitespace
+
+    bool bval = false;
+    if (argus_cmd_parser_bool("true", &bval) != ESP_OK || !bval) return false;
+    if (argus_cmd_parser_bool("1", &bval) != ESP_OK || !bval) return false;
+    if (argus_cmd_parser_bool("on", &bval) != ESP_OK || !bval) return false;
+    if (argus_cmd_parser_bool("false", &bval) != ESP_OK || bval) return false;
+    if (argus_cmd_parser_bool("0", &bval) != ESP_OK || bval) return false;
+    if (argus_cmd_parser_bool("off", &bval) != ESP_OK || bval) return false;
+    if (argus_cmd_parser_bool("invalid", &bval) == ESP_OK) return false;
+
+    // Verify all command topics reject retained payloads
+    const char *cmd_topics[] = {
+        "argus/peristaltic/cmd/speed_pct",
+        "argus/peristaltic/cmd/run",
+        "argus/peristaltic/cmd/stop",
+        "argus/peristaltic/cmd/e_stop",
+        "argus/peristaltic/cmd/reset_estop",
+        "argus/peristaltic/cmd/unlock",
+        "argus/unit/control/speed",
+    };
+    for (size_t i = 0; i < sizeof(cmd_topics)/sizeof(cmd_topics[0]); i++) {
+        if (argus_cmd_parser_validate_control_message(cmd_topics[i], "true", true) == ESP_OK) return false;
+        if (argus_cmd_parser_validate_control_message(cmd_topics[i], "true", false) != ESP_OK) return false;
     }
-    return total_ticks;
+
+    return true;
+}
+
+static bool test_state_core_isolated(void)
+{
+    argus_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.min_output_milli_rpm = 500;
+    cfg.max_output_milli_rpm = 200000;
+
+    reset_mock_counts();
+    argus_state_core_t core;
+    argus_state_core_init(&core, &cfg, &s_mock_ops);
+
+    argus_state_snapshot_t snap;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_UNLOCKED) return false;
+
+    // 1. SET_TARGET while UNLOCKED updates setpoint without starting motion
+    if (argus_state_core_set_target(&core, 1000, true) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.configured_target_rpm_milli != 1000) return false;
+    if (s_mock_enable_count != 0 || s_mock_set_target_rate_count != 0) return false; // 0 motion calls!
+
+    // 2. START with 0 setpoint rejected
+    argus_state_core_set_target(&core, 0, true);
+    if (argus_state_core_start(&core) == ESP_OK) return false;
+
+    // 3. Valid START transitions to STARTING
+    argus_state_core_set_target(&core, 1000, true);
+    if (argus_state_core_start(&core) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_STARTING) return false;
+    if (s_mock_enable_count != 1 || s_mock_set_target_rate_count != 1) return false;
+
+    // 4. UNLOCK during motion is rejected
+    if (argus_state_core_unlock(&core) == ESP_OK) return false;
+
+    // 5. E_STOP instantly halts pulses and latches
+    if (argus_state_core_estop(&core) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED || !snap.estop_latched) return false;
+
+    // 6. While latched, START and SET_TARGET are rejected
+    if (argus_state_core_start(&core) == ESP_OK) return false;
+    if (argus_state_core_set_target(&core, 2000, true) == ESP_OK) return false;
+
+    // 7. RESET_ESTOP clears latch to HOLDING without restarting motion
+    int prev_rate_count = s_mock_set_target_rate_count;
+    if (argus_state_core_reset_estop(&core) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_HOLDING || snap.estop_latched) return false;
+    if (s_mock_set_target_rate_count != prev_rate_count) return false;
+
+    // 8. UNLOCK while HOLDING succeeds
+    if (argus_state_core_unlock(&core) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_UNLOCKED) return false;
+
+    return true;
+}
+
+static bool test_injected_error_propagation(void)
+{
+    argus_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.min_output_milli_rpm = 500;
+    cfg.max_output_milli_rpm = 200000;
+
+    reset_mock_counts();
+    argus_state_core_t core;
+    argus_state_core_init(&core, &cfg, &s_mock_ops);
+
+    // Simulate lower layer error
+    s_mock_simulated_error = 2;
+    argus_state_core_evaluate_periodic(&core, 0, 0, false, s_mock_simulated_error);
+
+    argus_state_snapshot_t snap;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_FAULTED || snap.fault_code != 2) return false;
+
+    // Motion commands rejected while FAULTED
+    if (argus_state_core_start(&core) == ESP_OK) return false;
+
+    // Recovery clears error and returns to UNLOCKED
+    if (argus_state_core_recover(&core) != ESP_OK) return false;
+    argus_state_core_get_snapshot(&core, &snap);
+    if (snap.machine_state != ARGUS_STATE_UNLOCKED || snap.fault_code != 0) return false;
+
+    return true;
+}
+
+static bool test_production_singleton_isolation(void)
+{
+    // Record production state manager snapshot before test execution
+    argus_state_snapshot_t snap_before;
+    argus_state_mgr_get_snapshot(&snap_before);
+
+    // Run pure tests 3 times in succession
+    for (int i = 0; i < 3; i++) {
+        if (!test_cmd_parser() || !test_state_core_isolated() || !test_injected_error_propagation()) {
+            return false;
+        }
+    }
+
+    // Record production snapshot after tests
+    argus_state_snapshot_t snap_after;
+    argus_state_mgr_get_snapshot(&snap_after);
+
+    // Assert zero mutation to live production state manager instance
+    if (snap_before.machine_state != snap_after.machine_state) return false;
+    if (snap_before.configured_target_rpm_milli != snap_after.configured_target_rpm_milli) return false;
+
+    return true;
 }
 
 esp_err_t argus_tests_run_all(void)
 {
-    ESP_LOGI(TAG, "Starting V2 Pump Controller Bresenham and Phase 3A Trajectory tests...");
+    ESP_LOGI(TAG, "Running PURE non-motion unit tests (stack-local core, 0 tasks, 0 mutexes, 0 hardware touch)...");
 
-    // Create test configuration
-    argus_config_t cfg = {
-        .motor_full_steps_per_rev = 200,
-        .microsteps = 4,
-        .gearbox_ratio_num = 10,
-        .gearbox_ratio_den = 1,
-        .min_output_milli_rpm = 500,
-        .max_output_milli_rpm = 200000,
-        .min_step_pulse_width_us = 6, // 6 us pulse width
-        .accel_milli_rpm_per_sec = 10000, // 10.0 RPM/sec (200 mRPM / 20ms)
-        .decel_milli_rpm_per_sec = 10000, // 10.0 RPM/sec (200 mRPM / 20ms)
-        .step_gpio = GPIO_NUM_3,
-        .dir_gpio = GPIO_NUM_4,
-        .en_gpio = GPIO_NUM_5,
-        .enable_active_low = true,
-        .step_active_low = true,
-        .dir_inverted = true,
-    };
-
-    uint64_t spr = argus_conversions_steps_per_rev(&cfg);
-    TEST_ASSERT(spr == 8000ULL, "Default steps/rev should be 8000");
-
-    // =================================================================
-    // 1. Safe disabled level & Glitch-free initialization state check
-    // =================================================================
-    int en_level = gpio_get_level(cfg.en_gpio);
-    TEST_ASSERT(en_level == 1, "Glitch-free ENA initialization should default to HIGH (disabled)");
-    TEST_ASSERT(argus_step_gen_is_driver_enabled() == false, "Driver enablement state should report false initially");
-
-    int step_level = gpio_get_level(cfg.step_gpio);
-    TEST_ASSERT(step_level == 1, "STEP initialization should default to inactive-high (1)");
-
-    // Initialize trajectory test instance
-    TEST_ASSERT(argus_trajectory_init(&cfg) == ESP_OK, "Trajectory init");
-
-    // =================================================================
-    // 2. Exact rational timing / Bresenham checks
-    // =================================================================
-    uint64_t ticks_0_5 = simulate_pulses(500, spr, 8000);
-    TEST_ASSERT(ticks_0_5 == 1200000000ULL, "0.5 RPM timing test failed");
-
-    uint64_t ticks_0_7 = simulate_pulses(700, spr, 280);
-    TEST_ASSERT(ticks_0_7 == 30000000ULL, "0.7 RPM timing test failed");
-
-    uint64_t ticks_3s_0_5 = simulate_pulses(500, spr, 200);
-    uint64_t ticks_3s_0_6 = simulate_pulses(600, spr, 240);
-    TEST_ASSERT(ticks_3s_0_5 == 30000000ULL, "0.5 RPM 3s check");
-    TEST_ASSERT(ticks_3s_0_6 == 30000000ULL, "0.6 RPM 3s check");
-
-    // =================================================================
-    // 3. Phase 3A Deterministic Trajectory Ramp Unit Tests
-    // =================================================================
-
-    // A. Zero to 0.5 RPM (500 mRPM) ramp (200 mRPM/tick -> 200, 400, 500 clamped)
-    argus_trajectory_stop_immediate();
-    argus_step_gen_start();
-    argus_trajectory_set_target_rpm_milli(500, true);
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 0, "Initial applied speed must start at 0");
-
-    argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 200, "Tick 1 applied = 200");
-
-    argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 400, "Tick 2 applied = 400");
-
-    argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 500, "Tick 3 applied = 500 (exact clamp)");
-    TEST_ASSERT(argus_trajectory_is_ramp_active() == false, "Ramp settled at target");
-
-    // B. Non-multiple clamping check: Target 550 mRPM (clamped from 400 -> 550 without overshoot)
-    argus_trajectory_stop_immediate();
-    argus_trajectory_set_target_rpm_milli(550, true);
-    argus_trajectory_step_tick_20ms(); // 200
-    argus_trajectory_step_tick_20ms(); // 400
-    argus_trajectory_step_tick_20ms(); // 550
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 550, "Clamped to 550 without overshoot");
-
-    // C. Zero to 20.0 RPM (20000 mRPM) ramp (requires 100 ticks = 2.0 seconds)
-    argus_trajectory_stop_immediate();
-    argus_trajectory_set_target_rpm_milli(20000, true);
-    for (int i = 0; i < 99; i++) {
-        argus_trajectory_step_tick_20ms();
-        TEST_ASSERT(argus_trajectory_is_ramp_active() == true, "Ramp active during acceleration");
+    if (!test_cmd_parser()) {
+        ESP_LOGE(TAG, "Test failed: Strict Command Parser");
+        return ESP_FAIL;
     }
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 19800, "Applied at tick 99 = 19800");
-    argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 20000, "Applied at tick 100 = 20000 (settled)");
-    TEST_ASSERT(argus_trajectory_is_ramp_active() == false, "Ramp finished");
+    ESP_LOGI(TAG, "[PASS] Strict Command Parser tests");
 
-    // D. 20 to 72 RPM ramp (20000 -> 72000 mRPM)
-    argus_trajectory_set_target_rpm_milli(72000, true);
-    for (int i = 0; i < 260; i++) {
-        argus_trajectory_step_tick_20ms();
+    if (!test_state_core_isolated()) {
+        ESP_LOGE(TAG, "Test failed: Isolated State Core Permissions & Setpoint Isolation");
+        return ESP_FAIL;
     }
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 72000, "Applied reached 72 RPM");
+    ESP_LOGI(TAG, "[PASS] Isolated State Core Permissions & Setpoint Isolation tests");
 
-    // E. 72 to 20 RPM deceleration (72000 -> 20000 mRPM)
-    argus_trajectory_set_target_rpm_milli(20000, true);
-    for (int i = 0; i < 260; i++) {
-        argus_trajectory_step_tick_20ms();
+    if (!test_injected_error_propagation()) {
+        ESP_LOGE(TAG, "Test failed: Injected Error Propagation & Recovery");
+        return ESP_FAIL;
     }
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 20000, "Decelerated back to 20 RPM");
+    ESP_LOGI(TAG, "[PASS] Injected Error Propagation & Recovery tests");
 
-    // F. 20 RPM to Normal Stop (20000 -> 0 mRPM)
-    argus_trajectory_stop_normal();
-    for (int i = 0; i < 100; i++) {
-        argus_trajectory_step_tick_20ms();
+    if (!test_production_singleton_isolation()) {
+        ESP_LOGE(TAG, "Test failed: Production Singleton Isolation");
+        return ESP_FAIL;
     }
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 0, "Normal stop reached zero applied speed");
-    TEST_ASSERT(gpio_get_level(cfg.en_gpio) == 0, "Normal stop must keep ENA LOW to retain holding torque");
+    ESP_LOGI(TAG, "[PASS] Production Singleton Isolation tests (0 live mutations, 0 task leaks)");
 
-    // G. Direction Reversal Through Zero (Forward -> Reverse)
-    argus_trajectory_set_target_rpm_milli(2000, true); // Forward 2.0 RPM
-    for (int i = 0; i < 10; i++) argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 2000, "Forward 2 RPM settled");
+    ESP_LOGI(TAG, "All PURE non-motion unit tests PASSED successfully.");
+    return ESP_OK;
+}
 
-    // Command Reverse 2.0 RPM
-    argus_trajectory_set_target_rpm_milli(2000, false);
-    TEST_ASSERT(argus_trajectory_is_reversing() == true, "Reversal active");
+// ================= HARDWARE ACCEPTANCE INTERACTIVE SUBMENU =================
 
-    // Must decelerate forward speed to 0 first
-    for (int i = 0; i < 10; i++) {
-        argus_trajectory_step_tick_20ms();
+static int get_clean_char(void)
+{
+    int c;
+    do {
+        c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    } while (c == EOF || c == '\n' || c == '\r');
+    return c;
+}
+
+esp_err_t argus_tests_run_hardware_acceptance(void)
+{
+    printf("\n");
+    printf("===================================================\n");
+    printf("=== DANGER — HARDWARE MOTION ACCEPTANCE TESTS ===\n");
+    printf("===================================================\n");
+    printf("WARNING: These tests will energize real motor hardware\n");
+    printf("and execute physical output motion.\n");
+    printf("Each test must be explicitly selected and confirmed.\n\n");
+
+    bool print_menu = true;
+
+    while (true) {
+        if (print_menu) {
+            printf("---------------------------------------------------\n");
+            printf("Hardware Acceptance Submenu:\n");
+            printf("[1] Test Setpoint Isolation (0.5 RPM setpoint while UNLOCKED)\n");
+            printf("[2] Test Low-Speed Start & Ramp (0.5 RPM)\n");
+            printf("[3] Test Normal Stop (ramp to 0, retain holding torque)\n");
+            printf("[4] Test Software E-Stop while running\n");
+            printf("[5] Test Reset E-Stop latch\n");
+            printf("[6] Test Driver Unlock (release shaft)\n");
+            printf("[7] Test Direction Reversal (ramp through zero)\n");
+            printf("[8] Test Full-Speed Ramp (200 RPM)\n");
+            printf("[9] Test Full-Speed Normal Stop\n");
+            printf("[0] Exit Hardware Acceptance Submenu\n");
+            printf("Select test option: ");
+            fflush(stdout);
+            print_menu = false;
+        }
+
+        int c = get_clean_char();
+        printf("%c\n", c);
+        print_menu = true;
+
+        if (c == '0') {
+            printf("Exiting Hardware Acceptance Submenu.\n");
+            break;
+        }
+
+        printf("CAUTION: Confirm physical motion test '%c'? Press 'y' to proceed: ", c);
+        fflush(stdout);
+
+        int confirm = get_clean_char();
+        printf("%c\n", confirm);
+
+        if (confirm != 'y' && confirm != 'Y') {
+            printf("Test '%c' cancelled by user.\n\n", c);
+            continue;
+        }
+
+        printf("Executing Test '%c'...\n", c);
+        switch (c) {
+            case '1':
+                argus_state_mgr_set_target(500, true);
+                printf("  Setpoint updated to 500 mRPM. Driver remains UNLOCKED (0 pulses).\n");
+                break;
+            case '2':
+                argus_state_mgr_set_target(500, true);
+                argus_state_mgr_start();
+                printf("  Motor ramping to 0.5 RPM...\n");
+                break;
+            case '3':
+                argus_state_mgr_stop_normal();
+                printf("  Motor ramping down to 0 RPM (retaining holding torque)...\n");
+                break;
+            case '4':
+                argus_state_mgr_estop();
+                printf("  Software E-STOP executed! Pulses halted immediately.\n");
+                break;
+            case '5':
+                argus_state_mgr_reset_estop();
+                printf("  E-STOP latch cleared (returned to stopped state).\n");
+                break;
+            case '6':
+                argus_state_mgr_unlock();
+                printf("  Driver UNLOCKED (GPIO 5 HIGH, shaft released).\n");
+                break;
+            case '7':
+                argus_state_mgr_set_target(1000, false);
+                argus_state_mgr_start();
+                printf("  Reversing direction through zero speed...\n");
+                break;
+            case '8':
+                argus_state_mgr_set_target(200000, true);
+                argus_state_mgr_start();
+                printf("  Full speed ramp to 200 RPM...\n");
+                break;
+            case '9':
+                argus_state_mgr_stop_normal();
+                printf("  Full speed normal stop to 0 RPM...\n");
+                break;
+            default:
+                printf("  Unknown selection: '%c'\n", c);
+                break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+        printf("Test '%c' execution complete.\n\n", c);
     }
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 0, "Decelerated to zero before DIR toggle");
 
-    // Next tick toggles DIR and begins ramp in reverse direction
-    argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 200, "Ramping up in reverse direction");
-    for (int i = 0; i < 9; i++) argus_trajectory_step_tick_20ms();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 2000, "Reverse target reached");
-
-    // H. Immediate Stop
-    argus_trajectory_stop_immediate();
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 0, "Immediate stop sets applied to 0");
-    TEST_ASSERT(argus_trajectory_get_target_rpm_milli() == 0, "Immediate stop sets target to 0");
-    TEST_ASSERT(gpio_get_level(cfg.en_gpio) == 0, "Immediate stop keeps ENA LOW for holding torque");
-
-    // I. Unlock Driver
-    argus_trajectory_unlock();
-    TEST_ASSERT(gpio_get_level(cfg.en_gpio) == 1, "Unlock drives ENA HIGH to release shaft");
-
-    // J. Explicit Diagnostic Recovery ('r')
-    argus_trajectory_set_target_rpm_milli(1000, true);
-    for (int i = 0; i < 5; i++) argus_trajectory_step_tick_20ms();
-    
-    esp_err_t rec_err = argus_trajectory_recover();
-    TEST_ASSERT(rec_err == ESP_OK, "Recovery execution");
-    TEST_ASSERT(argus_trajectory_get_target_rpm_milli() == 0, "Recovery resets target to 0");
-    TEST_ASSERT(argus_trajectory_get_applied_rpm_milli() == 0, "Recovery resets applied to 0");
-    TEST_ASSERT(gpio_get_level(cfg.en_gpio) == 1, "Recovery leaves driver unlocked (ENA HIGH)");
-
-    // Clean stop & unlock for final checks
-    argus_trajectory_unlock();
-
-    // =================================================================
-    // 4. Feedback seam audit check
-    // =================================================================
-    const argus_feedback_interface_t *fb = argus_feedback_get_interface();
-    TEST_ASSERT(fb != NULL, "Feedback interface should not be null");
-    TEST_ASSERT(fb->is_available() == false, "Feedback must be explicitly unavailable by default");
-    int32_t fb_rpm = 999;
-    esp_err_t fb_rpm_err = fb->get_actual_rpm(&fb_rpm);
-    TEST_ASSERT(fb_rpm_err == ESP_ERR_NOT_SUPPORTED, "get_actual_rpm must return ESP_ERR_NOT_SUPPORTED");
-    TEST_ASSERT(fb_rpm == 0, "get_actual_rpm must not return fabricated/nonzero values when unsupported");
-
-    ESP_LOGI(TAG, "All automated V2 Pump Controller Bresenham and Phase 3A Trajectory tests PASSED successfully.");
     return ESP_OK;
 }

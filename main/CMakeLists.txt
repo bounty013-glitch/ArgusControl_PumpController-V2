@@ -7,6 +7,8 @@ idf_component_register(
         "argus_feedback.c"
         "argus_step_gen.c"
         "argus_trajectory.c"
+        "argus_cmd_parser.c"
+        "argus_state_mgr.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     REQUIRES

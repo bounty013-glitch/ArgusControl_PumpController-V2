@@ -5,7 +5,7 @@
 #include <PubSubClient.h>
 
 const char* WIFI_SSID = "ArgusMotorTest";
-const char* WIFI_PASS = "ArgusPump123";
+const char* WIFI_PASS = ""; // PLACEHOLDER — Legacy sketch password removed
 const char* DEVICE_NAME = "ArgusPumpHMI-001";
 
 const char* MQTT_SERVER = "192.168.4.1";

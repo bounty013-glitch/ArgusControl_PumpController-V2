@@ -21,6 +21,7 @@ static bool s_current_forward = true;
 
 static bool s_ramp_active = false;
 static bool s_is_reversing = false;
+static uint32_t s_latched_error = 0;
 
 static int32_t s_accel_limit = 10000; // 10.0 RPM/s
 static int32_t s_decel_limit = 10000; // 10.0 RPM/s
@@ -253,13 +254,20 @@ esp_err_t argus_trajectory_recover(void)
     s_is_reversing = false;
 
     // 1. Immediately terminate STEP generation
-    argus_step_gen_stop_immediate();
+    esp_err_t err_stop = argus_step_gen_stop_immediate();
 
     // 2. Drive ENA HIGH to disable UIM
-    argus_step_gen_disable_driver();
+    esp_err_t err_dis = argus_step_gen_disable_driver();
+
+    argus_trajectory_clear_error();
 
     if (s_traj_mutex != NULL) {
         xSemaphoreGive(s_traj_mutex);
+    }
+
+    if (err_stop != ESP_OK || err_dis != ESP_OK) {
+        ESP_LOGE(TAG, "Recovery failed: lower-layer stop/disable returned error");
+        return (err_stop != ESP_OK) ? err_stop : err_dis;
     }
 
     ESP_LOGW(TAG, "Diagnostic RECOVERY sequence triggered. Driver unlocked. Waiting 500 ms recovery interval...");
@@ -267,8 +275,40 @@ esp_err_t argus_trajectory_recover(void)
     // 3. Wait 500 ms recovery interval
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    ESP_LOGI(TAG, "Recovery sequence complete. Driver remains unlocked. Requires explicit motion command before re-enabling.");
+    // 4. Verify fresh lower-layer snapshot error state
+    argus_step_gen_snapshot_t step_snap;
+    argus_step_gen_get_snapshot(&step_snap);
+    if (step_snap.error_state != ARGUS_STEP_GEN_ERROR_NONE) {
+        ESP_LOGE(TAG, "Recovery failed: step generator error state remains non-zero (%d)", (int)step_snap.error_state);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Software recovery complete. Software state restored to UNLOCKED.");
     return ESP_OK;
+}
+
+void argus_trajectory_clear_error(void)
+{
+    if (s_traj_mutex != NULL) {
+        xSemaphoreTake(s_traj_mutex, portMAX_DELAY);
+    }
+    s_latched_error = 0;
+    argus_step_gen_clear_error();
+    if (s_traj_mutex != NULL) {
+        xSemaphoreGive(s_traj_mutex);
+    }
+}
+
+esp_err_t argus_trajectory_enable_driver(void)
+{
+    if (s_traj_mutex != NULL) {
+        xSemaphoreTake(s_traj_mutex, portMAX_DELAY);
+    }
+    esp_err_t err = argus_step_gen_enable_driver();
+    if (s_traj_mutex != NULL) {
+        xSemaphoreGive(s_traj_mutex);
+    }
+    return err;
 }
 
 int32_t argus_trajectory_get_target_rpm_milli(void)
@@ -289,4 +329,29 @@ bool argus_trajectory_is_ramp_active(void)
 bool argus_trajectory_is_reversing(void)
 {
     return s_is_reversing || (s_target_forward != s_current_forward && s_applied_rpm_milli > 0);
+}
+
+void argus_trajectory_get_snapshot(argus_trajectory_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) return;
+
+    if (s_traj_mutex != NULL) {
+        xSemaphoreTake(s_traj_mutex, portMAX_DELAY);
+    }
+
+    argus_step_gen_snapshot_t step_snap;
+    argus_step_gen_get_snapshot(&step_snap);
+
+    snapshot->target_rpm_milli = s_target_rpm_milli;
+    snapshot->applied_rpm_milli = s_applied_rpm_milli;
+    snapshot->generated_rpm_milli = step_snap.generated_rpm_milli;
+    snapshot->target_forward = s_target_forward;
+    snapshot->applied_forward = s_current_forward;
+    snapshot->ramp_active = s_ramp_active;
+    snapshot->is_reversing = s_is_reversing;
+    snapshot->latched_error = (uint32_t)step_snap.error_state;
+
+    if (s_traj_mutex != NULL) {
+        xSemaphoreGive(s_traj_mutex);
+    }
 }

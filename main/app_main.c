@@ -23,6 +23,8 @@
 #include "argus_feedback.h"
 #include "argus_step_gen.h"
 #include "argus_trajectory.h"
+#include "argus_cmd_parser.h"
+#include "argus_state_mgr.h"
 #include "argus_tests.h"
 
 // ================= APP CONFIG =================
@@ -53,22 +55,20 @@
 #define CMD_SPEED_PCT_TOPIC   MQTT_TOPIC_ROOT "/cmd/speed_pct"
 #define CMD_STOP_TOPIC        MQTT_TOPIC_ROOT "/cmd/stop"
 #define CMD_ESTOP_TOPIC       MQTT_TOPIC_ROOT "/cmd/e_stop"
+#define CMD_RESET_ESTOP_TOPIC MQTT_TOPIC_ROOT "/cmd/reset_estop"
 #define CMD_UNLOCK_TOPIC      MQTT_TOPIC_ROOT "/cmd/unlock"
 
-#define STATUS_RUN_TOPIC      MQTT_TOPIC_ROOT "/status/run"
+#define STATUS_STATE_TOPIC    MQTT_TOPIC_ROOT "/status/state"
 #define STATUS_RPM_TOPIC      MQTT_TOPIC_ROOT "/status/rpm"
-#define STATUS_LOCKED_TOPIC   MQTT_TOPIC_ROOT "/status/locked"
-#define STATUS_ESTOP_TOPIC    MQTT_TOPIC_ROOT "/status/e_stop"
+#define STATUS_RUN_TOPIC      MQTT_TOPIC_ROOT "/status/target_rpm"
 #define STATUS_ONLINE_TOPIC   MQTT_TOPIC_ROOT "/status/online"
 
 static const char *TAG = "argus_app_main";
 
 #define WIFI_STA_CONNECTED_BIT BIT0
-#define WIFI_STA_CONNECT_WAIT_MS 10000
-
 static EventGroupHandle_t wifi_event_group;
 
-// ================= MOTOR HELPERS =================
+// ================= TELEMETRY =================
 
 static void publish_status_topic(const char *topic, const char *payload, bool retain)
 {
@@ -80,108 +80,118 @@ static void publish_status_topic(const char *topic, const char *payload, bool re
 
 static void publish_status(void)
 {
-    int32_t generated_rpm = argus_step_gen_get_generated_rpm_milli();
-    int64_t steps = argus_step_gen_get_step_count();
-    
+    argus_state_snapshot_t snap;
+    argus_state_mgr_get_snapshot(&snap);
+
+    publish_status_topic(STATUS_STATE_TOPIC, argus_state_mgr_get_state_name(snap.machine_state), true);
+
     char payload[64];
     snprintf(payload, sizeof(payload), "%ld.%03ld",
-             (long)(generated_rpm / 1000),
-             (long)((generated_rpm < 0 ? -generated_rpm : generated_rpm) % 1000));
+             (long)(snap.generated_rpm_milli / 1000),
+             (long)((snap.generated_rpm_milli < 0 ? -snap.generated_rpm_milli : snap.generated_rpm_milli) % 1000));
     publish_status_topic(STATUS_RPM_TOPIC, payload, true);
 
-    snprintf(payload, sizeof(payload), "%lld", (long long)steps);
+    snprintf(payload, sizeof(payload), "%ld", (long)snap.configured_target_rpm_milli);
     publish_status_topic(STATUS_RUN_TOPIC, payload, true);
 }
 
-static void handle_speed_pct(int pct)
+// ================= COMMAND ARBITRATION =================
+
+static void handle_mqtt_command(const char *topic, const char *data, bool retain)
 {
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
+    ESP_LOGI(TAG, "MQTT RX topic=[%s] payload=[%s] retain=%d", topic, data, retain);
 
-    const argus_config_t *cfg = argus_config_get();
-    int32_t range = cfg->max_output_milli_rpm - cfg->min_output_milli_rpm;
-    int32_t rpm_milli = cfg->min_output_milli_rpm + (pct * range) / 100;
-    
-    if (pct == 0) {
-        rpm_milli = 0;
+    if (argus_cmd_parser_validate_control_message(topic, data, retain) != ESP_OK) {
+        ESP_LOGW(TAG, "Command rejected: Retained control payload ignored on topic %s", topic);
+        return;
     }
-
-    esp_err_t err = argus_trajectory_set_target_rpm_milli(rpm_milli, true);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Speed set via MQTT: %d%% = %ld.%03ld RPM output target",
-                 pct,
-                 (long)(rpm_milli / 1000),
-                 (long)(rpm_milli % 1000));
-        publish_status();
-    } else {
-        ESP_LOGE(TAG, "Failed to set speed: %s", esp_err_to_name(err));
-    }
-}
-
-static bool payload_is_true(const char *data)
-{
-    if (!data) {
-        return false;
-    }
-    return strcmp(data, "true") == 0 ||
-           strcmp(data, "1") == 0 ||
-           strcmp(data, "on") == 0 ||
-           strcmp(data, "ON") == 0;
-}
-
-static void handle_mqtt_command(const char *topic, const char *data)
-{
-    ESP_LOGI(TAG, "MQTT RX topic=[%s] payload=[%s]", topic, data);
 
     if (strcmp(topic, CMD_SPEED_PCT_TOPIC) == 0) {
-        int pct = atoi(data);
-        handle_speed_pct(pct);
+        int pct = 0;
+        if (argus_cmd_parser_speed_pct(data, &pct) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed speed_pct payload: '%s'", data);
+            return;
+        }
+        const argus_config_t *cfg = argus_config_get();
+        int32_t range = cfg->max_output_milli_rpm - cfg->min_output_milli_rpm;
+        int32_t rpm_milli = cfg->min_output_milli_rpm + (pct * range) / 100;
+        if (pct == 0) rpm_milli = 0;
+
+        esp_err_t err = argus_state_mgr_set_target(rpm_milli, true);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Setpoint updated: %d%% (%ld mRPM)", pct, (long)rpm_milli);
+        }
+        publish_status();
         return;
     }
 
     if (strcmp(topic, CMD_RUN_TOPIC) == 0) {
-        if (payload_is_true(data)) {
-            esp_err_t err = argus_step_gen_start();
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Step generator START commanded");
-            } else {
-                ESP_LOGE(TAG, "Failed to start: %s", esp_err_to_name(err));
-            }
+        bool run_val = false;
+        if (argus_cmd_parser_bool(data, &run_val) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed run payload: '%s'", data);
+            return;
+        }
+        if (run_val) {
+            argus_state_mgr_start();
         } else {
-            esp_err_t err = argus_trajectory_stop_normal();
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Normal trajectory STOP commanded");
-            } else {
-                ESP_LOGE(TAG, "Failed to stop: %s", esp_err_to_name(err));
-            }
+            argus_state_mgr_stop_normal();
         }
         publish_status();
         return;
     }
 
     if (strcmp(topic, CMD_STOP_TOPIC) == 0) {
-        if (payload_is_true(data)) {
-            argus_trajectory_stop_normal();
-            publish_status();
+        bool stop_val = false;
+        if (argus_cmd_parser_bool(data, &stop_val) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed stop payload: '%s'", data);
+            return;
         }
+        if (stop_val) {
+            argus_state_mgr_stop_normal();
+        }
+        publish_status();
         return;
     }
 
     if (strcmp(topic, CMD_ESTOP_TOPIC) == 0) {
-        if (payload_is_true(data)) {
-            argus_trajectory_stop_immediate();
-            publish_status();
-            ESP_LOGW(TAG, "Software E-STOP active (pulses stopped immediately). Note: MQTT is NOT a safety-rated path.");
+        bool estop_val = false;
+        if (argus_cmd_parser_bool(data, &estop_val) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed e_stop payload: '%s'", data);
+            return;
         }
+        if (estop_val) {
+            argus_state_mgr_estop();
+        } else {
+            // e_stop=false maps to reset_estop
+            argus_state_mgr_reset_estop();
+        }
+        publish_status();
+        return;
+    }
+
+    if (strcmp(topic, CMD_RESET_ESTOP_TOPIC) == 0) {
+        bool reset_val = false;
+        if (argus_cmd_parser_bool(data, &reset_val) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed reset_estop payload: '%s'", data);
+            return;
+        }
+        if (reset_val) {
+            argus_state_mgr_reset_estop();
+        }
+        publish_status();
         return;
     }
 
     if (strcmp(topic, CMD_UNLOCK_TOPIC) == 0) {
-        esp_err_t err = argus_trajectory_unlock();
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Unlock requested. Driver disabled (GPIO 5 HIGH), shaft released.");
+        bool unlock_val = false;
+        if (argus_cmd_parser_bool(data, &unlock_val) != ESP_OK) {
+            ESP_LOGW(TAG, "Command rejected: Malformed unlock payload: '%s'", data);
+            return;
+        }
+        if (unlock_val) {
+            argus_state_mgr_unlock();
         } else {
-            ESP_LOGE(TAG, "Failed to disable driver on unlock: %s", esp_err_to_name(err));
+            ESP_LOGI(TAG, "unlock=false payload parsed successfully: no-op.");
         }
         publish_status();
         return;
@@ -278,12 +288,18 @@ static void wifi_start_access_point_and_station(void)
     ESP_LOGI("WIFI", "Access Point and Station initialized.");
 }
 
-// ================= MQTT BROKER =================
+// ================= MQTT BROKER & POLICY SEAM =================
 
-static void mqtt_broker_message_cb(const char *topic, const char *payload, void *user_ctx)
+static esp_err_t mqtt_policy_check(const char *topic, const char *payload, bool retain, void *user_ctx)
 {
     (void)user_ctx;
-    handle_mqtt_command(topic, payload);
+    return argus_cmd_parser_validate_control_message(topic, payload, retain);
+}
+
+static void mqtt_broker_message_cb(const char *topic, const char *payload, bool retain, void *user_ctx)
+{
+    (void)user_ctx;
+    handle_mqtt_command(topic, payload, retain);
 }
 
 static void mqtt_broker_start(void)
@@ -291,6 +307,7 @@ static void mqtt_broker_start(void)
     const argus_mqtt_broker_config_t broker_config = {
         .port = MQTT_BROKER_PORT,
         .on_message = mqtt_broker_message_cb,
+        .policy_check = mqtt_policy_check,
         .user_ctx = NULL,
     };
 
@@ -306,21 +323,17 @@ static void status_task(void *arg)
     (void)arg;
 
     while (true) {
-        int32_t target_rpm = argus_trajectory_get_target_rpm_milli();
-        int32_t applied_rpm = argus_trajectory_get_applied_rpm_milli();
-        int32_t generated_rpm = argus_step_gen_get_generated_rpm_milli();
-        int64_t steps = argus_step_gen_get_step_count();
-        bool driver_enabled = argus_step_gen_is_driver_enabled();
-        bool ramp_active = argus_trajectory_is_ramp_active();
-        argus_step_gen_error_t err = argus_step_gen_get_error();
+        argus_state_snapshot_t snap;
+        argus_state_mgr_get_snapshot(&snap);
 
         const argus_config_t *cfg = argus_config_get();
-        uint64_t freq_mhz = argus_conversions_rpm_to_mhz(generated_rpm, cfg);
+        uint64_t freq_mhz = argus_conversions_rpm_to_mhz(snap.generated_rpm_milli, cfg);
 
-        ESP_LOGI(TAG, "status: target_rpm_milli=%ld applied_rpm_milli=%ld generated_rpm_milli=%ld freq_hz=%ld.%03ld steps=%lld enabled=%d ramp=%d err=%d",
-                 (long)target_rpm, (long)applied_rpm, (long)generated_rpm,
+        ESP_LOGI(TAG, "status: state=%s target_rpm_milli=%ld applied_rpm_milli=%ld generated_rpm_milli=%ld freq_hz=%ld.%03ld steps=%lld enabled=%d ramp=%d estop=%d fault=%lu",
+                 argus_state_mgr_get_state_name(snap.machine_state),
+                 (long)snap.configured_target_rpm_milli, (long)snap.applied_rpm_milli, (long)snap.generated_rpm_milli,
                  (long)(freq_mhz / 1000), (long)(freq_mhz % 1000),
-                 (long long)steps, driver_enabled, ramp_active, err);
+                 (long long)snap.generated_step_count, snap.driver_enabled, snap.ramp_active, snap.estop_latched, (unsigned long)snap.fault_code);
 
         publish_status();
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -339,141 +352,114 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
     while (true) {
         if (print_menu) {
+            argus_state_snapshot_t snap;
+            argus_state_mgr_get_snapshot(&snap);
+
             printf("\n");
             printf("===================================================\n");
             printf("=== Argus V2 Pump Controller Diagnostic Menu ===\n");
             printf("===================================================\n");
-            printf("[1] Ramped 0.5 RPM equivalent (66.67 Hz)\n");
-            printf("[2] Ramped 0.6 RPM equivalent (80.00 Hz)\n");
-            printf("[3] Ramped 0.7 RPM equivalent (93.33 Hz)\n");
-            printf("[4] Ramped 1.0 RPM equivalent (133.33 Hz)\n");
-            printf("[5] Ramped 20.0 RPM equivalent (2.67 kHz)\n");
-            printf("[6] Ramped 72.0 RPM equivalent (9.60 kHz)\n");
-            printf("[7] Ramped 100.0 RPM equivalent (13.33 kHz)\n");
-            printf("[8] Ramped 200.0 RPM equivalent (26.67 kHz)\n");
-            printf("[9] Controlled 0.1 RPM incremental changes (5s sweep)\n");
-            printf("[0] Controlled ramp-like rate changes (sweep 0.5 to 72 RPM)\n");
-            printf("[s] Stop normal (ramps applied speed to zero)\n");
-            printf("[u] Unlock/Disable driver (releases holding torque)\n");
-            printf("[r] Diagnostic RECOVERY (stop, unlock, wait 500ms)\n");
-            printf("[d] Toggle STEP pin slowly (1 Hz) for multimeter/LED testing\n");
-            printf("[t] Re-run automated tests\n");
-            printf("=== GPIO 5 active-low ENABLE: LOW=Enabled/Holding, HIGH=Unlocked ===\n");
+            printf("Current State: [%s] Setpoint: [%ld mRPM] E-Stop: [%s]\n",
+                   argus_state_mgr_get_state_name(snap.machine_state),
+                   (long)snap.configured_target_rpm_milli,
+                   snap.estop_latched ? "LATCHED" : "CLEAR");
+            printf("[1] Set & Start 0.5 RPM (500 mRPM)\n");
+            printf("[2] Set & Start 0.6 RPM (600 mRPM)\n");
+            printf("[3] Set & Start 0.7 RPM (700 mRPM)\n");
+            printf("[4] Set & Start 1.0 RPM (1000 mRPM)\n");
+            printf("[5] Set & Start 20.0 RPM (20000 mRPM)\n");
+            printf("[6] Set & Start 72.0 RPM (72000 mRPM)\n");
+            printf("[7] Set & Start 100.0 RPM (100000 mRPM)\n");
+            printf("[8] Set & Start 200.0 RPM (200000 mRPM)\n");
+            printf("[g] Start Motion (apply stored setpoint)\n");
+            printf("[s] Stop Normal (ramps speed to zero, retains holding torque)\n");
+            printf("[u] Unlock/Disable driver (releases shaft)\n");
+            printf("[e] Software E-STOP (instant pulse halt, latches E-stop)\n");
+            printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
+            printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
+            printf("[t] Run PURE unit tests (mock backend, 0 hardware touch)\n");
+            printf("[H] Open HARDWARE ACCEPTANCE test submenu\n");
             printf("Select option: ");
             fflush(stdout);
             print_menu = false;
         }
 
-        int c = getchar();
-        if (c == EOF || c == '\n' || c == '\r') {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
+        int c;
+        do {
+            c = getchar();
+            if (c == EOF) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        } while (c == EOF || c == '\n' || c == '\r');
 
         printf("%c\n", c);
-        print_menu = true; // Reset flag to display menu after command executes
+        print_menu = true;
 
         switch (c) {
-            case '1': {
-                printf("Testing Ramped 0.5 RPM equivalent (500 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(500, true);
+            case '1':
+                argus_state_mgr_set_target(500, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '2': {
-                printf("Testing Ramped 0.6 RPM equivalent (600 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(600, true);
+            case '2':
+                argus_state_mgr_set_target(600, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '3': {
-                printf("Testing Ramped 0.7 RPM equivalent (700 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(700, true);
+            case '3':
+                argus_state_mgr_set_target(700, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '4': {
-                printf("Testing Ramped 1.0 RPM equivalent (1000 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(1000, true);
+            case '4':
+                argus_state_mgr_set_target(1000, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '5': {
-                printf("Testing Ramped 20.0 RPM equivalent (20000 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(20000, true);
+            case '5':
+                argus_state_mgr_set_target(20000, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '6': {
-                printf("Testing Ramped 72.0 RPM equivalent (72000 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(72000, true);
+            case '6':
+                argus_state_mgr_set_target(72000, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '7': {
-                printf("Testing Ramped 100.0 RPM equivalent (100000 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(100000, true);
+            case '7':
+                argus_state_mgr_set_target(100000, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '8': {
-                printf("Testing Ramped 200.0 RPM equivalent (200000 milli-RPM)\n");
-                argus_trajectory_set_target_rpm_milli(200000, true);
+            case '8':
+                argus_state_mgr_set_target(200000, true);
+                argus_state_mgr_start();
                 break;
-            }
-            case '9': {
-                printf("Starting 0.1 RPM incremental changes (sweep 0.5 to 1.5 RPM)...\n");
-                for (int32_t rpm = 500; rpm <= 1500; rpm += 100) {
-                    printf("  Setting target speed: %ld.%ld RPM (%ld milli-RPM), step count=%lld\n",
-                           (long)(rpm / 1000), (long)((rpm % 1000) / 100), (long)rpm,
-                           (long long)argus_step_gen_get_step_count());
-                    argus_trajectory_set_target_rpm_milli(rpm, true);
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                }
+            case 'g':
+                printf("Issuing START command...\n");
+                argus_state_mgr_start();
                 break;
-            }
-            case '0': {
-                printf("Starting controlled ramp-like changes (sweep 0.5 to 72 RPM and back)...\n");
-                for (int32_t rpm = 500; rpm <= 72000; rpm += 1000) {
-                    argus_trajectory_set_target_rpm_milli(rpm, true);
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                for (int32_t rpm = 72000; rpm >= 500; rpm -= 1000) {
-                    argus_trajectory_set_target_rpm_milli(rpm, true);
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                printf("Ramp sweep completed.\n");
+            case 's':
+                printf("Issuing STOP_NORMAL command...\n");
+                argus_state_mgr_stop_normal();
                 break;
-            }
-            case 's': {
-                printf("Stopping normal (ramping applied speed to zero, retaining holding torque).\n");
-                argus_trajectory_stop_normal();
+            case 'u':
+                printf("Issuing UNLOCK command...\n");
+                argus_state_mgr_unlock();
                 break;
-            }
-            case 'u': {
-                printf("Unlocking/Disabling motor driver (releasing holding torque).\n");
-                argus_trajectory_unlock();
+            case 'e':
+                printf("Issuing E_STOP command...\n");
+                argus_state_mgr_estop();
                 break;
-            }
-            case 'r': {
-                printf("Triggering Diagnostic RECOVERY sequence...\n");
-                argus_trajectory_recover();
+            case 'c':
+                printf("Issuing RESET_ESTOP command...\n");
+                argus_state_mgr_reset_estop();
                 break;
-            }
-            case 'd': {
-                printf("Toggling STEP pin slowly (1 Hz) for 10 seconds. Check voltage on GPIO 3 (PLS)...\n");
-                argus_trajectory_stop_immediate();
-                argus_step_gen_enable_driver(); 
-                for (int i = 0; i < 10; i++) {
-                    printf("  STEP (GPIO 3) -> LOW (Active)\n");
-                    gpio_set_level(GPIO_NUM_3, 0);
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                    printf("  STEP (GPIO 3) -> HIGH (Inactive)\n");
-                    gpio_set_level(GPIO_NUM_3, 1);
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                }
-                printf("Slow toggle test completed. STEP returned to Inactive (HIGH).\n");
-                gpio_set_level(GPIO_NUM_3, 1);
+            case 'r':
+                printf("Issuing RECOVER command...\n");
+                argus_state_mgr_recover();
                 break;
-            }
-            case 't': {
-                printf("Re-running automated tests...\n");
+            case 't':
+                printf("Running PURE unit tests (mock operations, zero hardware touch)...\n");
                 argus_tests_run_all();
                 break;
-            }
+            case 'H':
+                printf("Opening HARDWARE ACCEPTANCE test submenu...\n");
+                argus_tests_run_hardware_acceptance();
+                break;
             default:
                 printf("Unknown option: '%c'\n", c);
                 break;
@@ -486,7 +472,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 3B)...");
 
     // 1. Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -506,7 +492,10 @@ void app_main(void)
     // 4. Initialize V2 Trajectory Linear Ramp Engine
     ESP_ERROR_CHECK(argus_trajectory_init(cfg));
 
-    // 5. Arm & Start Step Generator & Trajectory Periodic Task
+    // 5. Initialize V2 Authoritative State Manager (using production motion ops)
+    ESP_ERROR_CHECK(argus_state_mgr_init(cfg, NULL));
+
+    // 6. Arm & Start Step Generator & Trajectory Periodic Task
     ESP_ERROR_CHECK(argus_step_gen_arm());
     ESP_ERROR_CHECK(argus_step_gen_start());
     ESP_ERROR_CHECK(argus_trajectory_task_start());
@@ -521,5 +510,5 @@ void app_main(void)
     xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 3A startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 3B startup completed successfully.");
 }

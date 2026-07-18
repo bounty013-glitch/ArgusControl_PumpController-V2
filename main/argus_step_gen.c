@@ -437,6 +437,12 @@ esp_err_t argus_step_gen_set_rate_rpm_milli(int32_t rpm_milli, uint32_t steps_pe
         return ESP_OK;
     }
 
+    if (steps_per_rev == 0) {
+        s_error_state = ARGUS_STEP_GEN_ERROR_TIMING_UPDATE_FAILED;
+        ESP_LOGE(TAG, "set_rate: steps_per_rev must be > 0");
+        return ESP_ERR_INVALID_ARG;
+    }
+
     // Min: 1 milli-RPM (0.001 RPM), Max: 200 RPM (200,000 milli-RPM)
     if (rpm_milli < 1 || rpm_milli > 200000) {
         s_error_state = ARGUS_STEP_GEN_ERROR_TIMING_UPDATE_FAILED;
@@ -612,7 +618,10 @@ int32_t argus_step_gen_get_generated_rpm_milli(void)
 
 int64_t argus_step_gen_get_step_count(void)
 {
-    return s_step_count;
+    taskENTER_CRITICAL(&s_timing_mux);
+    int64_t count = s_step_count;
+    taskEXIT_CRITICAL(&s_timing_mux);
+    return count;
 }
 
 argus_step_gen_error_t argus_step_gen_get_error(void)
@@ -620,7 +629,29 @@ argus_step_gen_error_t argus_step_gen_get_error(void)
     return s_error_state;
 }
 
+void argus_step_gen_clear_error(void)
+{
+    s_error_state = ARGUS_STEP_GEN_ERROR_NONE;
+}
+
 void argus_step_gen_reset_step_count(void)
 {
+    taskENTER_CRITICAL(&s_timing_mux);
     s_step_count = 0;
+    taskEXIT_CRITICAL(&s_timing_mux);
+}
+
+void argus_step_gen_get_snapshot(argus_step_gen_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) return;
+
+    taskENTER_CRITICAL(&s_timing_mux);
+    snapshot->requested_rpm_milli = s_requested_rpm_milli;
+    snapshot->generated_rpm_milli = s_generated_rpm_milli;
+    snapshot->generated_step_count = s_step_count;
+    snapshot->driver_enabled = s_driver_enabled;
+    snapshot->is_running = s_running;
+    snapshot->is_forward = s_forward;
+    snapshot->error_state = s_error_state;
+    taskEXIT_CRITICAL(&s_timing_mux);
 }
