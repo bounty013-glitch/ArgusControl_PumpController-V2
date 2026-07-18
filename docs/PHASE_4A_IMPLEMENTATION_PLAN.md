@@ -1,5 +1,10 @@
 # Phase 4A Implementation Plan — Device Identity, Persistent Configuration, Network Modes, and Control Authority (Final Approved)
 
+> [!NOTE]
+> **Historical planning document.** Written before the Phase 4A hardening
+> audit. Some claims (E-stop mutex bypass, test counts, authority-bypass
+> APIs) were corrected during hardening. See `PHASE_4A_RUNTIME_ACCEPTANCE.md`
+> for the authoritative verified evidence.
 ## Overview & Current Repository Baseline Audit
 
 Phase 4A establishes persistent device identity, power-loss-safe dual-slot NVS storage, a multi-mode network manager, a normalized command router, and exclusive control authority for the `ArgusControl_PumpController-V2` firmware (at verified baseline commit `3d03d80`).

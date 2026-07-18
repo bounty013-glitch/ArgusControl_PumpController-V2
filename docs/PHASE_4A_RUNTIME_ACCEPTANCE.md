@@ -191,12 +191,38 @@ Menu path: `X` -> `y` (confirm exit).
 
 ---
 
-## Remaining Unverified Scenarios
+## Phase 4A Completion Status
 
-| Scenario                                    | Status  |
-|---------------------------------------------|---------|
-| Active-motion controlled-stop service entry | PENDING |
-| Remaining Phase 4A acceptance scenarios     | PENDING |
+Phase 4A: COMPLETE WITHIN REVISED SCOPE
 
-The final Phase 4A hardware-verification tag must not be created until
-all remaining scenarios are physically verified.
+All stopped-state acceptance scenarios have been physically verified
+by the operator as documented in the sections above.
+
+### Deferred by Design
+
+| Scenario | Placement | Reason |
+|----------|-----------|--------|
+| Active-motion MQTT/HMI-to-local authority handoff | DEFERRED BY DESIGN TO PHASE 4D END-TO-END ACCEPTANCE | Requires production-intent HMI and Phase 4C MQTT contract. Testing with a temporary MQTT utility would not prove the intended production architecture. |
+| Concurrent service-transition E-stop preemption | DEFERRED -- PLACEMENT PENDING OPERATOR DECISION (Phase 4B or Phase 4D) | Requires ISR-level mutex splitting, atomic latches, and hardware timing measurement. Orthogonal to browser portal scope. |
+
+### Active-Motion Handoff Deferred Test Requirements
+
+When exercised during Phase 4D end-to-end acceptance, the test must verify:
+
+1. The production HMI holds SUPERVISORY/MQTT authority.
+2. The HMI commands active motor motion.
+3. Local service entry is requested.
+4. MQTT supervisory authority is revoked.
+5. The Controller performs a controlled deceleration.
+6. The Controller confirms a safe stopped state.
+7. MQTT and STA supervisory paths are shut down.
+8. Local browser service authority is granted last.
+9. No stale, queued, replayed, or reconnecting HMI command restarts motion.
+10. The Controller remains independently operable without the HMI.
+
+- Owner: HMI/Controller integration acceptance
+- Trigger: Production-intent HMI and Phase 4C MQTT contract available
+- Required evidence: Controller log, HMI command/status evidence,
+  authority transitions, motion-state transitions, post-transition
+  restart-inhibition evidence
+- Final gate: Must pass before v2-phase4-complete

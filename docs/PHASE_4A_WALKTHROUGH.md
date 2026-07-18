@@ -1,8 +1,28 @@
 # Phase 4A Implementation Walkthrough — Device Identity, Persistent Configuration, Network Modes, and Control Authority
 
+> [!WARNING]
+> **SUPERSEDED DOCUMENT**
+>
+> This walkthrough was written before the Phase 4A hardening audit. Several
+> claims are stale and have been corrected by the hardening pass. The
+> authoritative Phase 4A documents are:
+>
+> - `PHASE_4A_RUNTIME_ACCEPTANCE.md` — Physically verified evidence
+> - `PHASE_4A_Phase 4A Hardening — Walkthrough.md` — Hardening corrections
+>
+> Stale claims corrected below are marked with **[CORRECTED]**.
+
 ## Summary of Completed Implementation & Hardening
 
-Phase 4A has been fully implemented and physically verified on ESP32-S3 hardware in `ArgusControl_PumpController-V2` adhering strictly to all user design directives, lock hierarchy principles, single-authority model ("One pump, one command authority"), and secrets protection guardrails.
+Phase 4A: COMPLETE WITHIN REVISED SCOPE.
+
+Phase 4A has been implemented and hardened on ESP32-S3 hardware in
+`ArgusControl_PumpController-V2` adhering strictly to all user design
+directives, lock hierarchy principles, single-authority model
+("One pump, one command authority"), and secrets protection guardrails.
+
+Active-motion MQTT/HMI-to-local authority handoff:
+DEFERRED BY DESIGN TO PHASE 4D END-TO-END ACCEPTANCE.
 
 ---
 
@@ -21,61 +41,64 @@ Phase 4A has been fully implemented and physically verified on ESP32-S3 hardware
    - Protects payloads with CRC32 integrity checks and valid marker `0xA5A55A5A`.
    - Enforces Schema V1 non-empty STA SSID requirement (8–63 char password, no open STA support).
    - Erases both dual slots during factory reset while keeping `CONFIG_ARGUS_SERVICE_AP_PASS` build credential intact.
-   - Includes full mock backend injection interface (`argus_nvs_mock_inject_*`) for pure unit testing without NVS flash writes.
+   - Includes injectable driver interface (`argus_nvs_driver_t`) for pure unit testing without NVS flash writes.
+   - **[CORRECTED]** Commit uses the selector to determine the target slot, guaranteeing the selector-pointed LKG is never overwritten. On readback verification failure, the selector is not updated.
 
 3. **Exclusive Control Authority & Owner Tracking (`argus_authority_mgr`)**:
    - Enforces authority modes (`NONE`, `SUPERVISORY`, `SERVICE_TRANSITION`, `LOCAL_SERVICE`) and owner tracking (`NONE`, `MQTT`, `BROWSER`, `DIAGNOSTIC_CLI`).
    - Uses `argus_authority_mgr_get_snapshot()` to acquire `s_auth_mutex` briefly, copy snapshot atomically, and release it immediately to prevent lock inversion.
    - Implements permission matrix validation (`argus_authority_validate_permission()`).
+   - **[CORRECTED]** Public authority-bypass APIs (`prepare_service_transition`, `request_service`, `request_exit`) were removed during the hardening audit. All service transitions route through the coordinated orchestrator.
 
 4. **Command Router & Dispatch Serialization Gate (`argus_cmd_router`)**:
    - Serializes all state manager commands using `s_dispatch_mutex`.
-   - Validates envelope source (`ARGUS_CMD_SRC_MQTT_SUPERVISORY`, `ARGUS_CMD_SRC_BROWSER_LOCAL`, `ARGUS_CMD_SRC_CLI_DIAGNOSTIC`, `ARGUS_CMD_SRC_INTERNAL_SAFETY`), authority generation, and permission before calling `argus_state_mgr`.
-   - Microsecond preemption for `ARGUS_CMD_SRC_INTERNAL_SAFETY` and `ARGUS_CMD_TYPE_ESTOP` bypassing `s_dispatch_mutex`.
+   - Validates envelope source (`ARGUS_CMD_SRC_MQTT_SUPERVISORY`, `ARGUS_CMD_SRC_LOCAL_SERVICE_PORTAL`, `ARGUS_CMD_SRC_CLI_DIAGNOSTIC`, `ARGUS_CMD_SRC_INTERNAL_SAFETY`), authority generation, and permission before calling `argus_state_mgr`.
+   - **[CORRECTED]** E-stop does not bypass `s_dispatch_mutex`. The "microsecond preemption" claim was removed during hardening. E-stop goes through the same serialized dispatch path. Concurrent E-stop preemption (split mutex, atomic latch) is deferred.
    - Emits `ESP_LOGW` warning diagnostics if envelope generation counter mismatches or authority permission is denied.
 
 5. **Dedicated Network Manager Task (`argus_net_mgr`)**:
    - Manages Wi-Fi lifecycle (Uncommissioned AP vs. Commissioned STA) and event queue.
-   - Configures `WIFI_PS_NONE` power-save mode to disable Wi-Fi power saving and reduce power-save-related latency variability (physical STEP timing and jitter under Wi-Fi load pending oscilloscope measurement).
+   - Configures `WIFI_PS_NONE` power-save mode to disable Wi-Fi power saving.
    - Enforces compile-time static assertions (`_Static_assert`) requiring `CONFIG_ARGUS_SERVICE_AP_PASS` to be defined and 8–63 characters long.
+   - **[CORRECTED]** Coordinated service entry and exit are now orchestrated through `argus_net_mgr_request_service()` / `argus_net_mgr_request_service_exit()` with a 10-callback transition ops struct.
 
-6. **Comprehensive Pure Unit Tests & Teardown Isolation (`argus_tests_4a`)**:
-   - 42 pure non-motion unit tests covering Identity, Dual-Slot CRC & Wrap, NVS Recovery, Authority & Owner matrix, Envelope Validation, Router Dispatch Serialization, and Net Manager config validation.
-   - **Teardown Isolation**: Tests save `orig_snap` at entry and restore `orig_snap.mode` and `orig_snap.owner` before exiting so running `t` never leaks `SUPERVISORY` / `MQTT` authority to the live runtime.
+6. **Pure Unit Tests & Teardown Isolation (`argus_tests_4a`)**:
+   - **[CORRECTED]** 18 distinct pure non-motion test cases (not 42). The pre-hardening test count included tests that were consolidated, removed for purity violations, or refactored during the hardening audit.
+   - 3 repeat passes, 54 total executions, 54 passed, 0 failed.
+   - Tests use stack-local mocks and read-only production observations. No production API calls (broker shutdown, STA disconnect, GPIO, NVS flash writes) from test code.
 
-7. **Interactive Diagnostic Menu Authority Auto-Claiming (`app_main`)**:
-   - Selecting any motion option (`1`–`8`, `g`, `s`, `u`, `c`, `r`) in `argus_diagnostic_menu_task` automatically checks if CLI holds `LOCAL_SERVICE` authority (`AuthMode: 3`, `AuthOwner: 2`).
-   - If CLI does not hold authority, it automatically requests service authority (`argus_authority_request_service(ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI)`), updates the authority generation, and dispatches the envelope seamlessly.
+7. **MQTT Broker Lifecycle Hardening (`argus_mqtt_broker`)**:
+   - **[CORRECTED]** Full state machine (STOPPED, STARTING, RUNNING, STOPPING) with `lifecycle_mutex` and event group.
+   - Atomic client count tracks active connections.
+   - Bounded startup/shutdown waits prevent deadlock.
+   - Server task checks lifecycle state before accepting clients.
+   - Lock order enforced: `lifecycle_mutex` -> `client_lock`.
 
 ---
 
 ## Build Verification Evidence
 
-```powershell
-. C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1
-idf.py build
-```
+At time of Phase 4A closeout (merge commit `bab4217` on `main`):
 
 - **Exit Status**: `0` (Clean Build Successful)
 - **ESP-IDF Version**: `v5.5.3`
 - **Target**: `esp32s3`
-- **Application Binary**: `build/ArgusControl_PumpController-V2.bin` (size `0xc0ff0` bytes / 789,952 bytes)
-- **Partition Free Space**: `0x3f010` bytes free out of 1.0 MB app partition (25% free)
-- **Compiler Warnings**: `0` (with `-Werror` active)
-- **Duplicate Compilation Passes**: `0` (single component compilation under `esp-idf/main/CMakeFiles/__idf_main.dir/`)
-- **Header Overwrite Warnings**: `0` (`srec_cat` zero matches)
+- **Binary size**: 858,272 bytes (18% free in 1MB partition)
+- **Compiler Warnings**: `0`
 
 ---
 
 ## Physical Hardware Verification Evidence
 
-1. **Pure Unit Suite Execution**:
-   - Executed option `t` twice consecutively on physical ESP32-S3 hardware.
-   - 100% of Phase 3B and Phase 4A unit tests passed (`42/42 Phase 4A PASS`, `16/16 Phase 3B PASS`).
-   - Verified authority state restored cleanly to `ARGUS_AUTHORITY_NONE` after test execution without leaking `SUPERVISORY` / `MQTT` mode.
+**See `PHASE_4A_RUNTIME_ACCEPTANCE.md` for the authoritative physically-verified evidence.**
 
-2. **Motion Execution**:
-   - Executed option `5` ("Set & Start 20.0 RPM (20000 mRPM)").
-   - Diagnostic menu auto-claimed `LOCAL_SERVICE` authority (`AuthMode: 3`, `AuthOwner: 2`).
-   - Machine state transitioned from `UNLOCKED` $\to$ `STARTING` $\to$ `RUNNING`.
-   - Step generator frequency output matched exact setpoint (20.0 RPM $\to$ 26,666.667 Hz pulse rate).
+The pre-hardening hardware evidence (42 tests, auto-claiming CLI motion, etc.)
+documented below is **historical** and was superseded by the hardening audit.
+
+1. **Pure Unit Suite Execution** (pre-hardening, historical):
+   - ~~42/42 Phase 4A PASS, 16/16 Phase 3B PASS~~ **[SUPERSEDED]**
+   - Post-hardening: 18 distinct Phase 4A test cases, 54/54 executions passed.
+
+2. **Motion Execution** (pre-hardening, historical):
+   - ~~Diagnostic menu auto-claimed LOCAL_SERVICE authority~~ **[SUPERSEDED]**
+   - Post-hardening: CLI motion commands require explicit service entry. Auto-claiming was removed.

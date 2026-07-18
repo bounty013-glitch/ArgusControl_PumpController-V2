@@ -4,6 +4,8 @@ Argus V2 Peristaltic Pump Controller firmware for ESP32-S3.
 
 This repository implements the V2 architecture for precision motor control, featuring exact fixed-point Bresenham GPTimer pulse generation, a 20 ms linear trajectory profile engine, verified common-anode active-low hardware integration, an embedded local MQTT broker, and open-loop safety doctrine.
 
+**Current Status**: Phase 4A COMPLETE WITHIN REVISED SCOPE. Phase 4B (Browser Portal) PLANNING.
+
 ---
 
 ## Hardware Configuration & Polarity Doctrine
@@ -52,8 +54,8 @@ An interactive serial CLI menu (`app_main.c`) provides comprehensive hardware di
 *   `[s]`: Normal soft-stop (ramps applied speed to 0, retains holding torque).
 *   `[u]`: Unlock driver (halts pulses, drives ENA HIGH to release shaft).
 *   `[r]`: Diagnostic Recovery (halts pulses, forces STEP inactive, drives ENA HIGH, waits 500 ms, leaves unlocked without requiring MCU reboot).
-*   `[d]`: Slow STEP pin toggle ($1 \text{ Hz}$) for physical multimeter and LED testing.
-*   `[t]`: Run automated unit test suite.
+*   `[t]`: Run pure unit test suite (Phase 3B + Phase 4A, 18 distinct tests × 3 passes).
+*   `[N]`: Phase 4A Network & Authority acceptance submenu.
 
 ---
 
@@ -61,10 +63,15 @@ An interactive serial CLI menu (`app_main.c`) provides comprehensive hardware di
 
 The control node hosts a local MQTT broker listening on port `1883` on both its Wi-Fi Station IP and Access Point IP (`192.168.4.1`):
 
-*   **AP SSID**: `ArgusMotorTest`
+*   **AP SSID**: `Argus-Service-XXYYZZ` (derived from device MAC address)
+*   **AP Security**: WPA2-PSK, single-client limit
 *   **Broker Port**: `1883`
-*   **Command Topics**: `argus/peristaltic/cmd/speed_pct`, `cmd/run`, `cmd/stop`, `cmd/e_stop`, `cmd/unlock`
-*   **Status Topics**: `argus/peristaltic/status/run`, `status/rpm`, `status/online`
+*   **Broker Lifecycle**: Full state machine (STOPPED → STARTING → RUNNING → STOPPING) with bounded startup/shutdown and atomic client tracking.
+*   **Authority Model**: Exclusive command authority — MQTT supervisory, local browser, and diagnostic CLI authority never coexist. See `docs/PHASE_4A_RUNTIME_ACCEPTANCE.md` for verified behavior.
+
+> [!NOTE]
+> MQTT topic paths and payload schemas are preliminary. The production
+> MQTT contract will be defined in Phase 4C.
 
 ---
 
