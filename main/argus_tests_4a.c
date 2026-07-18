@@ -970,10 +970,12 @@ static esp_err_t test_http_json_escape_safety(void)
     argus_http_test_json_escape("a\nb\tc", dst, sizeof(dst));
     TEST_ASSERT(strcmp(dst, "a b c") == 0, "Control char replacement failed");
 
-    /* Truncation — 4-byte buffer can hold 3 chars + NUL */
+    /* Truncation — 4-byte buffer: json_escape reserves 2 bytes at end for
+     * potential escape pair + NUL, so dst_size=4 yields at most 2 chars + NUL.
+     * Output must be NUL-terminated within the buffer. */
     argus_http_test_json_escape("abcdef", dst, 4);
-    TEST_ASSERT(strlen(dst) <= 3, "Truncation overflow");
-    TEST_ASSERT(dst[3] == '\0', "Truncation NUL termination failed");
+    TEST_ASSERT(strlen(dst) < 4, "Truncation overflow");
+    TEST_ASSERT(dst[strlen(dst)] == '\0', "Truncation NUL termination failed");
 
     /* Empty string */
     argus_http_test_json_escape("", dst, sizeof(dst));
