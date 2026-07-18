@@ -47,14 +47,31 @@ typedef struct __attribute__((packed)) {
  * @brief Abstract storage driver interface for dependency injection (pure unit testing).
  */
 typedef struct {
-    esp_err_t (*read_slot)(uint8_t slot_index, argus_cfg_slot_t *out_slot);
-    esp_err_t (*write_slot)(uint8_t slot_index, const argus_cfg_slot_t *in_slot);
-    esp_err_t (*read_selector)(uint8_t *out_selector);
-    esp_err_t (*write_selector)(uint8_t selector);
-    esp_err_t (*read_reset_pending)(bool *out_pending);
-    esp_err_t (*write_reset_pending)(bool pending);
-    esp_err_t (*erase_all)(void);
+    esp_err_t (*read_slot)(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot);
+    esp_err_t (*write_slot)(void *ctx, uint8_t slot_index, const argus_cfg_slot_t *in_slot);
+    esp_err_t (*read_selector)(void *ctx, uint8_t *out_selector);
+    esp_err_t (*write_selector)(void *ctx, uint8_t selector);
+    esp_err_t (*read_reset_pending)(void *ctx, bool *out_pending);
+    esp_err_t (*write_reset_pending)(void *ctx, bool pending);
+    esp_err_t (*erase_all)(void *ctx);
+    void *ctx;
 } argus_nvs_driver_t;
+
+typedef struct {
+    argus_config_payload_t active_config;
+    uint32_t active_generation;
+    uint8_t active_slot_index;
+    bool has_valid_config;
+    bool initialized;
+    const argus_nvs_driver_t *driver;
+} argus_nvs_core_t;
+
+/**
+ * @brief Pure dual-slot NVS core functions operating on caller-provided instances (for unit testing and core evaluation).
+ */
+esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *driver);
+esp_err_t argus_nvs_core_get(const argus_nvs_core_t *core, argus_config_payload_t *out_cfg);
+esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_payload_t *in_cfg);
 
 /**
  * @brief Initialize NVS configuration manager using production or injected driver.
@@ -119,6 +136,41 @@ uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload);
  * @return true if gen_a is strictly newer than gen_b.
  */
 bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b);
+
+/**
+ * @brief NVS observation result with per-slot error differentiation.
+ *
+ * - status == ESP_OK: data was read successfully (present = true)
+ * - status == ESP_ERR_NOT_FOUND: key does not exist (present = false, valid = false)
+ * - status == other: driver error (present = false, valid = false)
+ * - valid: slot present AND valid_marker == ARGUS_CONFIG_VALID_MARKER
+ */
+typedef struct {
+    esp_err_t selector_status;
+    bool      selector_present;
+    uint8_t   selector;
+
+    esp_err_t slot_a_status;
+    bool      slot_a_present;
+    bool      slot_a_valid;
+    argus_cfg_slot_t slot_a;
+
+    esp_err_t slot_b_status;
+    bool      slot_b_present;
+    bool      slot_b_valid;
+    argus_cfg_slot_t slot_b;
+} argus_nvs_observation_t;
+
+/**
+ * @brief Read-only observation of NVS selector and dual-slot metadata without state mutation.
+ *
+ * Missing NVS configuration is valid for an uncommissioned device.
+ *
+ * @param[out] out_obs Observation result.
+ * @return ESP_OK if all reads returned ESP_OK or ESP_ERR_NOT_FOUND.
+ *         Returns the first unexpected error otherwise.
+ */
+esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs);
 
 #ifdef __cplusplus
 }

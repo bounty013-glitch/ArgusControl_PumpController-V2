@@ -1,0 +1,70 @@
+﻿PHASE 4A HARDENING FINAL AUDIT EVIDENCE
+Generated: 2026-07-18T11:11:39-05:00
+Branch: phase4a-hardening-audit
+HEAD: 74a2942674f58510556031275a91372c42909ce1
+
+=== git status --short --untracked-files=all ===
+?? PHASE_4A_HARDENING_AUDIT_EVIDENCE.txt
+?? PHASE_4A_HARDENING_IMPLEMENTATION.patch
+?? PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch
+
+=== git diff --check ===
+Exit code: 0 (no trailing whitespace findings)
+
+=== git log --oneline -3 ===
+19f947f Phase 4A Hardening: final source-audit corrections
+72deefd Phase 4A Hardening: concurrency corrections and audit evidence
+bdb3b34 wip: checkpoint Phase 4A hardening for independent audit
+
+=== correction commit diff --stat ===
+ PHASE_4A_HARDENING_AUDIT_EVIDENCE.txt      |   99 -
+ PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch | 2818 ----------------------------
+ main/argus_mqtt_broker.c                   |   58 +-
+ main/argus_mqtt_broker.h                   |    9 +
+ main/argus_net_mgr.c                       |   73 +-
+ main/argus_tests_4a.c                      |   94 +-
+ 6 files changed, 197 insertions(+), 2954 deletions(-)
+
+=== correction commit diff --name-only ===
+PHASE_4A_HARDENING_AUDIT_EVIDENCE.txt
+PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch
+main/argus_mqtt_broker.c
+main/argus_mqtt_broker.h
+main/argus_net_mgr.c
+main/argus_tests_4a.c
+
+=== full branch diff --stat (vs main) ===
+git : fatal: ambiguous argument 'main': both revision and filename
+At line:1 char:1091
++ ... stat (vs main) ===" ; $out += (git diff --stat main HEAD 2>&1 | Where ...
++                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (fatal: ambiguou...on and filename:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Use '--' to separate paths from revisions, like this:
+'git <command> [<revision>...] -- [<file>...]'
+
+=== idf.py fullclean + build ===
+fullclean exit: 0
+build exit: 0 (1090/1090 targets)
+Compilation warnings: 0
+Compilation errors: 0
+
+=== binary size ===
+Binary: 0xd17f0 bytes (858096 bytes)
+Partition: 0x100000 bytes (1048576 bytes)
+Free: 0x2e810 bytes (190480 bytes, 18%)
+Total image: 857973 bytes
+
+=== temporary artifacts to remove before merge ===
+PHASE_4A_HARDENING_IMPLEMENTATION.patch (untracked, 211KB)
+PHASE_4A_HARDENING_IMPLEMENTATION_V2.patch (untracked, 123KB)
+PHASE_4A_HARDENING_AUDIT_EVIDENCE.txt (untracked, will be regenerated)
+docs/V2_IMPLEMENTATION_PLAN*.md (intermediate planning artifacts)
+docs/Phase 4A Hardening Implementation - Task List.md
+
+=== useful documentation to retain ===
+docs/PHASE_4A_HARDENING_AUDIT_CORRECTIVE_PLAN.md
+docs/PHASE_4A_HARDENING_AUDIT_CORRECTIVE_PLAN (AMENDED).md
+docs/PHASE_4A_Phase 4A Hardening - Walkthrough.md
+docs/PHASE_4A_Phase 4A Hardening - Source-Reconciled Corrective Plan.md

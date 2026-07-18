@@ -41,7 +41,7 @@ esp_err_t argus_cmd_router_dispatch(const argus_command_envelope_t *env)
     if (!env) return ESP_ERR_INVALID_ARG;
     if (!s_initialized) argus_cmd_router_init();
 
-    // Internal safety actions (E-Stop) bypass dispatch and authority mutexes for microsecond preemption
+    // Internal safety actions (E-Stop) bypass dispatch and authority mutexes; blocks on s_state_mutex
     if (env->source == ARGUS_CMD_SRC_INTERNAL_SAFETY || env->command_type == ARGUS_CMD_TYPE_ESTOP) {
         return argus_state_mgr_estop();
     }
