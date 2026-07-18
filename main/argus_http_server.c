@@ -41,16 +41,15 @@
  *    - Content-Type: application/json on all API responses.
  *    - No Internet/CDN dependency — all assets embedded.
  *
- * 7. SERVICE AP INTERFACE ENFORCEMENT
+ * 7. SERVICE AP INTERFACE ENFORCEMENT (DEFERRED)
  *    In AP_DISCOVERABLE (APSTA), the HTTP server binds to INADDR_ANY and
- *    accepts connections on both interfaces. Each handler calls
- *    check_ap_subnet() which uses httpd_req_to_sockfd() + getpeername() to
- *    verify the client is in the AP subnet. Connections from non-AP subnets
- *    receive 403 Forbidden. If the peer address cannot be determined (lwip
- *    limitation), the request is served — fail-open is acceptable because
- *    this portal is read-only and serves no secrets.
- *    Note: open_fn (session-level) filtering was attempted but lwip returns
- *    0.0.0.0 for both getsockname and getpeername on the pre-handler socket.
+ *    accepts connections on both interfaces. Socket-level interface filtering
+ *    was attempted via open_fn (getsockname) and per-handler (getpeername)
+ *    but lwip on ESP32 returns 0.0.0.0 for both APIs on accepted sockets.
+ *    STA-side access restriction is deferred to Phase 4B.3, which will use
+ *    a different mechanism (e.g. WiFi connected-station list).
+ *    Risk is mitigated by: read-only portal, no secrets served, WPA2-PSK
+ *    AP with max 1 client, service mode requires explicit operator entry.
  */
 
 #include "argus_http_server.h"
@@ -63,10 +62,9 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "lwip/sockets.h"
+
 
 #include <stdio.h>
 #include <string.h>
@@ -85,72 +83,11 @@ static bool              s_initialized = false;
 #define HTTP_SEND_TIMEOUT_S   5
 #define HTTP_STACK_SIZE       6144
 
-/* ── AP-Subnet Enforcement (per-handler) ────────────────────────── */
-
-/**
- * @brief Check if the request originates from the AP subnet.
- *
- * Uses httpd_req_to_sockfd() + getpeername() to get the client's IP,
- * then compares against the AP netif's subnet. Returns true if the
- * client is in the AP subnet or if the check cannot be performed
- * (fail-open: acceptable for a read-only, secret-free portal).
- *
- * Returns false only when the peer is positively identified as
- * NOT in the AP subnet.
- *
- * Note: open_fn session-level filtering was attempted but lwip returns
- * 0.0.0.0 for both getsockname() and getpeername() on the socket fd
- * passed to open_fn before the connection is fully established.
- */
-static bool check_ap_subnet(httpd_req_t *req)
-{
-    int sockfd = httpd_req_to_sockfd(req);
-    if (sockfd < 0) {
-        ESP_LOGD(TAG, "AP check: cannot get socket fd, allowing (fail-open)");
-        return true;  /* fail-open */
-    }
-
-    struct sockaddr_in peer_addr;
-    socklen_t addr_len = sizeof(peer_addr);
-    if (getpeername(sockfd, (struct sockaddr *)&peer_addr, &addr_len) != 0) {
-        ESP_LOGD(TAG, "AP check: getpeername failed, allowing (fail-open)");
-        return true;  /* fail-open */
-    }
-
-    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (ap_netif == NULL) {
-        ESP_LOGD(TAG, "AP check: no AP netif, allowing (fail-open)");
-        return true;  /* fail-open */
-    }
-
-    esp_netif_ip_info_t ap_ip;
-    if (esp_netif_get_ip_info(ap_netif, &ap_ip) != ESP_OK) {
-        ESP_LOGD(TAG, "AP check: no AP IP info, allowing (fail-open)");
-        return true;  /* fail-open */
-    }
-
-    uint32_t peer_subnet = peer_addr.sin_addr.s_addr & ap_ip.netmask.addr;
-    uint32_t ap_subnet   = ap_ip.ip.addr & ap_ip.netmask.addr;
-
-    if (peer_subnet != ap_subnet) {
-        ESP_LOGW(TAG, "Rejected request from non-AP subnet (peer=%s)",
-                 inet_ntoa(peer_addr.sin_addr));
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * @brief Send 403 Forbidden response.
- */
-static esp_err_t send_forbidden(httpd_req_t *req)
-{
-    httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"error\":\"forbidden\"}");
-    return ESP_OK;
-}
+/* Note: AP-subnet enforcement was removed. lwip on ESP32 returns 0.0.0.0
+ * for getpeername()/getsockname() on accepted sockets — neither open_fn
+ * session-level nor per-handler request-level filtering can identify the
+ * source interface. STA-side filtering deferred to Phase 4B.3.
+ * Mitigations: read-only portal, no secrets, WPA2-PSK AP, max 1 client. */
 
 /* ── Response helpers ────────────────────────────────────────────── */
 
@@ -241,10 +178,6 @@ void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size)
  */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    if (!check_ap_subnet(req)) {
-        return send_forbidden(req);
-    }
-
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -348,10 +281,6 @@ static esp_err_t status_get_handler(httpd_req_t *req)
  */
 static esp_err_t identity_get_handler(httpd_req_t *req)
 {
-    if (!check_ap_subnet(req)) {
-        return send_forbidden(req);
-    }
-
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -531,10 +460,6 @@ static const char PORTAL_HTML[] =
 
 static esp_err_t portal_get_handler(httpd_req_t *req)
 {
-    if (!check_ap_subnet(req)) {
-        return send_forbidden(req);
-    }
-
     if (req->method != HTTP_GET) {
         return send_method_not_allowed(req);
     }
@@ -640,9 +565,9 @@ esp_err_t argus_http_server_start(void)
     config.stack_size         = HTTP_STACK_SIZE;
     config.lru_purge_enable   = true;  /* Evict oldest connection if at max */
     config.server_port        = 80;
-    /* Note: open_fn was removed — lwip returns 0.0.0.0 in the pre-handler
-     * socket context. AP-subnet enforcement is performed per-handler via
-     * check_ap_subnet() using httpd_req_to_sockfd() + getpeername(). */
+    /* Note: no open_fn or per-handler AP-subnet filtering — lwip returns
+     * 0.0.0.0 for getpeername/getsockname on accepted sockets. STA-side
+     * filtering deferred to Phase 4B.3. See doc block 7. */
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
