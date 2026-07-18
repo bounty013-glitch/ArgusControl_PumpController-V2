@@ -181,33 +181,58 @@ If any `httpd_register_uri_handler()` call fails during `start()`, the server is
 
 | Metric | Value |
 |--------|-------|
-| Build | ESP-IDF v5.5.3 |
+| Build | ESP-IDF v5.5.3 (full-clean) |
 | Errors | **0** |
 | Warnings | **0** |
-| Binary | 0xddbb0 (888 KB) |
-| Partition free | 0x22450 (13%) |
+| Binary | 0xde1e0 (889 KB) |
+| Partition free | 0x21e20 (13%) |
+| Total image | 909,673 bytes |
 
 ---
 
 ## Runtime Acceptance Evidence (Operator-Supplied)
 
+All evidence in this section was supplied by the operator across two physical
+verification passes (initial portal acceptance and post-correction retest).
+
 ### Pure Test Suite
 - 19 distinct tests x 3 passes = 57 executions
 - 57 passed, 0 failed
 - Production state: UNCHANGED across all dimensions
+- Verified on both pre-merge and post-merge builds
 
-### Portal Access Flow (Operator-Verified, All Evidence Operator-Supplied)
+### Portal Access and Credential Lifecycle (Operator-Verified)
 1. Phone connected to Argus Service AP, DHCP assigned IP `192.168.4.2`
 2. Browsed to `http://192.168.4.1`, browser prompted for credentials
 3. Entered `admin` / `admin`, password-change page displayed
-4. Changed password, page reloaded, re-authenticated with new credentials
-5. Dashboard loaded with live machine status, authority, network, identity data
-6. `/api/status` returned valid JSON — no configuration passwords or AP credentials observed
-7. `/api/identity` returned valid JSON — no passwords observed
-8. Portal intentionally accessible from controller's STA/LAN address (credential-protected)
-9. Dashboard loaded successfully from both phone (AP) and LAN-connected laptop (STA)
-10. Old browser authentication became invalid after password change
-11. Re-authentication with changed password succeeded
+4. Changed password — connection automatically reset by server
+5. Old (previous replacement) password rejected
+6. New replacement password accepted
+7. Attempted to change password back to `admin` — server rejected with
+   "Cannot reuse default password" (screenshot captured)
+8. Default `admin`/`admin` credentials rejected
+9. Controller rebooted — replacement password persisted, default remained invalid
+10. `/api/status` returned valid JSON — no configuration passwords or AP credentials observed
+11. `/api/identity` returned valid JSON — no passwords observed
+12. Portal accessible from both AP (phone) and STA/LAN (laptop) — credential-protected
+13. Logout executed — "Logged Out" page displayed (screenshot captured)
+14. Minor browser quirk documented in DHR-010 (accepted by operator)
+
+### Motion and Safety Controls (Operator-Verified)
+- Motion control functions: operational
+- E-stop: operational
+- All existing Phase 4A authority and safety controls: functional
+
+### AP-Gated Portal Access (Operator-Observed)
+The operator confirmed that the HTTP server is only active when the Service AP
+is running (menu N → option 4). Without AP activation, the portal is unreachable.
+This provides an additional operational security layer: the portal is not
+continuously available, only when the operator explicitly enables service mode.
+
+### Dashboard Data Binding (Known Scope Limitation)
+Dashboard status fields display placeholder/static data. Live telemetry binding
+is not implemented in Phase 4B.1 — this is by design and will be addressed
+when the status API is wired to live machine state.
 
 ---
 
