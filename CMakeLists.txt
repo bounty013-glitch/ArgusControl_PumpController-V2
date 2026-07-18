@@ -1,4 +1,4 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(arguscontrol_stepper_port)
+project(ArgusControl_PumpController-V2)

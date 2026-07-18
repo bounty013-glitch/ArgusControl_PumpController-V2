@@ -14,17 +14,35 @@
 #include "lwip/ip4_addr.h"
 #include "nvs_flash.h"
 
+// Include sdkconfig for Kconfig settings
+#include "sdkconfig.h"
+
 #include "argus_mqtt_broker.h"
-#include "argus_stepper.h"
+#include "argus_config.h"
+#include "argus_conversions.h"
+#include "argus_feedback.h"
+#include "argus_step_gen.h"
+#include "argus_trajectory.h"
+#include "argus_tests.h"
 
 // ================= APP CONFIG =================
-
 #define UNIT_NAME       "ArgusMotorTest"
 #define WIFI_HOST       "ArgusMotorTestNode"
-#define WIFI_SSID       "CherryHome1"
-#define WIFI_PASS       "Minstrel13"
+
+#ifdef CONFIG_ARGUS_WIFI_SSID
+#define WIFI_SSID       CONFIG_ARGUS_WIFI_SSID
+#else
+#define WIFI_SSID       ""
+#endif
+
+#ifdef CONFIG_ARGUS_WIFI_PASSWORD
+#define WIFI_PASS       CONFIG_ARGUS_WIFI_PASSWORD
+#else
+#define WIFI_PASS       ""
+#endif
+
 #define WIFI_AP_SSID    "ArgusMotorTest"
-#define WIFI_AP_PASS    "ArgusPump123"
+#define WIFI_AP_PASS    ""                  // Default empty/non-secret AP password
 #define WIFI_AP_CHANNEL 6U
 #define WIFI_AP_MAX_CONN 4U
 
@@ -43,28 +61,7 @@
 #define STATUS_ESTOP_TOPIC    MQTT_TOPIC_ROOT "/status/e_stop"
 #define STATUS_ONLINE_TOPIC   MQTT_TOPIC_ROOT "/status/online"
 
-// ================= STEPPER CONFIG =================
-
-#define ARGUS_STEP_GPIO GPIO_NUM_3
-#define ARGUS_DIR_GPIO  GPIO_NUM_4
-#define ARGUS_EN_GPIO   GPIO_NUM_5
-
-#define ARGUS_ENABLE_DELAY_MS              20U
-#define ARGUS_MAX_STEP_FREQ_HZ             250000U
-#define ARGUS_MOTOR_FULL_STEPS_PER_REV     200U
-#define ARGUS_MICROSTEPS                   32U
-#define ARGUS_GEARBOX_RATIO_NUM            10U
-#define ARGUS_GEARBOX_RATIO_DEN            1U
-#define ARGUS_MAX_MOTOR_RPM                2000U
-#define ARGUS_RAMP_INTERVAL_MS             20U
-#define ARGUS_RAMP_RPM_PER_SEC_MILLI       10000U
-
-#define MAX_OUTPUT_RPM_MILLI               72000
-#define DEFAULT_SPEED_PCT                  25
-
-// ================= GLOBALS =================
-
-static const char *TAG = "argus_motor_mqtt";
+static const char *TAG = "argus_app_main";
 
 #define WIFI_STA_CONNECTED_BIT BIT0
 #define WIFI_STA_CONNECT_WAIT_MS 10000
@@ -83,43 +80,35 @@ static void publish_status_topic(const char *topic, const char *payload, bool re
 
 static void publish_status(void)
 {
-    argus_stepper_status_t status = {0};
-    if (argus_stepper_get_status(&status) != ESP_OK) {
-        return;
-    }
-
-    char payload[32];
-
-    snprintf(payload, sizeof(payload), "%s", status.run_commanded ? "true" : "false");
-    publish_status_topic(STATUS_RUN_TOPIC, payload, true);
-
+    int32_t generated_rpm = argus_step_gen_get_generated_rpm_milli();
+    int64_t steps = argus_step_gen_get_step_count();
+    
+    char payload[64];
     snprintf(payload, sizeof(payload), "%ld.%03ld",
-             (long)(status.applied_rpm_milli / 1000),
-             (long)((status.applied_rpm_milli < 0 ? -status.applied_rpm_milli : status.applied_rpm_milli) % 1000));
+             (long)(generated_rpm / 1000),
+             (long)((generated_rpm < 0 ? -generated_rpm : generated_rpm) % 1000));
     publish_status_topic(STATUS_RPM_TOPIC, payload, true);
 
-    snprintf(payload, sizeof(payload), "%s", status.driver_locked ? "true" : "false");
-    publish_status_topic(STATUS_LOCKED_TOPIC, payload, true);
-
-    snprintf(payload, sizeof(payload), "%s", status.emergency_stopped ? "true" : "false");
-    publish_status_topic(STATUS_ESTOP_TOPIC, payload, true);
+    snprintf(payload, sizeof(payload), "%lld", (long long)steps);
+    publish_status_topic(STATUS_RUN_TOPIC, payload, true);
 }
 
 static void handle_speed_pct(int pct)
 {
-    if (pct < 0) {
-        pct = 0;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    const argus_config_t *cfg = argus_config_get();
+    int32_t range = cfg->max_output_milli_rpm - cfg->min_output_milli_rpm;
+    int32_t rpm_milli = cfg->min_output_milli_rpm + (pct * range) / 100;
+    
+    if (pct == 0) {
+        rpm_milli = 0;
     }
 
-    if (pct > 100) {
-        pct = 100;
-    }
-
-    int32_t rpm_milli = (pct * MAX_OUTPUT_RPM_MILLI) / 100;
-
-    esp_err_t err = argus_stepper_set_speed_rpm_milli(rpm_milli);
+    esp_err_t err = argus_trajectory_set_target_rpm_milli(rpm_milli, true);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Speed set: %d%% = %ld.%03ld RPM output",
+        ESP_LOGI(TAG, "Speed set via MQTT: %d%% = %ld.%03ld RPM output target",
                  pct,
                  (long)(rpm_milli / 1000),
                  (long)(rpm_milli % 1000));
@@ -134,7 +123,6 @@ static bool payload_is_true(const char *data)
     if (!data) {
         return false;
     }
-
     return strcmp(data, "true") == 0 ||
            strcmp(data, "1") == 0 ||
            strcmp(data, "on") == 0 ||
@@ -153,33 +141,27 @@ static void handle_mqtt_command(const char *topic, const char *data)
 
     if (strcmp(topic, CMD_RUN_TOPIC) == 0) {
         if (payload_is_true(data)) {
-            esp_err_t err = argus_stepper_start();
+            esp_err_t err = argus_step_gen_start();
             if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Motor RUN");
+                ESP_LOGI(TAG, "Step generator START commanded");
             } else {
-                ESP_LOGE(TAG, "Failed to start motor: %s", esp_err_to_name(err));
+                ESP_LOGE(TAG, "Failed to start: %s", esp_err_to_name(err));
             }
         } else {
-            esp_err_t err = argus_stepper_stop();
+            esp_err_t err = argus_trajectory_stop_normal();
             if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Motor soft stop via run=false");
+                ESP_LOGI(TAG, "Normal trajectory STOP commanded");
             } else {
-                ESP_LOGE(TAG, "Failed to stop motor: %s", esp_err_to_name(err));
+                ESP_LOGE(TAG, "Failed to stop: %s", esp_err_to_name(err));
             }
         }
-
         publish_status();
         return;
     }
 
     if (strcmp(topic, CMD_STOP_TOPIC) == 0) {
         if (payload_is_true(data)) {
-            esp_err_t err = argus_stepper_stop();
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Motor soft stop");
-            } else {
-                ESP_LOGE(TAG, "Failed to stop motor: %s", esp_err_to_name(err));
-            }
+            argus_trajectory_stop_normal();
             publish_status();
         }
         return;
@@ -187,36 +169,23 @@ static void handle_mqtt_command(const char *topic, const char *data)
 
     if (strcmp(topic, CMD_ESTOP_TOPIC) == 0) {
         if (payload_is_true(data)) {
-            esp_err_t err = argus_stepper_emergency_stop();
-            if (err == ESP_OK) {
-                ESP_LOGW(TAG, "Motor E-STOP");
-            } else {
-                ESP_LOGE(TAG, "Failed to emergency stop motor: %s", esp_err_to_name(err));
-            }
+            argus_trajectory_stop_immediate();
             publish_status();
+            ESP_LOGW(TAG, "Software E-STOP active (pulses stopped immediately). Note: MQTT is NOT a safety-rated path.");
         }
         return;
     }
 
     if (strcmp(topic, CMD_UNLOCK_TOPIC) == 0) {
-        if (payload_is_true(data)) {
-            esp_err_t err = argus_stepper_unlock();
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Motor unlocked");
-            } else {
-                ESP_LOGE(TAG, "Failed to unlock motor: %s", esp_err_to_name(err));
-            }
-            publish_status();
+        esp_err_t err = argus_trajectory_unlock();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Unlock requested. Driver disabled (GPIO 5 HIGH), shaft released.");
+        } else {
+            ESP_LOGE(TAG, "Failed to disable driver on unlock: %s", esp_err_to_name(err));
         }
+        publish_status();
         return;
     }
-
-    if (strstr(topic, "/cmd/") == NULL) {
-        ESP_LOGD(TAG, "Ignoring non-command MQTT topic: %s", topic);
-        return;
-    }
-
-    ESP_LOGW(TAG, "Unknown MQTT command topic: %s", topic);
 }
 
 // ================= WIFI =================
@@ -224,22 +193,15 @@ static void handle_mqtt_command(const char *topic, const char *data)
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
-
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI("WIFI", "Station started, connecting...");
-        esp_wifi_connect();
+        if (strlen(WIFI_SSID) > 0) {
+            esp_wifi_connect();
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(wifi_event_group, WIFI_STA_CONNECTED_BIT);
-        ESP_LOGW("WIFI", "Disconnected. Reconnecting...");
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START) {
-        ESP_LOGI("WIFI", "Access point started: ssid=%s ip=192.168.4.1", WIFI_AP_SSID);
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
-        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
-        ESP_LOGI("WIFI", "AP client connected: aid=%d", event->aid);
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
-        ESP_LOGI("WIFI", "AP client disconnected: aid=%d", event->aid);
+        if (strlen(WIFI_SSID) > 0) {
+            esp_wifi_connect();
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI("WIFI", "Station got IP: " IPSTR, IP2STR(&event->ip_info.ip));
@@ -268,6 +230,7 @@ static void wifi_start_access_point_and_station(void)
     IP4_ADDR(&ap_ip.ip, 192, 168, 4, 1);
     IP4_ADDR(&ap_ip.gw, 192, 168, 4, 1);
     IP4_ADDR(&ap_ip.netmask, 255, 255, 255, 0);
+    
     esp_err_t dhcp_err = esp_netif_dhcps_stop(ap_netif);
     if (dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
         ESP_ERROR_CHECK(dhcp_err);
@@ -278,8 +241,8 @@ static void wifi_start_access_point_and_station(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
 
     wifi_config_t wifi_config = {
         .sta = {
@@ -293,9 +256,6 @@ static void wifi_start_access_point_and_station(void)
             .channel = WIFI_AP_CHANNEL,
             .max_connection = WIFI_AP_MAX_CONN,
             .authmode = WIFI_AUTH_WPA2_PSK,
-            .pmf_cfg = {
-                .required = false,
-            },
         },
     };
 
@@ -305,7 +265,7 @@ static void wifi_start_access_point_and_station(void)
     strlcpy((char *)ap_config.ap.password, WIFI_AP_PASS, sizeof(ap_config.ap.password));
     ap_config.ap.ssid_len = strlen(WIFI_AP_SSID);
 
-    if (strlen(WIFI_AP_PASS) == 0U) {
+    if (strlen(WIFI_AP_PASS) == 0) {
         ap_config.ap.authmode = WIFI_AUTH_OPEN;
     }
 
@@ -315,19 +275,7 @@ static void wifi_start_access_point_and_station(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    EventBits_t bits = xEventGroupWaitBits(
-        wifi_event_group,
-        WIFI_STA_CONNECTED_BIT,
-        pdFALSE,
-        pdFALSE,
-        pdMS_TO_TICKS(WIFI_STA_CONNECT_WAIT_MS)
-    );
-
-    if (bits & WIFI_STA_CONNECTED_BIT) {
-        ESP_LOGI("WIFI", "Station connected to %s", WIFI_SSID);
-    } else {
-        ESP_LOGW("WIFI", "Station not connected yet; continuing with local AP broker access");
-    }
+    ESP_LOGI("WIFI", "Access Point and Station initialized.");
 }
 
 // ================= MQTT BROKER =================
@@ -349,8 +297,6 @@ static void mqtt_broker_start(void)
     ESP_ERROR_CHECK(argus_mqtt_broker_start(&broker_config));
     publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
     publish_status();
-
-    ESP_LOGI(TAG, "Local MQTT broker ready on port %u", MQTT_BROKER_PORT);
 }
 
 // ================= STATUS TASK =================
@@ -360,62 +306,220 @@ static void status_task(void *arg)
     (void)arg;
 
     while (true) {
-        argus_stepper_status_t status = {0};
+        int32_t target_rpm = argus_trajectory_get_target_rpm_milli();
+        int32_t applied_rpm = argus_trajectory_get_applied_rpm_milli();
+        int32_t generated_rpm = argus_step_gen_get_generated_rpm_milli();
+        int64_t steps = argus_step_gen_get_step_count();
+        bool driver_enabled = argus_step_gen_is_driver_enabled();
+        bool ramp_active = argus_trajectory_is_ramp_active();
+        argus_step_gen_error_t err = argus_step_gen_get_error();
 
-        if (argus_stepper_get_status(&status) == ESP_OK) {
-            ESP_LOGI(TAG,
-                     "cmd=%ld.%03ld rpm applied=%ld.%03ld rpm enabled=%d locked=%d run=%d active=%d e_stop=%d dir_fwd=%d pos_steps=%lu",
-                     (long)(status.commanded_rpm_milli / 1000),
-                     (long)((status.commanded_rpm_milli < 0 ? -status.commanded_rpm_milli : status.commanded_rpm_milli) % 1000),
-                     (long)(status.applied_rpm_milli / 1000),
-                     (long)((status.applied_rpm_milli < 0 ? -status.applied_rpm_milli : status.applied_rpm_milli) % 1000),
-                     status.enabled,
-                     status.driver_locked,
-                     status.run_commanded,
-                     status.motion_active,
-                     status.emergency_stopped,
-                     status.direction_forward,
-                     (unsigned long)status.position_steps);
+        const argus_config_t *cfg = argus_config_get();
+        uint64_t freq_mhz = argus_conversions_rpm_to_mhz(generated_rpm, cfg);
 
-            publish_status();
-        }
+        ESP_LOGI(TAG, "status: target_rpm_milli=%ld applied_rpm_milli=%ld generated_rpm_milli=%ld freq_hz=%ld.%03ld steps=%lld enabled=%d ramp=%d err=%d",
+                 (long)target_rpm, (long)applied_rpm, (long)generated_rpm,
+                 (long)(freq_mhz / 1000), (long)(freq_mhz % 1000),
+                 (long long)steps, driver_enabled, ramp_active, err);
 
+        publish_status();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+
+// ================= DIAGNOSTIC TEST MENU =================
+
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+static void argus_diagnostic_menu_task(void *pvParameters)
+{
+    (void)pvParameters;
+    vTaskDelay(pdMS_TO_TICKS(2000)); // allow startup logs to settle
+
+    bool print_menu = true;
+
+    while (true) {
+        if (print_menu) {
+            printf("\n");
+            printf("===================================================\n");
+            printf("=== Argus V2 Pump Controller Diagnostic Menu ===\n");
+            printf("===================================================\n");
+            printf("[1] Ramped 0.5 RPM equivalent (66.67 Hz)\n");
+            printf("[2] Ramped 0.6 RPM equivalent (80.00 Hz)\n");
+            printf("[3] Ramped 0.7 RPM equivalent (93.33 Hz)\n");
+            printf("[4] Ramped 1.0 RPM equivalent (133.33 Hz)\n");
+            printf("[5] Ramped 20.0 RPM equivalent (2.67 kHz)\n");
+            printf("[6] Ramped 72.0 RPM equivalent (9.60 kHz)\n");
+            printf("[7] Ramped 100.0 RPM equivalent (13.33 kHz)\n");
+            printf("[8] Ramped 200.0 RPM equivalent (26.67 kHz)\n");
+            printf("[9] Controlled 0.1 RPM incremental changes (5s sweep)\n");
+            printf("[0] Controlled ramp-like rate changes (sweep 0.5 to 72 RPM)\n");
+            printf("[s] Stop normal (ramps applied speed to zero)\n");
+            printf("[u] Unlock/Disable driver (releases holding torque)\n");
+            printf("[r] Diagnostic RECOVERY (stop, unlock, wait 500ms)\n");
+            printf("[d] Toggle STEP pin slowly (1 Hz) for multimeter/LED testing\n");
+            printf("[t] Re-run automated tests\n");
+            printf("=== GPIO 5 active-low ENABLE: LOW=Enabled/Holding, HIGH=Unlocked ===\n");
+            printf("Select option: ");
+            fflush(stdout);
+            print_menu = false;
+        }
+
+        int c = getchar();
+        if (c == EOF || c == '\n' || c == '\r') {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        printf("%c\n", c);
+        print_menu = true; // Reset flag to display menu after command executes
+
+        switch (c) {
+            case '1': {
+                printf("Testing Ramped 0.5 RPM equivalent (500 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(500, true);
+                break;
+            }
+            case '2': {
+                printf("Testing Ramped 0.6 RPM equivalent (600 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(600, true);
+                break;
+            }
+            case '3': {
+                printf("Testing Ramped 0.7 RPM equivalent (700 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(700, true);
+                break;
+            }
+            case '4': {
+                printf("Testing Ramped 1.0 RPM equivalent (1000 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(1000, true);
+                break;
+            }
+            case '5': {
+                printf("Testing Ramped 20.0 RPM equivalent (20000 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(20000, true);
+                break;
+            }
+            case '6': {
+                printf("Testing Ramped 72.0 RPM equivalent (72000 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(72000, true);
+                break;
+            }
+            case '7': {
+                printf("Testing Ramped 100.0 RPM equivalent (100000 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(100000, true);
+                break;
+            }
+            case '8': {
+                printf("Testing Ramped 200.0 RPM equivalent (200000 milli-RPM)\n");
+                argus_trajectory_set_target_rpm_milli(200000, true);
+                break;
+            }
+            case '9': {
+                printf("Starting 0.1 RPM incremental changes (sweep 0.5 to 1.5 RPM)...\n");
+                for (int32_t rpm = 500; rpm <= 1500; rpm += 100) {
+                    printf("  Setting target speed: %ld.%ld RPM (%ld milli-RPM), step count=%lld\n",
+                           (long)(rpm / 1000), (long)((rpm % 1000) / 100), (long)rpm,
+                           (long long)argus_step_gen_get_step_count());
+                    argus_trajectory_set_target_rpm_milli(rpm, true);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+                break;
+            }
+            case '0': {
+                printf("Starting controlled ramp-like changes (sweep 0.5 to 72 RPM and back)...\n");
+                for (int32_t rpm = 500; rpm <= 72000; rpm += 1000) {
+                    argus_trajectory_set_target_rpm_milli(rpm, true);
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                for (int32_t rpm = 72000; rpm >= 500; rpm -= 1000) {
+                    argus_trajectory_set_target_rpm_milli(rpm, true);
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                printf("Ramp sweep completed.\n");
+                break;
+            }
+            case 's': {
+                printf("Stopping normal (ramping applied speed to zero, retaining holding torque).\n");
+                argus_trajectory_stop_normal();
+                break;
+            }
+            case 'u': {
+                printf("Unlocking/Disabling motor driver (releasing holding torque).\n");
+                argus_trajectory_unlock();
+                break;
+            }
+            case 'r': {
+                printf("Triggering Diagnostic RECOVERY sequence...\n");
+                argus_trajectory_recover();
+                break;
+            }
+            case 'd': {
+                printf("Toggling STEP pin slowly (1 Hz) for 10 seconds. Check voltage on GPIO 3 (PLS)...\n");
+                argus_trajectory_stop_immediate();
+                argus_step_gen_enable_driver(); 
+                for (int i = 0; i < 10; i++) {
+                    printf("  STEP (GPIO 3) -> LOW (Active)\n");
+                    gpio_set_level(GPIO_NUM_3, 0);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    printf("  STEP (GPIO 3) -> HIGH (Inactive)\n");
+                    gpio_set_level(GPIO_NUM_3, 1);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
+                printf("Slow toggle test completed. STEP returned to Inactive (HIGH).\n");
+                gpio_set_level(GPIO_NUM_3, 1);
+                break;
+            }
+            case 't': {
+                printf("Re-running automated tests...\n");
+                argus_tests_run_all();
+                break;
+            }
+            default:
+                printf("Unknown option: '%c'\n", c);
+                break;
+        }
+    }
+}
+#endif
 
 // ================= APP MAIN =================
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Firmware build: %s %s", __DATE__, __TIME__);
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting...");
 
-    const argus_stepper_hw_config_t stepper_config = {
-        .step_gpio = ARGUS_STEP_GPIO,
-        .dir_gpio = ARGUS_DIR_GPIO,
-        .en_gpio = ARGUS_EN_GPIO,
-        .enable_pin_active_high = true,
-        .has_enable_pin = true,
-        .ledc_freq_hz = 1000U,
-        .max_step_freq_hz = ARGUS_MAX_STEP_FREQ_HZ,
-        .enable_delay_ms = ARGUS_ENABLE_DELAY_MS,
-        .motor_full_steps_per_rev = ARGUS_MOTOR_FULL_STEPS_PER_REV,
-        .microsteps = ARGUS_MICROSTEPS,
-        .gearbox_ratio_num = ARGUS_GEARBOX_RATIO_NUM,
-        .gearbox_ratio_den = ARGUS_GEARBOX_RATIO_DEN,
-        .max_motor_rpm = ARGUS_MAX_MOTOR_RPM,
-        .ramp_interval_ms = ARGUS_RAMP_INTERVAL_MS,
-        .ramp_rpm_per_sec_milli = ARGUS_RAMP_RPM_PER_SEC_MILLI,
-    };
+    // 1. Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(argus_stepper_init(&stepper_config));
+    // 2. Initialize V2 Configuration
+    ESP_ERROR_CHECK(argus_config_init());
+    const argus_config_t *cfg = argus_config_get();
 
-    handle_speed_pct(DEFAULT_SPEED_PCT);
+    // 3. Initialize V2 GPTimer Step Generator
+    ESP_ERROR_CHECK(argus_step_gen_init(cfg));
 
-    ESP_LOGI(TAG, "Motor initialized. It will NOT auto-start.");
+    // 4. Initialize V2 Trajectory Linear Ramp Engine
+    ESP_ERROR_CHECK(argus_trajectory_init(cfg));
 
+    // 5. Arm & Start Step Generator & Trajectory Periodic Task
+    ESP_ERROR_CHECK(argus_step_gen_arm());
+    ESP_ERROR_CHECK(argus_step_gen_start());
+    ESP_ERROR_CHECK(argus_trajectory_task_start());
+
+    // Start networking and broker under concurrent load
     wifi_start_access_point_and_station();
     mqtt_broker_start();
 
+    // Launch background tasks
     xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+    xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
+#endif
+
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 3A startup completed successfully.");
 }

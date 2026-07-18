@@ -1,0 +1,40 @@
+menu "Argus V2 Pump Controller Configuration"
+
+    config ARGUS_DIAGNOSTIC_MODE
+        bool "Enable Diagnostic Pulse-Test Mode"
+        default n
+        help
+            Enables automated unit testing and the interactive serial command menu on startup.
+            WARNING: Diagnostic mode is for testing only. Keep disabled in production.
+
+    config ARGUS_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            SSID of the target Wi-Fi network. Credentials must be provisioned or configured.
+
+    config ARGUS_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+        help
+            WPA2 Password of the target Wi-Fi network. Keep blank to configure via provisioning.
+
+    config ARGUS_CLIENT_NAME
+        string "Commissioned Client Name"
+        default "dev_client"
+        help
+            Client name prefix used in dynamic MQTT topic configurations.
+
+    config ARGUS_UNIT_ID
+        string "Commissioned Unit ID"
+        default "pump_v2_001"
+        help
+            Peristaltic pump unit identifier.
+
+    config ARGUS_DISPLACEMENT_GAL_PER_REV
+        string "Provisional Displacement (Gal/Rev)"
+        default "0.04"
+        help
+            Provisional displacement factor (unconfirmed commissioning configuration).
+
+endmenu

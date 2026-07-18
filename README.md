@@ -144,7 +144,7 @@ State flags:
 ## Build
 
 ```powershell
-cd C:\Argus_Dev\ArgusControl\arguscontrol-esp-idf
+cd c:\Users\bount\Dev\Argus\ArgusControl_PumpController-V2
 idf.py set-target esp32s3
 idf.py build
 idf.py -p COMx flash monitor
