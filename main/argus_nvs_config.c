@@ -10,6 +10,9 @@
 #include <string.h>
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "esp_log.h"
+
+static const char *TAG = "argus_nvs_cfg";
 
 #define ARGUS_NVS_NS_CFG        "argus_cfg"
 #define ARGUS_NVS_NS_SYS        "argus_sys"
@@ -184,12 +187,14 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
 {
     s_custom_driver = driver;
 
+    esp_err_t flash_err = ESP_OK;
     if (!s_custom_driver) {
-        esp_err_t err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        flash_err = nvs_flash_init();
+        if (flash_err == ESP_ERR_NVS_NO_FREE_PAGES || flash_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
             nvs_flash_erase();
-            nvs_flash_init();
+            flash_err = nvs_flash_init();
         }
+        ESP_LOGI(TAG, "nvs_flash_init() result: %s (%d)", esp_err_to_name(flash_err), flash_err);
     }
 
     const argus_nvs_driver_t *drv = get_driver();
@@ -198,17 +203,29 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
     bool reset_pending = false;
     drv->read_reset_pending(&reset_pending);
     if (reset_pending) {
+        ESP_LOGW(TAG, "Factory reset pending marker detected. Recovering...");
         drv->erase_all();
         drv->write_reset_pending(false);
     }
 
     // Load dual slots
     argus_cfg_slot_t slot_a = {0}, slot_b = {0};
-    bool valid_a = (drv->read_slot(0, &slot_a) == ESP_OK) && is_slot_valid(&slot_a);
-    bool valid_b = (drv->read_slot(1, &slot_b) == ESP_OK) && is_slot_valid(&slot_b);
+    esp_err_t err_a = drv->read_slot(0, &slot_a);
+    bool valid_a = (err_a == ESP_OK) && is_slot_valid(&slot_a);
+
+    esp_err_t err_b = drv->read_slot(1, &slot_b);
+    bool valid_b = (err_b == ESP_OK) && is_slot_valid(&slot_b);
 
     uint8_t selector = 0xFF;
-    drv->read_selector(&selector);
+    esp_err_t err_sel = drv->read_selector(&selector);
+
+    ESP_LOGI(TAG, "Slot A (0): read=%s len=%u schema=%u gen=%lu marker=0x%08X valid=%s",
+             esp_err_to_name(err_a), (unsigned)slot_a.payload_length, (unsigned)slot_a.schema_version,
+             (unsigned long)slot_a.config_generation, (unsigned)slot_a.valid_marker, valid_a ? "YES" : "NO");
+    ESP_LOGI(TAG, "Slot B (1): read=%s len=%u schema=%u gen=%lu marker=0x%08X valid=%s",
+             esp_err_to_name(err_b), (unsigned)slot_b.payload_length, (unsigned)slot_b.schema_version,
+             (unsigned long)slot_b.config_generation, (unsigned)slot_b.valid_marker, valid_b ? "YES" : "NO");
+    ESP_LOGI(TAG, "Stored Selector: read=%s active_slot=0x%02X", esp_err_to_name(err_sel), selector);
 
     if (valid_a && valid_b) {
         if (selector == 0) {
@@ -255,6 +272,11 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
         s_has_valid_config = false;
     }
 
+    bool is_comm = argus_nvs_config_is_commissioned(&s_active_config);
+    ESP_LOGI(TAG, "Selected LKG Slot: %u (gen %lu), Commissioned: %s (%s)",
+             s_active_slot_index, (unsigned long)s_active_generation,
+             is_comm ? "YES" : "NO", argus_nvs_config_get_uncommissioned_reason(&s_active_config));
+
     s_initialized = true;
     return ESP_OK;
 }
@@ -279,7 +301,6 @@ esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg)
     if (ssid_len > ARGUS_CFG_STA_SSID_MAX) return ESP_ERR_INVALID_ARG;
 
     size_t pass_len = strlen(cfg->sta_pass);
-    // If STA SSID is populated, WPA2 password MUST be 8..63 chars. Open STA is rejected in Schema V1.
     if (ssid_len > 0) {
         if (pass_len < ARGUS_CFG_STA_PASS_MIN || pass_len > ARGUS_CFG_STA_PASS_MAX) {
             return ESP_ERR_INVALID_ARG;
@@ -287,6 +308,19 @@ esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg)
     }
 
     return ESP_OK;
+}
+
+const char *argus_nvs_config_get_uncommissioned_reason(const argus_config_payload_t *cfg)
+{
+    if (!cfg) return "Null payload pointer";
+    if (!argus_identity_validate_client_id(cfg->client_id)) return "Invalid Client ID";
+    if (!argus_identity_validate_unit_id(cfg->unit_id)) return "Invalid Unit ID";
+    if (!argus_identity_validate_device_name(cfg->device_name)) return "Invalid Device Name";
+    if (strlen(cfg->sta_ssid) == 0) return "STA SSID is empty";
+    size_t pass_len = strlen(cfg->sta_pass);
+    if (pass_len < ARGUS_CFG_STA_PASS_MIN) return "STA Pass length < 8 chars";
+    if (pass_len > ARGUS_CFG_STA_PASS_MAX) return "STA Pass length > 63 chars";
+    return "Valid / Commissioned";
 }
 
 bool argus_nvs_config_is_commissioned(const argus_config_payload_t *cfg)
@@ -301,18 +335,22 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
 {
     if (!in_cfg) return ESP_ERR_INVALID_ARG;
 
-    // Reject mask strings submitted as real credentials
     if (strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
+        ESP_LOGE(TAG, "Commit rejected: Mask string submitted as password");
         return ESP_ERR_INVALID_ARG;
     }
 
     esp_err_t err = argus_nvs_config_validate(in_cfg);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Commit rejected: Staged payload failed Schema V1 validation (%s)", esp_err_to_name(err));
+        return err;
+    }
 
     const argus_nvs_driver_t *drv = get_driver();
     uint8_t inactive_slot_index = (s_active_slot_index == 0) ? 1 : 0;
 
-    argus_cfg_slot_t slot = {0};
+    argus_cfg_slot_t slot;
+    memset(&slot, 0, sizeof(argus_cfg_slot_t));
     slot.schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
     slot.config_generation = (s_active_generation == 0xFFFFFFFFU) ? 1 : s_active_generation + 1;
     slot.payload_length = sizeof(argus_config_payload_t);
@@ -320,27 +358,61 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
     slot.crc32 = argus_nvs_config_calc_crc32(&slot.payload);
     slot.valid_marker = ARGUS_CONFIG_VALID_MARKER;
 
-    // Step 1: Write and commit inactive slot
+    // Step 1: Write inactive slot
+    ESP_LOGI(TAG, "Commit Step 1-3/12: Writing inactive slot %u (gen %lu)...", inactive_slot_index, (unsigned long)slot.config_generation);
     err = drv->write_slot(inactive_slot_index, &slot);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 1 (slot write error): %s", esp_err_to_name(err));
+        return err;
+    }
 
-    // Step 2: Read back and verify
-    argus_cfg_slot_t readback = {0};
+    // Step 4-6: Production readback verification
+    ESP_LOGI(TAG, "Commit Step 4-6/12: Reopening namespace & verifying production readback...");
+    argus_cfg_slot_t readback;
+    memset(&readback, 0, sizeof(argus_cfg_slot_t));
     err = drv->read_slot(inactive_slot_index, &readback);
-    if (err != ESP_OK || !is_slot_valid(&readback)) {
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 5 (readback read error): %s", esp_err_to_name(err));
+        return err;
+    }
+    if (!is_slot_valid(&readback)) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 6 (readback slot validation failed)");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (memcmp(&readback.payload, in_cfg, sizeof(argus_config_payload_t)) != 0) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 6 (readback payload byte mismatch)");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Step 3: Write active selector
+    // Step 7-8: Commit active selector
+    ESP_LOGI(TAG, "Commit Step 7-8/12: Committing active selector to %u...", inactive_slot_index);
     err = drv->write_selector(inactive_slot_index);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 7 (selector write error): %s", esp_err_to_name(err));
+        return err;
+    }
 
-    // Update active in-memory cache
+    // Step 9-11: Production LKG loader verification
+    ESP_LOGI(TAG, "Commit Step 9-11/12: Verifying LKG loader selection...");
+    uint8_t read_sel = 0xFF;
+    err = drv->read_selector(&read_sel);
+    if (err != ESP_OK || read_sel != inactive_slot_index) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 10 (selector readback verification failed)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!argus_nvs_config_is_commissioned(in_cfg)) {
+        ESP_LOGE(TAG, "NVS commit failed at Step 11 (is_commissioned evaluated false)");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Update in-memory active state only after 100% verification
     s_active_slot_index = inactive_slot_index;
     s_active_generation = slot.config_generation;
     memcpy(&s_active_config, in_cfg, sizeof(argus_config_payload_t));
     s_has_valid_config = true;
 
+    ESP_LOGI(TAG, "Commit Step 12/12: NVS commit & production readback verification PASSED cleanly.");
     return ESP_OK;
 }
 

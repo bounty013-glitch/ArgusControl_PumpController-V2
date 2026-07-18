@@ -16,6 +16,7 @@ typedef struct {
 } argus_mqtt_broker_config_t;
 
 esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
+esp_err_t argus_mqtt_broker_stop(void);
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);
 
 /**

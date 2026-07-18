@@ -66,8 +66,7 @@ esp_err_t argus_config_init(void)
         nvs_close(nvs_handle);
         ESP_LOGI(TAG, "Loaded client identity from NVS: client=%s unit=%s", s_config.client_name, s_config.unit_id);
     } else {
-        ESP_LOGI(TAG, "NVS storage empty; using Kconfig configuration defaults: client=%s unit=%s", 
-                 s_config.client_name, s_config.unit_id);
+        ESP_LOGI(TAG, "Legacy motor-configuration namespace empty; using motor Kconfig defaults. (Phase 4A commissioning configuration remains valid)");
     }
 
     return ESP_OK;

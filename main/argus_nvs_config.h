@@ -26,7 +26,7 @@ extern "C" {
 #define ARGUS_CFG_STA_PASS_MIN          8
 #define ARGUS_CFG_STA_PASS_MAX          63
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     char client_id[ARGUS_CFG_CLIENT_ID_MAX + 1];   /**< 32 chars + null */
     char unit_id[ARGUS_CFG_UNIT_ID_MAX + 1];       /**< 32 chars + null */
     char device_name[ARGUS_CFG_DEV_NAME_MAX + 1];  /**< 64 chars + null */
@@ -34,7 +34,7 @@ typedef struct {
     char sta_pass[ARGUS_CFG_STA_PASS_MAX + 1];     /**< 63 chars + null */
 } argus_config_payload_t;
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint16_t schema_version;
     uint32_t config_generation;
     uint16_t payload_length;
@@ -83,6 +83,11 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg);
  * @return true if valid schema, non-empty identity, and valid STA WPA2 credentials (8..63 chars).
  */
 bool argus_nvs_config_is_commissioned(const argus_config_payload_t *cfg);
+
+/**
+ * @brief Get sanitized non-secret reason why a payload evaluated uncommissioned.
+ */
+const char *argus_nvs_config_get_uncommissioned_reason(const argus_config_payload_t *cfg);
 
 /**
  * @brief Validate staged configuration payload fields before write.

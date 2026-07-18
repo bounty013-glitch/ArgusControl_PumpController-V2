@@ -648,3 +648,34 @@ bool argus_mqtt_broker_is_running(void)
 {
     return s_broker.started;
 }
+
+esp_err_t argus_mqtt_broker_stop(void)
+{
+    if (!s_broker.started) return ESP_OK;
+
+    if (s_broker.lock != NULL) {
+        xSemaphoreTake(s_broker.lock, portMAX_DELAY);
+    }
+
+    if (s_broker.listen_sock >= 0) {
+        close(s_broker.listen_sock);
+        s_broker.listen_sock = -1;
+    }
+
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        if (s_broker.clients[i].in_use && s_broker.clients[i].sock >= 0) {
+            close(s_broker.clients[i].sock);
+            s_broker.clients[i].sock = -1;
+            s_broker.clients[i].in_use = false;
+        }
+    }
+
+    s_broker.started = false;
+
+    if (s_broker.lock != NULL) {
+        xSemaphoreGive(s_broker.lock);
+    }
+
+    ESP_LOGI(TAG, "local MQTT broker listener stopped cleanly");
+    return ESP_OK;
+}

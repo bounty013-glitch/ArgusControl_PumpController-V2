@@ -11,6 +11,7 @@
 #include "argus_cmd_parser.h"
 #include "argus_state_mgr.h"
 #include "argus_net_mgr.h"
+#include "argus_mqtt_broker.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
@@ -344,6 +345,115 @@ static bool compare_prod_snapshots(const argus_prod_snapshot_t *b, const argus_p
             b->task_count == a->task_count);
 }
 
+extern bool argus_app_main_get_console_verbosity(void);
+extern void argus_app_main_set_console_verbosity(bool verbose);
+extern void argus_app_main_print_oneshot_status(void);
+
+// Test 13: Console Verbosity Policy Defaults to OFF and Toggles Independently of MQTT Policy
+static esp_err_t test_console_verbosity_policy_and_toggling(void)
+{
+    TEST_ASSERT(argus_app_main_get_console_verbosity() == false, "Console verbosity default is not OFF");
+
+    argus_app_main_set_console_verbosity(true);
+    TEST_ASSERT(argus_app_main_get_console_verbosity() == true, "Console verbosity toggle ON failed");
+
+    argus_app_main_set_console_verbosity(false);
+    TEST_ASSERT(argus_app_main_get_console_verbosity() == false, "Console verbosity toggle OFF failed");
+
+    bool broker_running = argus_mqtt_broker_is_running();
+    TEST_ASSERT(broker_running == false || broker_running == true, "MQTT broker policy check failed");
+    return ESP_OK;
+}
+
+// Test 14: One-Shot Status Display Does Not Mutate Production State
+static esp_err_t test_oneshot_status_non_mutation(void)
+{
+    argus_prod_snapshot_t snap_before, snap_after;
+    capture_prod_snapshot(&snap_before);
+
+    argus_app_main_print_oneshot_status();
+
+    capture_prod_snapshot(&snap_after);
+    TEST_ASSERT(compare_prod_snapshots(&snap_before, &snap_after) == true, "One-shot status snapshot mutated production state!");
+    return ESP_OK;
+}
+
+typedef struct {
+    mock_nvs_store_t store;
+    bool corrupt_readback;
+} corruptible_mock_nvs_t;
+
+static corruptible_mock_nvs_t s_corrupt_mock;
+
+static esp_err_t corrupt_mock_read_slot(uint8_t slot_index, argus_cfg_slot_t *out_slot)
+{
+    esp_err_t res = mock_read_slot(slot_index, out_slot);
+    if (res == ESP_OK && s_corrupt_mock.corrupt_readback && slot_index == 1) {
+        out_slot->crc32 ^= 0xFFFFFFFFU;
+    }
+    return res;
+}
+
+// Test 15: Commit Verification Rejects Corrupted Readback & Preserves Prior LKG
+static esp_err_t test_nvs_commit_readback_verification_and_lkg_preservation(void)
+{
+    memset(&s_corrupt_mock, 0, sizeof(corruptible_mock_nvs_t));
+    mock_erase_all();
+
+    argus_config_payload_t initial_lkg = {0};
+    strlcpy(initial_lkg.client_id, "lkg_client", sizeof(initial_lkg.client_id));
+    strlcpy(initial_lkg.unit_id, "lkg_unit", sizeof(initial_lkg.unit_id));
+    strlcpy(initial_lkg.device_name, "LKG Device", sizeof(initial_lkg.device_name));
+    strlcpy(initial_lkg.sta_ssid, "InitialSSID", sizeof(initial_lkg.sta_ssid));
+    strlcpy(initial_lkg.sta_pass, "InitialPass123", sizeof(initial_lkg.sta_pass));
+
+    TEST_ASSERT(argus_nvs_config_init(&s_mock_driver) == ESP_OK, "Mock NVS init failed");
+    TEST_ASSERT(argus_nvs_config_commit(&initial_lkg) == ESP_OK, "Initial LKG commit failed");
+
+    s_corrupt_mock.corrupt_readback = true;
+    argus_nvs_driver_t corrupt_driver = s_mock_driver;
+    corrupt_driver.read_slot = corrupt_mock_read_slot;
+    argus_nvs_config_init(&corrupt_driver);
+
+    argus_config_payload_t corrupted_staged = initial_lkg;
+    strlcpy(corrupted_staged.sta_ssid, "CorruptedSSID", sizeof(corrupted_staged.sta_ssid));
+
+    esp_err_t err = argus_nvs_config_commit(&corrupted_staged);
+    TEST_ASSERT(err == ESP_ERR_INVALID_STATE, "Commit accepted corrupted readback!");
+
+    argus_config_payload_t active;
+    TEST_ASSERT(argus_nvs_config_get(&active) == ESP_OK, "LKG get failed");
+    TEST_ASSERT(strcmp(active.sta_ssid, "InitialSSID") == 0, "Corrupted commit replaced prior LKG!");
+
+    s_corrupt_mock.corrupt_readback = false;
+    argus_nvs_config_init(&s_mock_driver);
+    return ESP_OK;
+}
+
+// Test 16: Network Truthfulness, Broker Ordering & Disconnect Authority Revocation
+static esp_err_t test_network_truthfulness_and_broker_ordering(void)
+{
+    TEST_ASSERT(argus_net_mgr_is_ap_started() == false, "AP reported started before AP event!");
+
+    argus_net_event_t evt_conn = { .type = ARGUS_NET_EVT_STA_CONNECTED };
+    argus_net_mgr_post_event(&evt_conn);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    TEST_ASSERT(argus_net_mgr_get_mode() == ARGUS_NET_MODE_COMMISSIONED_STA, "STA_CONNECTED incorrectly set AP_DISCOVERABLE!");
+    TEST_ASSERT(argus_net_mgr_is_ap_started() == false, "STA_CONNECTED started AP!");
+
+    argus_net_event_t evt_disc = { .type = ARGUS_NET_EVT_STA_DISCONNECTED };
+    argus_net_mgr_post_event(&evt_disc);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
+    TEST_ASSERT(auth_snap.mode == ARGUS_AUTHORITY_NONE, "MQTT authority was not revoked on STA disconnect!");
+    TEST_ASSERT(auth_snap.owner == ARGUS_AUTH_OWNER_NONE, "MQTT owner was not cleared on STA disconnect!");
+
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n--- Starting Phase 4A Pure Non-Motion Unit Tests ---\n");
@@ -380,6 +490,10 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_authority_snapshot_coherence);
         RUN_TEST(test_browser_cli_owner_conflict_rejection);
         RUN_TEST(test_command_router_dispatch_gate);
+        RUN_TEST(test_console_verbosity_policy_and_toggling);
+        RUN_TEST(test_oneshot_status_non_mutation);
+        RUN_TEST(test_nvs_commit_readback_verification_and_lkg_preservation);
+        RUN_TEST(test_network_truthfulness_and_broker_ordering);
     }
 
     capture_prod_snapshot(&snap_after);

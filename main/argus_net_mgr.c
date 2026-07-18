@@ -7,6 +7,7 @@
 #include "argus_identity.h"
 #include "argus_nvs_config.h"
 #include "argus_authority_mgr.h"
+#include "argus_mqtt_broker.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -49,14 +50,57 @@ static bool validate_build_service_credential(void)
     return (len >= 8 && len <= 63);
 }
 
+static bool s_sta_started = false;
+static bool s_sta_connected = false;
+static bool s_sta_ip_acquired = false;
+static bool s_ap_started = false;
+static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
+
+void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb)
+{
+    s_broker_start_cb = cb;
+}
+
+bool argus_net_mgr_is_sta_started(void) { return s_sta_started; }
+bool argus_net_mgr_is_sta_connected(void) { return s_sta_connected; }
+bool argus_net_mgr_is_sta_ip_acquired(void) { return s_sta_ip_acquired; }
+bool argus_net_mgr_is_ap_started(void) { return s_ap_started; }
+
+const char *argus_net_mgr_get_wifi_driver_mode_name(void)
+{
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK) return "UNKNOWN";
+    switch (mode) {
+        case WIFI_MODE_NULL: return "NULL";
+        case WIFI_MODE_STA: return "STA";
+        case WIFI_MODE_AP: return "AP";
+        case WIFI_MODE_APSTA: return "APSTA";
+        default: return "UNKNOWN";
+    }
+}
+
 static void set_net_mode(argus_network_mode_t new_mode);
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT) {
-        if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (event_id == WIFI_EVENT_STA_START) {
+            s_sta_started = true;
+        } else if (event_id == WIFI_EVENT_STA_STOP) {
+            s_sta_started = false;
+            s_sta_connected = false;
+            s_sta_ip_acquired = false;
+        } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            s_sta_connected = true;
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            s_sta_connected = false;
+            s_sta_ip_acquired = false;
             argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED };
             argus_net_mgr_post_event(&evt);
+        } else if (event_id == WIFI_EVENT_AP_START) {
+            s_ap_started = true;
+        } else if (event_id == WIFI_EVENT_AP_STOP) {
+            s_ap_started = false;
         } else if (event_id == WIFI_EVENT_AP_STACONNECTED) {
             argus_net_event_t evt = { .type = ARGUS_NET_EVT_AP_CLIENT_CONNECTED };
             argus_net_mgr_post_event(&evt);
@@ -65,6 +109,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             argus_net_mgr_post_event(&evt);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        s_sta_ip_acquired = true;
         argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_CONNECTED };
         argus_net_mgr_post_event(&evt);
     }
@@ -90,21 +135,31 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
-                        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT);
+                        set_net_mode(ARGUS_NET_MODE_COMMISSIONED_STA);
+                        if (s_broker_start_cb != NULL) {
+                            s_broker_start_cb();
+                        }
+                        if (argus_mqtt_broker_is_running()) {
+                            argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT);
+                            ESP_LOGI(TAG, "STA IP acquired & MQTT broker running. Granted SUPERVISORY/MQTT authority.");
+                        } else {
+                            ESP_LOGE(TAG, "STA IP acquired, but MQTT broker failed to start. Supervisory authority withheld.");
+                        }
                     }
                     break;
 
                 case ARGUS_NET_EVT_STA_DISCONNECTED:
-                    // Incidental STA loss retains current trajectory (fail-operational)
+                    if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
+                        ESP_LOGW(TAG, "STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.");
+                        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+                        argus_mqtt_broker_stop();
+                    }
                     break;
 
                 case ARGUS_NET_EVT_AP_CLIENT_CONNECTED:
-                    // AP association alone does NOT grant motion authority
                     break;
 
                 case ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED:
-                    // Client disconnect in service mode keeps LOCAL_SERVICE
                     break;
 
                 default:
@@ -212,6 +267,12 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    if (s_net_mode != ARGUS_NET_MODE_COMMISSIONED_STA) {
+        ESP_LOGE(TAG, "Cannot enable AP discoverability: network mode must be COMMISSIONED_STA (current: %s)", argus_net_mgr_get_mode_name(s_net_mode));
+        xSemaphoreGive(s_net_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     argus_identity_t id;
     argus_identity_get(&id);
 
@@ -222,12 +283,24 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     ap_config.ap.max_connection = 1;
     ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-    set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    }
+    if (err == ESP_OK) {
+        err = esp_wifi_start();
+    }
+
+    if (err == ESP_OK) {
+        s_ap_started = true;
+        set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
+        ESP_LOGI(TAG, "Service AP discoverability enabled cleanly in APSTA mode.");
+    } else {
+        ESP_LOGE(TAG, "Failed to enable Service AP: %s. Preserving COMMISSIONED_STA.", esp_err_to_name(err));
+    }
     xSemaphoreGive(s_net_mutex);
 
-    return ESP_OK;
+    return err;
 }
 
 argus_network_mode_t argus_net_mgr_get_mode(void)

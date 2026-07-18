@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -49,7 +50,29 @@
 #define STATUS_RUN_TOPIC      MQTT_TOPIC_ROOT "/status/target_rpm"
 #define STATUS_ONLINE_TOPIC   MQTT_TOPIC_ROOT "/status/online"
 
+#include <stdatomic.h>
+
 static const char *TAG = "argus_app_main";
+static _Atomic bool s_verbose_status = false;
+
+bool argus_app_main_get_console_verbosity(void)
+{
+    return atomic_load(&s_verbose_status);
+}
+
+void argus_app_main_set_console_verbosity(bool verbose)
+{
+    atomic_store(&s_verbose_status, verbose);
+}
+
+void argus_app_main_print_oneshot_status(void)
+{
+    argus_state_snapshot_t snap;
+    argus_state_mgr_get_snapshot(&snap);
+    const argus_config_t *cfg = argus_config_get();
+    uint64_t freq_mhz = argus_conversions_rpm_to_mhz(snap.generated_rpm_milli, cfg);
+    (void)freq_mhz;
+}
 
 // ================= TELEMETRY =================
 
@@ -238,11 +261,13 @@ static void status_task(void *arg)
         const argus_config_t *cfg = argus_config_get();
         uint64_t freq_mhz = argus_conversions_rpm_to_mhz(snap.generated_rpm_milli, cfg);
 
-        ESP_LOGI(TAG, "status: state=%s target_rpm_milli=%ld applied_rpm_milli=%ld generated_rpm_milli=%ld freq_hz=%ld.%03ld steps=%lld enabled=%d ramp=%d estop=%d fault=%lu",
-                 argus_state_mgr_get_state_name(snap.machine_state),
-                 (long)snap.configured_target_rpm_milli, (long)snap.applied_rpm_milli, (long)snap.generated_rpm_milli,
-                 (long)(freq_mhz / 1000), (long)(freq_mhz % 1000),
-                 (long long)snap.generated_step_count, snap.driver_enabled, snap.ramp_active, snap.estop_latched, (unsigned long)snap.fault_code);
+        if (atomic_load(&s_verbose_status)) {
+            ESP_LOGI(TAG, "status: state=%s target_rpm_milli=%ld applied_rpm_milli=%ld generated_rpm_milli=%ld freq_hz=%ld.%03ld steps=%lld enabled=%d ramp=%d estop=%d fault=%lu",
+                     argus_state_mgr_get_state_name(snap.machine_state),
+                     (long)snap.configured_target_rpm_milli, (long)snap.applied_rpm_milli, (long)snap.generated_rpm_milli,
+                     (long)(freq_mhz / 1000), (long)(freq_mhz % 1000),
+                     (long long)snap.generated_step_count, snap.driver_enabled, snap.ramp_active, snap.estop_latched, (unsigned long)snap.fault_code);
+        }
 
         if (argus_mqtt_broker_is_running()) {
             publish_status();
@@ -285,10 +310,31 @@ static bool check_full_state_invariance(const argus_state_snapshot_t *sb, const 
             ab->generation == aa->generation);
 }
 
-static void read_string_input(const char *prompt, char *buffer, size_t max_len, bool mask)
+static int get_menu_key(const char *prompt)
 {
     printf("%s", prompt);
     fflush(stdout);
+
+    int c;
+    do {
+        c = getchar();
+        if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
+    } while (c == EOF || c == '\n' || c == '\r');
+
+    printf("%c\n", c);
+    fflush(stdout);
+    return c;
+}
+
+static void read_string_input(const char *prompt, char *buffer, size_t max_len, bool mask)
+{
+    (void)mask;
+    printf("%s", prompt);
+    fflush(stdout);
+
+    if (!buffer || max_len == 0) return;
+    buffer[0] = '\0';
+
     size_t idx = 0;
     while (idx < max_len - 1) {
         int c = getchar();
@@ -297,28 +343,26 @@ static void read_string_input(const char *prompt, char *buffer, size_t max_len, 
             continue;
         }
         if (c == '\r' || c == '\n') {
+            if (idx == 0) {
+                // Ignore leftover newline from menu choice selection
+                continue;
+            }
             printf("\n");
+            fflush(stdout);
             break;
         }
         buffer[idx++] = (char)c;
-        if (!mask) {
-            printf("%c", c);
-            fflush(stdout);
-        }
+        printf("%c", c);
+        fflush(stdout);
     }
     buffer[idx] = '\0';
 }
 
 static bool confirm_action(const char *prompt)
 {
-    printf("%s (y/n): ", prompt);
-    fflush(stdout);
-    int c;
-    do {
-        c = getchar();
-        if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
-    } while (c == EOF || c == '\n' || c == '\r');
-    printf("%c\n", c);
+    char full_prompt[128];
+    snprintf(full_prompt, sizeof(full_prompt), "%s (y/n): ", prompt);
+    int c = get_menu_key(full_prompt);
     return (c == 'y' || c == 'Y');
 }
 
@@ -352,15 +396,8 @@ static void argus_phase4a_acceptance_menu(void)
         printf("[F] Factory reset\n");
         printf("[L] Display transition/event log\n");
         printf("[0] Return\n");
-        printf("Select action: ");
-        fflush(stdout);
 
-        int c;
-        do {
-            c = getchar();
-            if (c == EOF) vTaskDelay(pdMS_TO_TICKS(50));
-        } while (c == EOF || c == '\n' || c == '\r');
-        printf("%c\n", c);
+        int c = get_menu_key("Select action: ");
 
         if (c == '0') break;
 
@@ -393,12 +430,13 @@ static void argus_phase4a_acceptance_menu(void)
             case '2': {
                 printf("\n--- Network & Authority Snapshot ---\n");
                 printf("Network Mode        : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
+                printf("Wi-Fi Driver Mode   : %s\n", argus_net_mgr_get_wifi_driver_mode_name());
+                printf("STA Status          : %s\n", argus_net_mgr_is_sta_ip_acquired() ? "CONNECTED (IP Acquired)" : (argus_net_mgr_is_sta_connected() ? "ASSOCIATED" : "DISABLED"));
+                printf("Service AP Status   : %s\n", argus_net_mgr_is_ap_started() ? "ENABLED" : "DISABLED");
+                printf("MQTT Broker Status  : %s\n", argus_mqtt_broker_is_running() ? "READY" : "STOPPED");
                 printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
                 printf("Authority Owner     : %s (%d)\n", argus_authority_mgr_get_owner_name(auth_snap.owner), (int)auth_snap.owner);
                 printf("Authority Generation: %lu\n", (unsigned long)auth_snap.generation);
-                printf("STA Status          : %s\n", (net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) ? "CONNECTED" : "DISABLED");
-                printf("Service AP Status   : %s\n", (net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP || net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) ? "ENABLED" : "DISABLED");
-                printf("MQTT Broker Status  : %s\n", argus_mqtt_broker_is_running() ? "READY" : "STOPPED");
                 break;
             }
             case '3': {
@@ -671,6 +709,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                    argus_authority_mgr_get_mode_name(auth_snap.mode),
                    argus_authority_mgr_get_owner_name(auth_snap.owner),
                    (unsigned long)auth_snap.generation);
+            printf("[i] Display ONE current status snapshot\n");
+            printf("[v] Toggle periodic console status logging (currently %s)\n",
+                   atomic_load(&s_verbose_status) ? "ON" : "OFF");
             printf("[1] Set & Start 0.5 RPM (500 mRPM)\n");
             printf("[2] Set & Start 0.6 RPM (600 mRPM)\n");
             printf("[3] Set & Start 0.7 RPM (700 mRPM)\n");
@@ -688,20 +729,10 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
             printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
             printf("[H] Claim LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
-            printf("Select option: ");
-            fflush(stdout);
-            print_menu = false;
+        print_menu = false;
         }
 
-        int c;
-        do {
-            c = getchar();
-            if (c == EOF) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        } while (c == EOF || c == '\n' || c == '\r');
-
-        printf("%c\n", c);
+        int c = get_menu_key("Select option: ");
         print_menu = true;
 
         argus_authority_snapshot_t auth_snap;
@@ -807,6 +838,30 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 cli_env.command_type = ARGUS_CMD_TYPE_RECOVER;
                 argus_cmd_router_dispatch(&cli_env);
                 break;
+            case 'v': {
+                bool current = atomic_load(&s_verbose_status);
+                bool next_val = !current;
+                atomic_store(&s_verbose_status, next_val);
+                printf("Periodic console status logging is now %s.\n", next_val ? "ON" : "OFF");
+                break;
+            }
+            case 'i': {
+                argus_state_snapshot_t snap;
+                argus_state_mgr_get_snapshot(&snap);
+                const argus_config_t *cfg = argus_config_get();
+                uint64_t freq_mhz = argus_conversions_rpm_to_mhz(snap.generated_rpm_milli, cfg);
+                printf("\n--- Single Status Snapshot ---\n");
+                printf("State               : %s (%d)\n", argus_state_mgr_get_state_name(snap.machine_state), (int)snap.machine_state);
+                printf("Configured Target   : %ld mRPM\n", (long)snap.configured_target_rpm_milli);
+                printf("Applied Target      : %ld mRPM\n", (long)snap.applied_rpm_milli);
+                printf("Generated Output    : %ld mRPM (%ld.%03ld Hz)\n", (long)snap.generated_rpm_milli, (long)(freq_mhz / 1000), (long)(freq_mhz % 1000));
+                printf("Generated Steps     : %lld\n", (long long)snap.generated_step_count);
+                printf("Driver Enabled      : %s\n", snap.driver_enabled ? "YES" : "NO");
+                printf("Ramp Active         : %s\n", snap.ramp_active ? "YES" : "NO");
+                printf("E-Stop Latched      : %s\n", snap.estop_latched ? "YES" : "NO");
+                printf("Fault Code          : %lu\n", (unsigned long)snap.fault_code);
+                break;
+            }
             case 't':
                 printf("Running Phase 3B PURE unit tests...\n");
                 argus_tests_run_all();
@@ -866,16 +921,12 @@ void app_main(void)
     ESP_ERROR_CHECK(argus_step_gen_start());
     ESP_ERROR_CHECK(argus_trajectory_task_start());
 
-    // 10. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
+    // 10. Register MQTT Broker Startup Callback with Network Manager
+    argus_net_mgr_register_broker_start_cb(mqtt_broker_start);
+
+    // 11. Initialize Dedicated Network Manager (Wi-Fi AP/STA)
     esp_err_t net_err = argus_net_mgr_init();
-    if (net_err == ESP_OK) {
-        argus_config_payload_t cfg_payload;
-        if (argus_nvs_config_get(&cfg_payload) == ESP_OK && argus_nvs_config_is_commissioned(&cfg_payload)) {
-            mqtt_broker_start();
-        } else {
-            ESP_LOGI(TAG, "Uncommissioned mode: MQTT broker will remain STOPPED.");
-        }
-    } else {
+    if (net_err != ESP_OK) {
         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
     }
 

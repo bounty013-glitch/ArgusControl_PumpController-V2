@@ -91,6 +91,15 @@ const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode);
  */
 esp_err_t argus_net_mgr_enable_ap_discoverable(void);
 
+typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
+void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
+
+bool argus_net_mgr_is_sta_started(void);
+bool argus_net_mgr_is_sta_connected(void);
+bool argus_net_mgr_is_sta_ip_acquired(void);
+bool argus_net_mgr_is_ap_started(void);
+const char *argus_net_mgr_get_wifi_driver_mode_name(void);
+
 #ifdef __cplusplus
 }
 #endif
