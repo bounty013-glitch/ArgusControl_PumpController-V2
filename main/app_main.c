@@ -905,7 +905,7 @@ void app_main(void)
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
     esp_err_t console_err = argus_console_transport_init();
     if (console_err == ESP_OK) {
-        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 4096, NULL, 5, NULL);
+        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 8192, NULL, 5, NULL);
     } else {
         ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
     }

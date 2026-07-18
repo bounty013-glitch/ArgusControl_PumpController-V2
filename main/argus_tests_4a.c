@@ -947,7 +947,7 @@ esp_err_t argus_tests_4a_run_all(void)
     int passed_executions = 0;
     int failed_executions = 0;
 
-    argus_prod_snapshot_t snap_before, snap_after;
+    static argus_prod_snapshot_t snap_before, snap_after;
     if (capture_prod_snapshot(&snap_before) != ESP_OK) {
         printf("Failed to capture initial snapshot\n");
         return ESP_FAIL;
