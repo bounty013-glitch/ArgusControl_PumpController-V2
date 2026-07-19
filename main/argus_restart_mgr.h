@@ -23,12 +23,14 @@ extern "C" {
  * @brief Step indices for restart transaction ordering verification.
  */
 typedef enum {
-    ARGUS_RESTART_STEP_PREFLIGHT_SAFETY    = 1,
-    ARGUS_RESTART_STEP_REVOKE_AUTHORITY    = 2,
-    ARGUS_RESTART_STEP_RESPONSE_GRACE      = 3,
-    ARGUS_RESTART_STEP_STOP_HTTP           = 4,
-    ARGUS_RESTART_STEP_FINAL_SAFETY        = 5,
-    ARGUS_RESTART_STEP_REBOOT              = 6,
+    ARGUS_RESTART_STEP_LOCK_DISPATCH       = 1,
+    ARGUS_RESTART_STEP_PREFLIGHT_SAFETY    = 2,
+    ARGUS_RESTART_STEP_REVOKE_AUTHORITY    = 3,
+    ARGUS_RESTART_STEP_UNLOCK_DISPATCH     = 4,
+    ARGUS_RESTART_STEP_RESPONSE_GRACE      = 5,
+    ARGUS_RESTART_STEP_STOP_HTTP           = 6,
+    ARGUS_RESTART_STEP_FINAL_SAFETY        = 7,
+    ARGUS_RESTART_STEP_REBOOT              = 8,
 } argus_restart_step_t;
 
 /**
@@ -40,6 +42,10 @@ typedef enum {
 typedef struct {
     /** Get current machine state snapshot (preflight + final check) */
     void (*get_state_snapshot)(void *ctx, argus_state_snapshot_t *out);
+    /** Acquire command dispatch gate — blocks new normal commands */
+    void (*lock_dispatch)(void *ctx);
+    /** Release command dispatch gate */
+    void (*unlock_dispatch)(void *ctx);
     /** Revoke authority to prevent new motion commands */
     esp_err_t (*revoke_authority)(void *ctx);
     /** Response grace delay — lets HTTP response drain */
@@ -57,9 +63,10 @@ typedef struct {
  */
 typedef struct {
     bool accepted;           /**< true = reboot was called (or would be on real hardware) */
-    int  failed_at_step;     /**< 0 = no failure, 1-5 = step that caused rejection */
-    bool authority_revoked;  /**< true if revoke_authority() was called */
-    bool http_stopped;       /**< true if stop_http() was called */
+    int  failed_at_step;     /**< 0 = no failure, nonzero = step that caused rejection */
+    bool dispatch_locked;    /**< true if lock_dispatch() was called */
+    bool authority_revoked;  /**< true if revoke_authority() returned ESP_OK */
+    bool http_stopped;       /**< true if stop_http() returned ESP_OK */
     bool reboot_called;      /**< true if reboot() was called */
 } argus_restart_result_t;
 
@@ -67,12 +74,14 @@ typedef struct {
  * @brief Execute a coordinated restart transaction.
  *
  * Transaction ordering:
- * 1. Preflight safety: reject if not HOLDING/UNLOCKED or E-stop/fault
- * 2. Revoke authority: prevent new motion commands
- * 3. Response grace delay: let HTTP response drain
- * 4. Stop HTTP server
- * 5. Final safety revalidation: abort if state changed during grace
- * 6. Reboot
+ * 1. Lock dispatch gate: block new normal commands
+ * 2. Preflight safety: reject if not HOLDING/UNLOCKED or E-stop/fault
+ * 3. Revoke authority: prevent new motion commands
+ * 4. Unlock dispatch gate: authority is now NONE, commands rejected by authority check
+ * 5. Response grace delay: let HTTP response drain
+ * 6. Stop HTTP server
+ * 7. Final safety revalidation: abort if state changed during grace
+ * 8. Reboot
  *
  * On any failure: stops at the failing step, does NOT reboot,
  * does NOT restore authority (fail closed).

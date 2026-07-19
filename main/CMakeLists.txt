@@ -18,6 +18,7 @@ idf_component_register(
         "argus_http_server.c"
         "argus_restart_mgr.c"
         "argus_config_overlay.c"
+        "argus_json.c"
         "argus_tests_4a.c"
         "argus_tests.c"
     INCLUDE_DIRS "."

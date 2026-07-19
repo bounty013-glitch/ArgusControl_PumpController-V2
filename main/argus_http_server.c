@@ -62,6 +62,7 @@
 #include "argus_mqtt_broker.h"
 #include "argus_nvs_config.h"
 #include "argus_config_overlay.h"
+#include "argus_json.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -190,39 +191,7 @@ static esp_err_t portal_set_password(const char *new_pw)
 
 
 
-/* ── JSON String Extraction Helpers ─────────────────────────── */
-
-/**
- * @brief Extract a JSON string value by key from a flat JSON body.
- *
- * Lightweight parser sufficient for single-level config payloads.
- * Handles backslash-escaped characters within the value string.
- */
-static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size)
-{
-    char search[80];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(json, search);
-    if (!p) return false;
-    p += strlen(search);
-    while (*p == ' ' || *p == ':') p++;
-    if (*p != '"') return false;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i < out_size - 1) {
-        if (*p == '\\' && *(p+1)) { p++; }
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return true;
-}
-
-static bool json_has_key(const char *json, const char *key)
-{
-    char search[80];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-    return strstr(json, search) != NULL;
-}
+/* ── JSON helpers now in argus_json.h/c ─────────────────────── */
 
 /* ── HTTP Basic Auth ───────────────────────────────────────── */
 
@@ -1146,9 +1115,17 @@ static esp_err_t config_save_handler(httpd_req_t *req)
 
     /* Parse scope */
     char scope_str[16] = {0};
-    if (!json_extract_string(body, "scope", scope_str, sizeof(scope_str))) {
+    argus_json_result_t jr = argus_json_extract_string(body, "scope", scope_str, sizeof(scope_str));
+    if (jr != ARGUS_JSON_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"error\":\"missing_scope\",\"message\":\"scope must be identity or wifi\"}");
+        const char *reason = (jr == ARGUS_JSON_KEY_ABSENT) ? "missing_scope" :
+                             (jr == ARGUS_JSON_OVERFLOW) ? "scope_too_long" :
+                             (jr == ARGUS_JSON_UNTERMINATED) ? "malformed_scope" :
+                             "invalid_scope_type";
+        char err_body[128];
+        snprintf(err_body, sizeof(err_body),
+                 "{\"error\":\"%s\",\"message\":\"scope must be identity or wifi\"}", reason);
+        httpd_resp_sendstr(req, err_body);
         return ESP_OK;
     }
     argus_config_scope_t scope = argus_config_overlay_parse_scope(scope_str);
@@ -1164,20 +1141,56 @@ static esp_err_t config_save_handler(httpd_req_t *req)
     memset(&fields, 0, sizeof(fields));
 
     if (scope == ARGUS_CONFIG_SCOPE_IDENTITY) {
-        fields.has_client_id = json_extract_string(body, "client_id",
+        /* Identity fields: all three must be valid strings if present.
+         * KEY_ABSENT is acceptable (overlay decides if all-three are required).
+         * OVERFLOW/UNTERMINATED/TYPE_MISMATCH are malformed input → 400. */
+        argus_json_result_t jr_cid = argus_json_extract_string(body, "client_id",
             fields.client_id, sizeof(fields.client_id));
-        fields.has_unit_id = json_extract_string(body, "unit_id",
+        argus_json_result_t jr_uid = argus_json_extract_string(body, "unit_id",
             fields.unit_id, sizeof(fields.unit_id));
-        fields.has_device_name = json_extract_string(body, "device_name",
+        argus_json_result_t jr_dn = argus_json_extract_string(body, "device_name",
             fields.device_name, sizeof(fields.device_name));
-    } else {
-        fields.has_sta_ssid = json_extract_string(body, "sta_ssid",
-            fields.sta_ssid, sizeof(fields.sta_ssid));
-        fields.has_sta_pass = json_has_key(body, "sta_pass");
-        if (fields.has_sta_pass) {
-            json_extract_string(body, "sta_pass",
-                fields.sta_pass, sizeof(fields.sta_pass));
+
+        if (jr_cid != ARGUS_JSON_OK && jr_cid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_client_id\"}");
+            return ESP_OK;
         }
+        if (jr_uid != ARGUS_JSON_OK && jr_uid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_unit_id\"}");
+            return ESP_OK;
+        }
+        if (jr_dn != ARGUS_JSON_OK && jr_dn != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_device_name\"}");
+            return ESP_OK;
+        }
+        fields.has_client_id = (jr_cid == ARGUS_JSON_OK);
+        fields.has_unit_id = (jr_uid == ARGUS_JSON_OK);
+        fields.has_device_name = (jr_dn == ARGUS_JSON_OK);
+    } else {
+        /* WiFi fields: SSID required, password optional.
+         * KEY_ABSENT for password → has_sta_pass = false (preserve existing).
+         * Any malformed result for a present field → 400. */
+        argus_json_result_t jr_ssid = argus_json_extract_string(body, "sta_ssid",
+            fields.sta_ssid, sizeof(fields.sta_ssid));
+        if (jr_ssid != ARGUS_JSON_OK && jr_ssid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_sta_ssid\"}");
+            return ESP_OK;
+        }
+        fields.has_sta_ssid = (jr_ssid == ARGUS_JSON_OK);
+
+        argus_json_result_t jr_pass = argus_json_extract_string(body, "sta_pass",
+            fields.sta_pass, sizeof(fields.sta_pass));
+        if (jr_pass != ARGUS_JSON_OK && jr_pass != ARGUS_JSON_KEY_ABSENT) {
+            /* Malformed password must NOT trigger the "preserve existing" path */
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_sta_pass\"}");
+            return ESP_OK;
+        }
+        fields.has_sta_pass = (jr_pass == ARGUS_JSON_OK);
     }
 
     /* Load current config from NVS as base for overlay */

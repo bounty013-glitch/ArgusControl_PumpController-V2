@@ -8,6 +8,7 @@
 
 #include "argus_restart_mgr.h"
 #include "argus_authority_mgr.h"
+#include "argus_cmd_router.h"
 #include "argus_http_server.h"
 #include "argus_state_mgr.h"
 #include "freertos/FreeRTOS.h"
@@ -36,53 +37,72 @@ argus_restart_result_t argus_restart_execute(const argus_restart_ops_t *ops)
     argus_restart_result_t result = {
         .accepted = false,
         .failed_at_step = 0,
+        .dispatch_locked = false,
         .authority_revoked = false,
         .http_stopped = false,
         .reboot_called = false,
     };
 
     if (!ops || !ops->get_state_snapshot || !ops->revoke_authority ||
-        !ops->response_grace_delay || !ops->stop_http || !ops->reboot) {
+        !ops->response_grace_delay || !ops->stop_http || !ops->reboot ||
+        !ops->lock_dispatch || !ops->unlock_dispatch) {
         result.failed_at_step = ARGUS_RESTART_STEP_PREFLIGHT_SAFETY;
         return result;
     }
 
-    /* Step 1: Preflight safety check */
+    /* Step 1: Lock dispatch gate — blocks new normal commands.
+     * In-flight commands complete before the lock is acquired. */
+    ops->lock_dispatch(ops->ctx);
+    result.dispatch_locked = true;
+
+    /* Step 2: Preflight safety check (under dispatch lock) */
     argus_state_snapshot_t snap;
     ops->get_state_snapshot(ops->ctx, &snap);
 
     if (!argus_restart_is_safe(&snap)) {
         result.failed_at_step = ARGUS_RESTART_STEP_PREFLIGHT_SAFETY;
+        ops->unlock_dispatch(ops->ctx);
+        result.dispatch_locked = false;
         return result;
     }
 
-    /* Step 2: Revoke authority — prevents new motion commands */
+    /* Step 3: Revoke authority (under dispatch lock) — prevents new motion commands */
     esp_err_t err = ops->revoke_authority(ops->ctx);
-    result.authority_revoked = true;
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        result.authority_revoked = true;
+    } else {
         result.failed_at_step = ARGUS_RESTART_STEP_REVOKE_AUTHORITY;
+        ops->unlock_dispatch(ops->ctx);
+        result.dispatch_locked = false;
         return result;
     }
 
-    /* Step 3: Response grace delay — lets HTTP response drain */
+    /* Step 4: Unlock dispatch gate.
+     * Authority is now NONE — normal commands are rejected by the authority
+     * check, not by the dispatch gate. E-stop retains its existing bypass. */
+    ops->unlock_dispatch(ops->ctx);
+    result.dispatch_locked = false;
+
+    /* Step 5: Response grace delay — lets HTTP response drain */
     ops->response_grace_delay(ops->ctx);
 
-    /* Step 4: Stop HTTP server */
+    /* Step 6: Stop HTTP server */
     err = ops->stop_http(ops->ctx);
-    result.http_stopped = true;
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        result.http_stopped = true;
+    } else {
         result.failed_at_step = ARGUS_RESTART_STEP_STOP_HTTP;
         return result;
     }
 
-    /* Step 5: Final safety revalidation */
+    /* Step 7: Final safety revalidation */
     ops->get_state_snapshot(ops->ctx, &snap);
     if (!argus_restart_is_safe(&snap)) {
         result.failed_at_step = ARGUS_RESTART_STEP_FINAL_SAFETY;
         return result;
     }
 
-    /* Step 6: Reboot — does not return on real hardware */
+    /* Step 8: Reboot — does not return on real hardware */
     result.accepted = true;
     result.reboot_called = true;
     ops->reboot(ops->ctx);
@@ -116,8 +136,21 @@ static esp_err_t prod_stop_http(void *ctx)
 {
     (void)ctx;
     ESP_LOGI(TAG, "Stopping HTTP server.");
-    argus_http_server_stop();
-    return ESP_OK;
+    return argus_http_server_stop();
+}
+
+static void prod_lock_dispatch(void *ctx)
+{
+    (void)ctx;
+    ESP_LOGI(TAG, "Locking command dispatch gate.");
+    argus_cmd_router_lock_dispatch();
+}
+
+static void prod_unlock_dispatch(void *ctx)
+{
+    (void)ctx;
+    ESP_LOGD(TAG, "Unlocking command dispatch gate.");
+    argus_cmd_router_unlock_dispatch();
 }
 
 static void prod_reboot(void *ctx)
@@ -131,6 +164,8 @@ void argus_restart_get_production_ops(argus_restart_ops_t *out_ops)
 {
     if (!out_ops) return;
     out_ops->get_state_snapshot = prod_get_state_snapshot;
+    out_ops->lock_dispatch = prod_lock_dispatch;
+    out_ops->unlock_dispatch = prod_unlock_dispatch;
     out_ops->revoke_authority = prod_revoke_authority;
     out_ops->response_grace_delay = prod_response_grace_delay;
     out_ops->stop_http = prod_stop_http;

@@ -333,10 +333,16 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
         if (valid_a) monotonic_flags |= slot_a.payload.provisioned_flags;
         if (valid_b) monotonic_flags |= slot_b.payload.provisioned_flags;
 
-        /* Read durable high-water marker */
+        /* Read durable high-water marker.
+         * ESP_ERR_NVS_NOT_FOUND → fresh device, hwm_flags = 0.
+         * Any other error → fail closed: treat as all bits locked (0xFF).
+         * This prevents a transient NVS read failure from reopening provisioning. */
         uint8_t hwm_flags = 0;
         if (driver->read_provisioned_hwm) {
-            driver->read_provisioned_hwm(driver->ctx, &hwm_flags);
+            esp_err_t hwm_err = driver->read_provisioned_hwm(driver->ctx, &hwm_flags);
+            if (hwm_err != ESP_OK && hwm_err != ESP_ERR_NVS_NOT_FOUND) {
+                hwm_flags = 0xFF;  /* Fail closed: lock all provisioning bits */
+            }
         }
         monotonic_flags |= hwm_flags;
 
@@ -403,6 +409,25 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* Write monotonic provisioning high-water marker BEFORE selector activation.
+     * If this fails, the selector is NOT updated — the old slot remains active.
+     * The new slot is written but orphaned; it will be overwritten on the next
+     * successful commit. This guarantees commit does not return ESP_OK unless
+     * the durable provisioning invariant is established.
+     *
+     * Power-loss recovery:
+     * - After slot write, before HWM: Old selector active. Orphaned new slot.
+     * - After HWM, before selector: Old slot active. HWM set → identity locked.
+     * - After selector: New slot active. HWM set. Fully committed. */
+    if ((in_cfg->provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) &&
+        core->driver->write_provisioned_hwm) {
+        esp_err_t hwm_err = core->driver->write_provisioned_hwm(
+            core->driver->ctx, in_cfg->provisioned_flags);
+        if (hwm_err != ESP_OK) {
+            return hwm_err;  /* Do NOT activate selector */
+        }
+    }
+
     esp_err_t sel_err = core->driver->write_selector(core->driver->ctx, inactive_slot);
     if (sel_err != ESP_OK) return sel_err;
 
@@ -416,13 +441,6 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     core->active_generation = next_gen;
     memcpy(&core->active_config, &final_slot.payload, sizeof(argus_config_payload_t));
     core->has_valid_config = true;
-
-    /* Write monotonic provisioning high-water marker if PROVISIONED flag is set.
-     * This survives dual-slot corruption and can only be cleared by factory reset. */
-    if ((in_cfg->provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) &&
-        core->driver->write_provisioned_hwm) {
-        core->driver->write_provisioned_hwm(core->driver->ctx, in_cfg->provisioned_flags);
-    }
 
     return ESP_OK;
 }

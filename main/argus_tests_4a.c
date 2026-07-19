@@ -16,6 +16,7 @@
 #include "argus_http_server.h"
 #include "argus_restart_mgr.h"
 #include "argus_config_overlay.h"
+#include "argus_json.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -46,6 +47,8 @@ typedef struct {
     bool reset_pending;
     uint8_t provisioned_hwm;
     bool has_provisioned_hwm;
+    esp_err_t hwm_read_error;    /* If non-zero, mock_read_provisioned_hwm returns this */
+    esp_err_t hwm_write_error;   /* If non-zero, mock_write_provisioned_hwm returns this */
 } mock_nvs_store_t;
 
 static esp_err_t mock_read_slot(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot)
@@ -122,9 +125,10 @@ static esp_err_t mock_read_provisioned_hwm(void *ctx, uint8_t *out_flags)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
+    if (store->hwm_read_error != ESP_OK) return store->hwm_read_error;
     if (!store->has_provisioned_hwm) {
         *out_flags = 0;
-        return ESP_OK;
+        return ESP_ERR_NVS_NOT_FOUND;
     }
     *out_flags = store->provisioned_hwm;
     return ESP_OK;
@@ -134,6 +138,7 @@ static esp_err_t mock_write_provisioned_hwm(void *ctx, uint8_t flags)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
+    if (store->hwm_write_error != ESP_OK) return store->hwm_write_error;
     store->provisioned_hwm = flags;
     store->has_provisioned_hwm = true;
     return ESP_OK;
@@ -1440,7 +1445,7 @@ static esp_err_t test_restart_safety_via_seam_safe(void)
 /* ── Restart transaction mock infrastructure ──────────────────────── */
 
 typedef struct {
-    int call_log[16];
+    int call_log[20];
     int call_count;
     argus_state_snapshot_t preflight_snap;
     argus_state_snapshot_t final_snap;
@@ -1448,6 +1453,8 @@ typedef struct {
     bool http_stop_fails;
     bool reboot_called;
     int snapshot_call_count;
+    int lock_count;
+    int unlock_count;
 } mock_restart_ctx_t;
 
 static void mock_restart_get_snapshot(void *ctx, argus_state_snapshot_t *out)
@@ -1491,6 +1498,20 @@ static void mock_restart_reboot(void *ctx)
     m->reboot_called = true;
 }
 
+static void mock_restart_lock_dispatch(void *ctx)
+{
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_LOCK_DISPATCH;
+    m->lock_count++;
+}
+
+static void mock_restart_unlock_dispatch(void *ctx)
+{
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_UNLOCK_DISPATCH;
+    m->unlock_count++;
+}
+
 static void init_mock_restart_ctx(mock_restart_ctx_t *m)
 {
     memset(m, 0, sizeof(*m));
@@ -1507,10 +1528,12 @@ static void make_mock_restart_ops(argus_restart_ops_t *ops, mock_restart_ctx_t *
     ops->response_grace_delay = mock_restart_grace;
     ops->stop_http = mock_restart_stop_http;
     ops->reboot = mock_restart_reboot;
+    ops->lock_dispatch = mock_restart_lock_dispatch;
+    ops->unlock_dispatch = mock_restart_unlock_dispatch;
     ops->ctx = ctx;
 }
 
-// Test 32: Restart transaction success — 6-step ordering verified
+// Test 32: Restart transaction success — 8-step ordering verified
 static esp_err_t test_restart_transaction_success(void)
 {
     mock_restart_ctx_t ctx;
@@ -1526,21 +1549,27 @@ static esp_err_t test_restart_transaction_success(void)
     TEST_ASSERT(result.authority_revoked, "Authority not revoked");
     TEST_ASSERT(result.http_stopped, "HTTP not stopped");
     TEST_ASSERT(result.reboot_called, "Reboot not called");
+    TEST_ASSERT(!result.dispatch_locked, "Dispatch lock leaked");
 
-    /* Verify exact 6-step call order */
-    TEST_ASSERT(ctx.call_count == 6, "Expected 6 calls in restart transaction");
+    /* Verify exact 8-step call order */
+    TEST_ASSERT(ctx.call_count == 8, "Expected 8 calls in restart transaction");
     static const int expected_order[] = {
+        ARGUS_RESTART_STEP_LOCK_DISPATCH,
         ARGUS_RESTART_STEP_PREFLIGHT_SAFETY,
         ARGUS_RESTART_STEP_REVOKE_AUTHORITY,
+        ARGUS_RESTART_STEP_UNLOCK_DISPATCH,
         ARGUS_RESTART_STEP_RESPONSE_GRACE,
         ARGUS_RESTART_STEP_STOP_HTTP,
         ARGUS_RESTART_STEP_FINAL_SAFETY,
         ARGUS_RESTART_STEP_REBOOT,
     };
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 8; i++) {
         TEST_ASSERT(ctx.call_log[i] == expected_order[i],
                     "Restart transaction call order mismatch");
     }
+    /* Dispatch gate was acquired and released exactly once */
+    TEST_ASSERT(ctx.lock_count == 1, "Lock not acquired exactly once");
+    TEST_ASSERT(ctx.unlock_count == 1, "Unlock not called exactly once");
     return ESP_OK;
 }
 
@@ -1625,7 +1654,7 @@ static esp_err_t test_schema_v1_migration(void)
     return ESP_OK;
 }
 
-// Test 35: Restart transaction preflight failure — RUNNING rejects, no side effects
+// Test 35: Restart transaction preflight failure — gate acquired and released, no side effects
 static esp_err_t test_restart_transaction_preflight_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -1643,10 +1672,14 @@ static esp_err_t test_restart_transaction_preflight_failure(void)
     TEST_ASSERT(!result.reboot_called, "Reboot called on preflight failure");
     TEST_ASSERT(!result.authority_revoked, "Authority revoked on preflight failure");
     TEST_ASSERT(!result.http_stopped, "HTTP stopped on preflight failure");
+    TEST_ASSERT(!result.dispatch_locked, "Dispatch lock leaked on preflight failure");
+    /* Gate was acquired and released even on failure */
+    TEST_ASSERT(ctx.lock_count == 1, "Lock not acquired on preflight failure");
+    TEST_ASSERT(ctx.unlock_count == 1, "Lock not released on preflight failure");
     return ESP_OK;
 }
 
-// Test 36: Restart transaction final safety failure — authority revoked (fail closed), no reboot
+// Test 36: Restart transaction final safety failure — authority revoked, no reboot, gate released
 static esp_err_t test_restart_transaction_final_safety_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -1663,8 +1696,9 @@ static esp_err_t test_restart_transaction_final_safety_failure(void)
     TEST_ASSERT(result.failed_at_step == ARGUS_RESTART_STEP_FINAL_SAFETY,
                 "failed_at_step not FINAL_SAFETY");
     TEST_ASSERT(!result.reboot_called, "Reboot called on final safety failure");
-    TEST_ASSERT(result.authority_revoked, "Authority NOT revoked on final safety failure (fail closed)");
-    TEST_ASSERT(result.http_stopped, "HTTP not stopped before final safety check");
+    TEST_ASSERT(result.authority_revoked, "Authority not revoked before final check");
+    TEST_ASSERT(result.http_stopped, "HTTP not stopped before final check");
+    TEST_ASSERT(!result.dispatch_locked, "Dispatch lock leaked");
     return ESP_OK;
 }
 
@@ -1960,6 +1994,309 @@ static esp_err_t test_commissioned_requires_wifi(void)
     return ESP_OK;
 }
 
+/* ── Item 1: HWM error handling tests ──────────────────────────────── */
+
+// Test 48: HWM read failure fails closed — identity locked
+static esp_err_t test_hwm_read_failure_fails_closed(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Simulate HWM read failure */
+    store.hwm_read_error = ESP_ERR_NVS_INVALID_HANDLE;
+
+    /* Write a valid unprovisioned config */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = 0;
+
+    /* Restore normal HWM read/write for commit to succeed */
+    store.hwm_read_error = ESP_OK;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Reinit with failing HWM read */
+    store.hwm_read_error = ESP_ERR_NVS_INVALID_HANDLE;
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
+
+    /* Fail-closed: identity must appear locked even though slot has flags=0 */
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_core_get(&core2, &readback) == ESP_OK, "Get failed");
+    TEST_ASSERT((readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
+                "HWM read failure did not fail closed");
+    return ESP_OK;
+}
+
+// Test 49: HWM write failure rejects commit
+static esp_err_t test_hwm_write_failure_rejects_commit(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+
+    /* Install a failing HWM write */
+    store.hwm_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+
+    /* Attempt to commit with PROVISIONED flag — should fail */
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    esp_err_t err = argus_nvs_core_commit(&core, &cfg);
+    TEST_ASSERT(err != ESP_OK, "Commit succeeded despite HWM write failure");
+
+    /* Unprovisioned commit should still succeed (no HWM write needed) */
+    store.hwm_write_error = ESP_OK;
+    cfg.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK,
+                "Unprovisioned commit failed after HWM failure");
+    return ESP_OK;
+}
+
+// Test 50: Factory reset clears HWM
+static esp_err_t test_factory_reset_clears_hwm(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+
+    /* Commit provisioned config */
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM not written");
+    TEST_ASSERT(store.provisioned_hwm != 0, "HWM is zero after provisioned commit");
+
+    /* Factory reset (erase_all) clears everything */
+    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
+
+    /* Reinit — should have no valid config and no HWM */
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
+    TEST_ASSERT(!core2.has_valid_config, "Config valid after factory reset");
+    TEST_ASSERT(!store.has_provisioned_hwm, "HWM survives factory reset");
+    return ESP_OK;
+}
+
+/* ── Item 2: Dispatch gate tests ───────────────────────────────────── */
+
+// Test 51: Restart authority-revocation failure — gate released, no reboot
+static esp_err_t test_restart_revoke_failure(void)
+{
+    mock_restart_ctx_t ctx;
+    init_mock_restart_ctx(&ctx);
+    ctx.revoke_fails = true;
+
+    argus_restart_ops_t ops;
+    make_mock_restart_ops(&ops, &ctx);
+
+    argus_restart_result_t result = argus_restart_execute(&ops);
+
+    TEST_ASSERT(!result.accepted, "Restart accepted despite revoke failure");
+    TEST_ASSERT(result.failed_at_step == ARGUS_RESTART_STEP_REVOKE_AUTHORITY,
+                "Wrong failure step");
+    TEST_ASSERT(!result.authority_revoked, "authority_revoked true despite failure");
+    TEST_ASSERT(!result.reboot_called, "Reboot called after revoke failure");
+    TEST_ASSERT(!result.dispatch_locked, "Dispatch lock leaked on revoke failure");
+    TEST_ASSERT(ctx.lock_count == 1, "Lock not acquired");
+    TEST_ASSERT(ctx.unlock_count == 1, "Lock not released on revoke failure");
+    return ESP_OK;
+}
+
+// Test 52: Restart HTTP-stop failure — authority revoked, gate released, no reboot
+static esp_err_t test_restart_http_stop_failure(void)
+{
+    mock_restart_ctx_t ctx;
+    init_mock_restart_ctx(&ctx);
+    ctx.http_stop_fails = true;
+
+    argus_restart_ops_t ops;
+    make_mock_restart_ops(&ops, &ctx);
+
+    argus_restart_result_t result = argus_restart_execute(&ops);
+
+    TEST_ASSERT(!result.accepted, "Restart accepted despite HTTP stop failure");
+    TEST_ASSERT(result.failed_at_step == ARGUS_RESTART_STEP_STOP_HTTP,
+                "Wrong failure step");
+    TEST_ASSERT(result.authority_revoked, "Authority not revoked before HTTP stop");
+    TEST_ASSERT(!result.http_stopped, "http_stopped true despite failure");
+    TEST_ASSERT(!result.reboot_called, "Reboot called after HTTP stop failure");
+    TEST_ASSERT(!result.dispatch_locked, "Dispatch lock leaked");
+    return ESP_OK;
+}
+
+// Test 53: Restart truthful result flags on every path
+static esp_err_t test_restart_truthful_flags(void)
+{
+    /* Path 1: Preflight failure — no ops except lock/unlock */
+    {
+        mock_restart_ctx_t ctx;
+        init_mock_restart_ctx(&ctx);
+        ctx.preflight_snap.machine_state = ARGUS_STATE_RUNNING;
+        argus_restart_ops_t ops;
+        make_mock_restart_ops(&ops, &ctx);
+        argus_restart_result_t r = argus_restart_execute(&ops);
+        TEST_ASSERT(!r.authority_revoked, "P1: authority_revoked");
+        TEST_ASSERT(!r.http_stopped, "P1: http_stopped");
+        TEST_ASSERT(!r.dispatch_locked, "P1: dispatch leaked");
+    }
+    /* Path 2: Revoke failure — authority NOT revoked */
+    {
+        mock_restart_ctx_t ctx;
+        init_mock_restart_ctx(&ctx);
+        ctx.revoke_fails = true;
+        argus_restart_ops_t ops;
+        make_mock_restart_ops(&ops, &ctx);
+        argus_restart_result_t r = argus_restart_execute(&ops);
+        TEST_ASSERT(!r.authority_revoked, "P2: authority_revoked");
+        TEST_ASSERT(!r.dispatch_locked, "P2: dispatch leaked");
+    }
+    /* Path 3: HTTP stop failure — authority revoked, HTTP NOT stopped */
+    {
+        mock_restart_ctx_t ctx;
+        init_mock_restart_ctx(&ctx);
+        ctx.http_stop_fails = true;
+        argus_restart_ops_t ops;
+        make_mock_restart_ops(&ops, &ctx);
+        argus_restart_result_t r = argus_restart_execute(&ops);
+        TEST_ASSERT(r.authority_revoked, "P3: not revoked");
+        TEST_ASSERT(!r.http_stopped, "P3: http_stopped");
+    }
+    /* Path 4: Success — all true */
+    {
+        mock_restart_ctx_t ctx;
+        init_mock_restart_ctx(&ctx);
+        argus_restart_ops_t ops;
+        make_mock_restart_ops(&ops, &ctx);
+        argus_restart_result_t r = argus_restart_execute(&ops);
+        TEST_ASSERT(r.authority_revoked, "P4: not revoked");
+        TEST_ASSERT(r.http_stopped, "P4: not stopped");
+        TEST_ASSERT(r.reboot_called, "P4: not rebooted");
+    }
+    return ESP_OK;
+}
+
+/* ── Item 3: JSON parser tests ─────────────────────────────────────── */
+
+// Test 54: JSON extract — valid string, absent key, empty string
+static esp_err_t test_json_extract_basic(void)
+{
+    const char *json = "{\"name\":\"Argus\",\"empty\":\"\",\"num\":42}";
+    char buf[32];
+
+    /* Valid extraction */
+    TEST_ASSERT(argus_json_extract_string(json, "name", buf, sizeof(buf)) == ARGUS_JSON_OK,
+                "Valid string not OK");
+    TEST_ASSERT(strcmp(buf, "Argus") == 0, "Value mismatch");
+
+    /* Absent key */
+    TEST_ASSERT(argus_json_extract_string(json, "missing", buf, sizeof(buf)) == ARGUS_JSON_KEY_ABSENT,
+                "Absent key not KEY_ABSENT");
+
+    /* Valid empty string */
+    TEST_ASSERT(argus_json_extract_string(json, "empty", buf, sizeof(buf)) == ARGUS_JSON_OK,
+                "Empty string not OK");
+    TEST_ASSERT(buf[0] == '\0', "Empty string not empty");
+
+    return ESP_OK;
+}
+
+// Test 55: JSON extract — type mismatch (non-string value)
+static esp_err_t test_json_extract_type_mismatch(void)
+{
+    const char *json = "{\"num\":42,\"bool\":true,\"arr\":[1,2]}";
+    char buf[32];
+
+    TEST_ASSERT(argus_json_extract_string(json, "num", buf, sizeof(buf)) == ARGUS_JSON_TYPE_MISMATCH,
+                "Numeric value not TYPE_MISMATCH");
+    TEST_ASSERT(argus_json_extract_string(json, "bool", buf, sizeof(buf)) == ARGUS_JSON_TYPE_MISMATCH,
+                "Boolean value not TYPE_MISMATCH");
+    TEST_ASSERT(argus_json_extract_string(json, "arr", buf, sizeof(buf)) == ARGUS_JSON_TYPE_MISMATCH,
+                "Array value not TYPE_MISMATCH");
+    return ESP_OK;
+}
+
+// Test 56: JSON extract — unterminated string
+static esp_err_t test_json_extract_unterminated(void)
+{
+    const char *json = "{\"name\":\"Argus}";
+    char buf[32];
+
+    TEST_ASSERT(argus_json_extract_string(json, "name", buf, sizeof(buf)) == ARGUS_JSON_UNTERMINATED,
+                "Unterminated string not detected");
+    return ESP_OK;
+}
+
+// Test 57: JSON extract — overflow (string too long for buffer)
+static esp_err_t test_json_extract_overflow(void)
+{
+    const char *json = "{\"name\":\"ThisIsAVeryLongString\"}";
+    char buf[8];  /* Too small for the value */
+
+    TEST_ASSERT(argus_json_extract_string(json, "name", buf, sizeof(buf)) == ARGUS_JSON_OVERFLOW,
+                "Overflow not detected");
+    return ESP_OK;
+}
+
+// Test 58: JSON extract — boundary length (exact fit)
+static esp_err_t test_json_extract_boundary_length(void)
+{
+    /* Buffer of 6 can hold 5 chars + NUL */
+    const char *json = "{\"k\":\"abcde\"}";
+    char buf[6];
+
+    TEST_ASSERT(argus_json_extract_string(json, "k", buf, sizeof(buf)) == ARGUS_JSON_OK,
+                "Boundary-length string rejected");
+    TEST_ASSERT(strcmp(buf, "abcde") == 0, "Boundary value mismatch");
+
+    /* One char too many */
+    const char *json2 = "{\"k\":\"abcdef\"}";
+    TEST_ASSERT(argus_json_extract_string(json2, "k", buf, sizeof(buf)) == ARGUS_JSON_OVERFLOW,
+                "Boundary+1 not OVERFLOW");
+    return ESP_OK;
+}
+
+// Test 59: JSON extract — escaped characters
+static esp_err_t test_json_extract_escaped(void)
+{
+    const char *json = "{\"msg\":\"hello\\\"world\"}";
+    char buf[32];
+
+    TEST_ASSERT(argus_json_extract_string(json, "msg", buf, sizeof(buf)) == ARGUS_JSON_OK,
+                "Escaped string not OK");
+    TEST_ASSERT(strcmp(buf, "hello\"world") == 0, "Escaped value mismatch");
+    return ESP_OK;
+}
+
+// Test 60: JSON has_key
+static esp_err_t test_json_has_key(void)
+{
+    const char *json = "{\"name\":\"v\",\"sta_pass\":\"pw\"}";
+
+    TEST_ASSERT(argus_json_has_key(json, "name"), "name not found");
+    TEST_ASSERT(argus_json_has_key(json, "sta_pass"), "sta_pass not found");
+    TEST_ASSERT(!argus_json_has_key(json, "missing"), "missing found");
+    TEST_ASSERT(!argus_json_has_key(NULL, "name"), "NULL json");
+    TEST_ASSERT(!argus_json_has_key(json, NULL), "NULL key");
+    return ESP_OK;
+}
+
 /* ── Test runner ───────────────────────────────────────────────────── */
 
 esp_err_t argus_tests_4a_run_all(void)
@@ -2041,6 +2378,20 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_overlay_unknown_scope_rejected);
         RUN_TEST(test_overlay_new_password_replaces);
         RUN_TEST(test_commissioned_requires_wifi);
+        /* Correctness closure tests */
+        RUN_TEST(test_hwm_read_failure_fails_closed);
+        RUN_TEST(test_hwm_write_failure_rejects_commit);
+        RUN_TEST(test_factory_reset_clears_hwm);
+        RUN_TEST(test_restart_revoke_failure);
+        RUN_TEST(test_restart_http_stop_failure);
+        RUN_TEST(test_restart_truthful_flags);
+        RUN_TEST(test_json_extract_basic);
+        RUN_TEST(test_json_extract_type_mismatch);
+        RUN_TEST(test_json_extract_unterminated);
+        RUN_TEST(test_json_extract_overflow);
+        RUN_TEST(test_json_extract_boundary_length);
+        RUN_TEST(test_json_extract_escaped);
+        RUN_TEST(test_json_has_key);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -2050,7 +2401,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
-    printf("  Distinct Test Cases : 47\n");
+    printf("  Distinct Test Cases : 60\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
