@@ -17,6 +17,7 @@
 #include "argus_restart_mgr.h"
 #include "argus_config_overlay.h"
 #include "argus_json.h"
+#include "argus_service_policy.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -2930,6 +2931,73 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
     return ESP_OK;
 }
 
+// Test 79: Service Policy Entry Eligible (AP_DISCOVERABLE / UNCOMMISSIONED_AP)
+static esp_err_t test_service_policy_entry_eligible(void)
+{
+    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_AP_DISCOVERABLE };
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE };
+    argus_net_event_t evt;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "AP_DISCOVERABLE rejected");
+    TEST_ASSERT(evt.type == ARGUS_NET_EVT_SERVICE_REQUEST, "Wrong event type");
+    TEST_ASSERT(evt.requested_owner == ARGUS_AUTH_OWNER_BROWSER, "Wrong event owner");
+
+    net.mode = ARGUS_NET_MODE_UNCOMMISSIONED_AP;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "UNCOMMISSIONED_AP rejected");
+    return ESP_OK;
+}
+
+// Test 80: Service Policy Entry Idempotent & Transition Check
+static esp_err_t test_service_policy_entry_idempotent(void)
+{
+    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_SERVICE_AP_ONLY };
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_LOCAL_SERVICE, .owner = ARGUS_AUTH_OWNER_BROWSER };
+    argus_net_event_t evt;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_IDEMPOTENT, "Not idempotent");
+
+    net.mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS, "Transition check failed");
+    return ESP_OK;
+}
+
+// Test 81: Service Policy Entry Rejected
+static esp_err_t test_service_policy_entry_rejected(void)
+{
+    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_COMMISSIONED_STA };
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE };
+    argus_net_event_t evt;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from STA allowed");
+
+    net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY; // But auth is not local service
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from SERVICE_AP_ONLY without BROWSER auth allowed");
+    return ESP_OK;
+}
+
+// Test 82: Service Policy Exit Eligible
+static esp_err_t test_service_policy_exit_eligible(void)
+{
+    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_SERVICE_AP_ONLY };
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_LOCAL_SERVICE, .owner = ARGUS_AUTH_OWNER_BROWSER };
+    argus_net_event_t evt;
+    TEST_ASSERT(argus_service_policy_evaluate_exit(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "Exit rejected");
+    TEST_ASSERT(evt.type == ARGUS_NET_EVT_SERVICE_EXIT, "Wrong event type");
+    TEST_ASSERT(evt.requested_owner == ARGUS_AUTH_OWNER_BROWSER, "Wrong event owner");
+    return ESP_OK;
+}
+
+// Test 83: Service Policy Exit Rejected
+static esp_err_t test_service_policy_exit_rejected(void)
+{
+    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_COMMISSIONED_STA };
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_LOCAL_SERVICE, .owner = ARGUS_AUTH_OWNER_BROWSER };
+    argus_net_event_t evt;
+    TEST_ASSERT(argus_service_policy_evaluate_exit(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Exit allowed from STA");
+
+    net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY;
+    auth.owner = ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI;
+    TEST_ASSERT(argus_service_policy_evaluate_exit(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_AUTHORITY, "Exit allowed for non-browser owner");
+    return ESP_OK;
+}
+
 /* ── Test runner ───────────────────────────────────────────────────── */
 
 
@@ -3046,6 +3114,11 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_reset_pend_missing_is_not_pending);
         RUN_TEST(test_reset_recovery_erase_failure_propagates);
         RUN_TEST(test_reset_recovery_clear_failure_propagates);
+        RUN_TEST(test_service_policy_entry_eligible);
+        RUN_TEST(test_service_policy_entry_idempotent);
+        RUN_TEST(test_service_policy_entry_rejected);
+        RUN_TEST(test_service_policy_exit_eligible);
+        RUN_TEST(test_service_policy_exit_rejected);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -3055,7 +3128,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
-    printf("  Distinct Test Cases : 78\n");
+    printf("  Distinct Test Cases : 83\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);

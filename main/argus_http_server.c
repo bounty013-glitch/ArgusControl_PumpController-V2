@@ -63,6 +63,7 @@
 #include "argus_nvs_config.h"
 #include "argus_config_overlay.h"
 #include "argus_json.h"
+#include "argus_service_policy.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -588,6 +589,7 @@ static const char PORTAL_HTML[] =
     "<h2>Identity</h2>"
     "<div id=\"identity-rows\">Loading...</div>"
     "</div>"
+    "<div id=\"service-controls\"></div>"
     "<button class=\"refresh-btn\" onclick=\"refresh()\">Refresh Status</button>"
     "<div style=\"display:flex;gap:8px;margin-top:8px\">"
     "<button class=\"refresh-btn\" style=\"background:#3f3f46\" onclick=\"window.location='/change-password'\">Change Password</button>"
@@ -634,6 +636,12 @@ static const char PORTAL_HTML[] =
     "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+"
     "row('Broker',d.broker.running?'Running':'Stopped',d.broker.running?'badge-ok':'badge-off')+"
     "row('Commissioned',d.commissioned?'Yes':'No',d.commissioned?'badge-ok':'badge-warn');"
+    "var sc=document.getElementById('service-controls');sc.innerHTML='';"
+    "if(n.mode==='AP_DISCOVERABLE'||n.mode==='UNCOMMISSIONED_AP'){"
+    "sc.innerHTML='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';"
+    "}else if(n.mode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){"
+    "sc.innerHTML='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';"
+    "}"
     "}).catch(e=>{document.getElementById('machine-rows').innerHTML="
     "row('Error','Failed to load status','badge-err')});"
     "fetch('/api/identity').then(r=>r.json()).then(d=>{"
@@ -652,6 +660,26 @@ static const char PORTAL_HTML[] =
     "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';"
     "}else{alert(d.message||d.error||'Restart failed')}"
     "}).catch(()=>alert('Connection lost'))}"
+    "function doSvcEnter(){"
+    "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;"
+    "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}"
+    "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='accepted'||d.status==='ok'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Service entry requested. You may temporarily lose connection. Please reconnect to the Service AP if necessary and wait for the dashboard to refresh.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Enter Local Service';}}"
+    "}).catch(()=>{"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Connection lost during transition. Reconnect to Service AP.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';"
+    "})}"
+    "function doSvcExit(){"
+    "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;"
+    "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}"
+    "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='accepted'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device is rebooting. Connection will be lost.</p></div>';"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Exit Local Service';}}"
+    "}).catch(()=>{"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device is rebooting. Connection lost as expected.</p></div>';"
+    "})}"
     "refresh();"
     "</script>"
     "</body>"
@@ -1331,31 +1359,31 @@ static esp_err_t service_enter_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    /* Check current state for idempotency */
+    /* Check current state for idempotency and policy */
     argus_net_snapshot_t net_snap;
-    esp_err_t snap_err = argus_net_mgr_get_snapshot(&net_snap);
-    if (snap_err != ESP_OK) {
+    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
         return ESP_OK;
     }
 
-    /* Idempotent: already in SERVICE_AP_ONLY with BROWSER authority */
-    if (net_snap.mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
-        argus_authority_snapshot_t auth_snap;
-        argus_authority_mgr_get_snapshot(&auth_snap);
-        if (auth_snap.mode == ARGUS_AUTHORITY_LOCAL_SERVICE &&
-            auth_snap.owner == ARGUS_AUTH_OWNER_BROWSER) {
-            httpd_resp_sendstr(req,
-                "{\"status\":\"ok\",\"mode\":\"SERVICE_AP_ONLY\","
-                "\"owner\":\"BROWSER\",\"note\":\"already_in_service\"}");
-            return ESP_OK;
-        }
-    }
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
 
-    /* Mode gate: must be AP_DISCOVERABLE or UNCOMMISSIONED_AP */
-    if (net_snap.mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
-        net_snap.mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
+    argus_net_event_t evt;
+    argus_svc_policy_result_t pol = argus_service_policy_evaluate_entry(&net_snap, &auth_snap, &evt);
+
+    if (pol == ARGUS_SVC_POLICY_IDEMPOTENT) {
+        httpd_resp_sendstr(req,
+            "{\"status\":\"ok\",\"mode\":\"SERVICE_AP_ONLY\","
+            "\"owner\":\"BROWSER\",\"note\":\"already_in_service\"}");
+        return ESP_OK;
+    } else if (pol == ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"code\":409,\"reason\":\"transition_in_progress\"}");
+        return ESP_OK;
+    } else if (pol == ARGUS_SVC_POLICY_REJECT_MODE) {
         httpd_resp_set_status(req, "409 Conflict");
         char resp[160];
         snprintf(resp, sizeof(resp),
@@ -1363,25 +1391,17 @@ static esp_err_t service_enter_handler(httpd_req_t *req)
             "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
         httpd_resp_sendstr(req, resp);
         return ESP_OK;
-    }
-
-    /* Transition in progress check */
-    if (net_snap.mode == ARGUS_NET_MODE_SERVICE_TRANSITION) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_sendstr(req,
-            "{\"status\":\"error\",\"code\":409,\"reason\":\"transition_in_progress\"}");
+    } else if (pol != ARGUS_SVC_POLICY_OK) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"policy_rejected\"}");
         return ESP_OK;
     }
 
     /* Post the event — net_mgr task will execute the transition.
-     * The HTTP server will be stopped during the transition (the handler
-     * has already returned by then, so no deadlock). The browser loses
-     * connection, then reconnects to the AP after the transition completes
-     * and the HTTP server restarts in SERVICE_AP_ONLY mode. */
-    argus_net_event_t evt = {
-        .type = ARGUS_NET_EVT_SERVICE_REQUEST,
-        .requested_owner = ARGUS_AUTH_OWNER_BROWSER
-    };
+     * The HTTP server is stopped during the transition. The design is safe
+     * from deadlock because the transition work occurs in a different task
+     * context (net_mgr) and the HTTP server lifecycle is not stopped
+     * recursively by its own handler. */
     esp_err_t post_err = argus_net_mgr_post_event(&evt);
     if (post_err != ESP_OK) {
         httpd_resp_set_status(req, "503 Service Unavailable");
@@ -1427,16 +1447,21 @@ static esp_err_t service_exit_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    /* Mode gate: must be SERVICE_AP_ONLY */
+    /* Check current state for policy */
     argus_net_snapshot_t net_snap;
-    esp_err_t snap_err = argus_net_mgr_get_snapshot(&net_snap);
-    if (snap_err != ESP_OK) {
+    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
         return ESP_OK;
     }
 
-    if (net_snap.mode != ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
+
+    argus_net_event_t evt;
+    argus_svc_policy_result_t pol = argus_service_policy_evaluate_exit(&net_snap, &auth_snap, &evt);
+
+    if (pol == ARGUS_SVC_POLICY_REJECT_MODE) {
         httpd_resp_set_status(req, "403 Forbidden");
         char resp[160];
         snprintf(resp, sizeof(resp),
@@ -1444,24 +1469,18 @@ static esp_err_t service_exit_handler(httpd_req_t *req)
             "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
         httpd_resp_sendstr(req, resp);
         return ESP_OK;
-    }
-
-    /* Authority gate: must be LOCAL_SERVICE/BROWSER */
-    argus_authority_snapshot_t auth_snap;
-    argus_authority_mgr_get_snapshot(&auth_snap);
-    if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE ||
-        auth_snap.owner != ARGUS_AUTH_OWNER_BROWSER) {
+    } else if (pol == ARGUS_SVC_POLICY_REJECT_AUTHORITY) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_sendstr(req,
             "{\"status\":\"error\",\"code\":403,\"reason\":\"not_browser_owner\"}");
         return ESP_OK;
+    } else if (pol != ARGUS_SVC_POLICY_OK) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"policy_rejected\"}");
+        return ESP_OK;
     }
 
     /* Post the event — net_mgr task will execute the exit + reboot */
-    argus_net_event_t evt = {
-        .type = ARGUS_NET_EVT_SERVICE_EXIT,
-        .requested_owner = ARGUS_AUTH_OWNER_BROWSER
-    };
     esp_err_t post_err = argus_net_mgr_post_event(&evt);
     if (post_err != ESP_OK) {
         httpd_resp_set_status(req, "503 Service Unavailable");
