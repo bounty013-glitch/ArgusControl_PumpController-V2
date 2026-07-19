@@ -11,6 +11,7 @@
 #include "argus_cmd_router.h"
 #include "argus_mqtt_broker.h"
 #include "argus_http_server.h"
+#include "argus_restart_mgr.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -178,52 +179,21 @@ static void net_mgr_task(void *pvParameters)
                     break;
 
                 case ARGUS_NET_EVT_RESTART_REQUEST: {
-                    ESP_LOGI(TAG, "Restart request received. Revalidating safety...");
+                    ESP_LOGI(TAG, "Restart request received. Executing restart transaction...");
 
-                    /* Phase 1: Revalidate machine state under safety check */
-                    argus_state_snapshot_t snap;
-                    argus_state_mgr_get_snapshot(&snap);
-                    bool is_safe = (!snap.estop_latched &&
-                                    snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-                                    snap.machine_state != ARGUS_STATE_FAULTED &&
-                                    (snap.machine_state == ARGUS_STATE_HOLDING ||
-                                     snap.machine_state == ARGUS_STATE_UNLOCKED));
-                    if (!is_safe) {
-                        ESP_LOGW(TAG, "Restart rejected: machine state %s is not safe for reboot",
-                                 argus_state_mgr_get_state_name(snap.machine_state));
-                        break;
+                    argus_restart_ops_t restart_ops;
+                    argus_restart_get_production_ops(&restart_ops);
+                    argus_restart_result_t result = argus_restart_execute(&restart_ops);
+
+                    if (!result.accepted) {
+                        ESP_LOGW(TAG, "Restart rejected at step %d. Authority %s. Fail closed.",
+                                 result.failed_at_step,
+                                 result.authority_revoked ? "revoked" : "intact");
+                        /* Fail closed: authority is NOT restored if revoked.
+                         * Operator must power-cycle manually. */
                     }
-
-                    /* Phase 2: Revoke authority to prevent new motion commands */
-                    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
-                    ESP_LOGI(TAG, "Authority revoked. Waiting 500ms for HTTP response grace...");
-
-                    /* Phase 3: HTTP response grace period — the handler already
-                     * returned its 200 response before posting this event */
-                    vTaskDelay(pdMS_TO_TICKS(500));
-
-                    /* Phase 4: Stop HTTP server */
-                    argus_http_server_stop();
-
-                    /* Phase 5: Final safety revalidation before reboot */
-                    argus_state_mgr_get_snapshot(&snap);
-                    is_safe = (!snap.estop_latched &&
-                               snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-                               snap.machine_state != ARGUS_STATE_FAULTED &&
-                               (snap.machine_state == ARGUS_STATE_HOLDING ||
-                                snap.machine_state == ARGUS_STATE_UNLOCKED));
-                    if (!is_safe) {
-                        ESP_LOGE(TAG, "Restart aborted: machine state changed to %s during grace",
-                                 argus_state_mgr_get_state_name(snap.machine_state));
-                        /* Fail closed: do NOT reboot, do NOT restore authority.
-                         * System is in an unknown transition state; operator
-                         * must power-cycle manually. */
-                        break;
-                    }
-
-                    ESP_LOGI(TAG, "Safety revalidated. Rebooting now.");
-                    esp_restart();
-                    break;  /* unreachable */
+                    /* If accepted, reboot() was called — unreachable */
+                    break;
                 }
 
                 default:

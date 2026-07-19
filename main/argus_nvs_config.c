@@ -20,6 +20,7 @@ static const char *TAG = "argus_nvs_cfg";
 #define ARGUS_NVS_KEY_SLOT_1    "slot_b"
 #define ARGUS_NVS_KEY_SELECTOR  "active_slot"
 #define ARGUS_NVS_KEY_RESET_PEND "rst_pend"
+#define ARGUS_NVS_KEY_PROV_HWM   "prov_hwm"   /* Monotonic provisioning high-water marker */
 
 static argus_config_payload_t s_active_config;
 static uint32_t s_active_generation = 0;
@@ -202,6 +203,38 @@ static esp_err_t prod_write_reset_pending(void *ctx, bool pending)
     return err;
 }
 
+static esp_err_t prod_read_provisioned_hwm(void *ctx, uint8_t *out_flags)
+{
+    (void)ctx;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        *out_flags = 0;
+        return (err == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : err;
+    }
+    err = nvs_get_u8(handle, ARGUS_NVS_KEY_PROV_HWM, out_flags);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *out_flags = 0;
+        return ESP_OK;
+    }
+    return err;
+}
+
+static esp_err_t prod_write_provisioned_hwm(void *ctx, uint8_t flags)
+{
+    (void)ctx;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, ARGUS_NVS_KEY_PROV_HWM, flags);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
 static esp_err_t prod_erase_all(void *ctx)
 {
     (void)ctx;
@@ -226,6 +259,8 @@ static const argus_nvs_driver_t s_prod_driver = {
     .write_selector = prod_write_selector,
     .read_reset_pending = prod_read_reset_pending,
     .write_reset_pending = prod_write_reset_pending,
+    .read_provisioned_hwm = prod_read_provisioned_hwm,
+    .write_provisioned_hwm = prod_write_provisioned_hwm,
     .erase_all = prod_erase_all,
     .ctx = NULL
 };
@@ -283,6 +318,29 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
         memset(&core->active_config, 0, sizeof(argus_config_payload_t));
         core->active_generation = 0;
         core->has_valid_config = false;
+    }
+
+    /* Monotonic provisioning enforcement.
+     * If ANY valid slot has PROVISIONED_IDENTITY set, the selected
+     * configuration must also have it set. This prevents LKG rollback
+     * from reopening portal identity provisioning.
+     *
+     * Additionally, read the provisioned high-water marker. This survives
+     * the case where the corrupted slot was the one with the lock flag.
+     * The HWM is written on every successful commit that sets PROVISIONED. */
+    if (core->has_valid_config) {
+        uint8_t monotonic_flags = 0;
+        if (valid_a) monotonic_flags |= slot_a.payload.provisioned_flags;
+        if (valid_b) monotonic_flags |= slot_b.payload.provisioned_flags;
+
+        /* Read durable high-water marker */
+        uint8_t hwm_flags = 0;
+        if (driver->read_provisioned_hwm) {
+            driver->read_provisioned_hwm(driver->ctx, &hwm_flags);
+        }
+        monotonic_flags |= hwm_flags;
+
+        core->active_config.provisioned_flags |= monotonic_flags;
     }
 
     core->initialized = true;
@@ -358,6 +416,14 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     core->active_generation = next_gen;
     memcpy(&core->active_config, &final_slot.payload, sizeof(argus_config_payload_t));
     core->has_valid_config = true;
+
+    /* Write monotonic provisioning high-water marker if PROVISIONED flag is set.
+     * This survives dual-slot corruption and can only be cleared by factory reset. */
+    if ((in_cfg->provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) &&
+        core->driver->write_provisioned_hwm) {
+        core->driver->write_provisioned_hwm(core->driver->ctx, in_cfg->provisioned_flags);
+    }
+
     return ESP_OK;
 }
 

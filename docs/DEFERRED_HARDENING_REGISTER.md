@@ -209,6 +209,55 @@
 
 ---
 
+## DHR-012 — App Partition Size Constraint
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-19 |
+| **System Area** | Flash Partition Layout |
+| **Phase Introduced** | Phase 4B.2 Final Corrections |
+| **Status** | OPEN |
+| **Target Phase** | Phase 4B.3 (before significant UI additions) |
+| **Operator Decision** | 2026-07-19 |
+
+**Limitation:** The default ESP-IDF single-app partition table allocates a ~1 MB app partition. With the Phase 4B.2 binary, headroom is approximately 9%. Future UI HTML/CSS/JS additions and feature modules will consume remaining space.
+
+**Impact:** Binary size must be monitored at each phase. If the app exceeds the partition, a custom partition table with a larger app partition must be created. The ESP32-S3 with 16 MB flash has ample total capacity — only the partition table allocation needs adjustment.
+
+**Action Required:**
+- Custom `partitions.csv` with increased app partition (recommend 2 MB minimum)
+- Monitor `idf.py size` output at each commit
+- Adjust NVS and factory partitions as needed to reclaim space
+
+**Decision criteria:** Implement custom partition table before any phase that adds significant embedded HTML/CSS/JS or new feature modules.
+
+---
+
+## DHR-013 — Deferred Privileged Identity Modification
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-19 |
+| **System Area** | Identity Provisioning / Portal |
+| **Phase Introduced** | Phase 4B.2 |
+| **Status** | OPEN |
+| **Target Phase** | Post-field-evaluation |
+| **Operator Decision** | 2026-07-19 |
+
+**Limitation:** Identity fields (client_id, unit_id, device_name) are locked after initial provisioning via the portal. There is currently no mechanism for password-protected identity modification or factory reset through the portal. Identity can only be changed via serial console NVS erase.
+
+**Rationale:** The operator deferred factory reset and privileged identity modification to gain field experience with the provisioning flow. The monotonic high-water marker (NVS `prov_hwm` key) ensures identity lock survives LKG rollback and slot corruption.
+
+**Deferred items:**
+- Factory reset mechanism (portal button, physical button hold, or CLI command)
+- Password-protected identity modification fields
+- Decision on whether factory reset should clear the portal password
+- Unified reset across all NVS namespaces (config, portal, system)
+
+**Decision criteria:** Extended field evaluation will determine the appropriate identity modification and reset user experience.
+
+---
+
 ## Register Maintenance
 
 This register is maintained as a living document. New entries are appended as limitations are identified. Entries are closed when the limitation is resolved, with closure evidence documenting the specific change, test, or audit that addressed the item.

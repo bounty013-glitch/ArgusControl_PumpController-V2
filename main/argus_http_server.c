@@ -61,6 +61,7 @@
 #include "argus_net_mgr.h"
 #include "argus_mqtt_broker.h"
 #include "argus_nvs_config.h"
+#include "argus_config_overlay.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -1128,7 +1129,7 @@ static esp_err_t config_save_handler(httpd_req_t *req)
     if (req->method != HTTP_POST) return send_method_not_allowed(req);
     set_api_headers(req);
 
-    /* Mode gate: config writes only in UNCOMMISSIONED_AP or SERVICE_AP_ONLY */
+    /* Mode gate: config writes only in provisioning/service/discoverable modes */
     argus_network_mode_t mode = argus_net_mgr_get_mode();
     if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP &&
         mode != ARGUS_NET_MODE_SERVICE_AP_ONLY &&
@@ -1143,12 +1144,40 @@ static esp_err_t config_save_handler(httpd_req_t *req)
     int body_len = recv_full_body(req, body, sizeof(body));
     if (body_len < 0) return ESP_OK;  /* error response already sent */
 
-    /* Extract scope */
-    char scope[16] = {0};
-    if (!json_extract_string(body, "scope", scope, sizeof(scope))) {
+    /* Parse scope */
+    char scope_str[16] = {0};
+    if (!json_extract_string(body, "scope", scope_str, sizeof(scope_str))) {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "{\"error\":\"missing_scope\",\"message\":\"scope must be identity or wifi\"}");
         return ESP_OK;
+    }
+    argus_config_scope_t scope = argus_config_overlay_parse_scope(scope_str);
+    if (scope == ARGUS_CONFIG_SCOPE_INVALID) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"invalid_scope\","
+            "\"message\":\"scope must be identity or wifi\"}");
+        return ESP_OK;
+    }
+
+    /* Parse fields from JSON body */
+    argus_config_fields_t fields;
+    memset(&fields, 0, sizeof(fields));
+
+    if (scope == ARGUS_CONFIG_SCOPE_IDENTITY) {
+        fields.has_client_id = json_extract_string(body, "client_id",
+            fields.client_id, sizeof(fields.client_id));
+        fields.has_unit_id = json_extract_string(body, "unit_id",
+            fields.unit_id, sizeof(fields.unit_id));
+        fields.has_device_name = json_extract_string(body, "device_name",
+            fields.device_name, sizeof(fields.device_name));
+    } else {
+        fields.has_sta_ssid = json_extract_string(body, "sta_ssid",
+            fields.sta_ssid, sizeof(fields.sta_ssid));
+        fields.has_sta_pass = json_has_key(body, "sta_pass");
+        if (fields.has_sta_pass) {
+            json_extract_string(body, "sta_pass",
+                fields.sta_pass, sizeof(fields.sta_pass));
+        }
     }
 
     /* Load current config from NVS as base for overlay */
@@ -1160,148 +1189,47 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (strcmp(scope, "identity") == 0) {
-        /* Identity scope: check provisioning lock */
-        if (cfg.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) {
-            httpd_resp_set_status(req, "403 Forbidden");
-            httpd_resp_sendstr(req, "{\"error\":\"identity_locked\","
-                "\"message\":\"Identity is locked after initial provisioning\"}");
-            return ESP_OK;
-        }
+    /* Apply overlay via production seam */
+    argus_config_payload_t out_cfg;
+    argus_config_overlay_result_t overlay = argus_config_overlay_apply(&cfg, scope, &fields, &out_cfg);
 
-        /* Extract all three identity fields — all required */
-        char new_client[ARGUS_CFG_CLIENT_ID_MAX + 1] = {0};
-        char new_unit[ARGUS_CFG_UNIT_ID_MAX + 1] = {0};
-        char new_name[ARGUS_CFG_DEV_NAME_MAX + 1] = {0};
+    /* Zero sensitive fields from the parsed input */
+    memset(fields.sta_pass, 0, sizeof(fields.sta_pass));
 
-        bool has_client = json_extract_string(body, "client_id", new_client, sizeof(new_client));
-        bool has_unit = json_extract_string(body, "unit_id", new_unit, sizeof(new_unit));
-        bool has_name = json_extract_string(body, "device_name", new_name, sizeof(new_name));
-
-        if (!has_client || !has_unit || !has_name) {
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_sendstr(req, "{\"error\":\"all_identity_fields_required\","
-                "\"message\":\"client_id, unit_id, and device_name are all required\"}");
-            return ESP_OK;
-        }
-
-        /* Per-field validation with specific error reporting */
-        char errbuf[256];
-        int eoff = 0;
-        bool valid = true;
-        eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff, "{\"error\":\"validation_failed\",\"fields\":{");
-
-        if (!argus_identity_validate_client_id(new_client)) {
-            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
-                "\"client_id\":\"1-32 alphanumeric, hyphens, or underscores\",");
-            valid = false;
-        }
-        if (!argus_identity_validate_unit_id(new_unit)) {
-            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
-                "\"unit_id\":\"1-32 alphanumeric, hyphens, or underscores\",");
-            valid = false;
-        }
-        if (!argus_identity_validate_device_name(new_name)) {
-            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
-                "\"device_name\":\"1-64 printable ASCII characters\",");
-            valid = false;
-        }
-
-        if (!valid) {
-            /* Remove trailing comma and close JSON */
-            if (eoff > 0 && errbuf[eoff - 1] == ',') eoff--;
-            snprintf(errbuf + eoff, sizeof(errbuf) - eoff, "}}");
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_sendstr(req, errbuf);
-            return ESP_OK;
-        }
-
-        /* Overlay identity fields (WiFi untouched) */
-        snprintf(cfg.client_id, sizeof(cfg.client_id), "%s", new_client);
-        snprintf(cfg.unit_id, sizeof(cfg.unit_id), "%s", new_unit);
-        snprintf(cfg.device_name, sizeof(cfg.device_name), "%s", new_name);
-
-        /* Set provisioned flag — will be CRC'd and committed atomically */
-        cfg.provisioned_flags |= ARGUS_CFG_PROVISIONED_IDENTITY;
-
-    } else if (strcmp(scope, "wifi") == 0) {
-        /* WiFi scope */
-        char new_ssid[ARGUS_CFG_STA_SSID_MAX + 1] = {0};
-        char new_pass[ARGUS_CFG_STA_PASS_MAX + 1] = {0};
-        bool has_ssid = json_extract_string(body, "sta_ssid", new_ssid, sizeof(new_ssid));
-
-        if (!has_ssid) {
-            httpd_resp_set_status(req, "400 Bad Request");
-            httpd_resp_sendstr(req, "{\"error\":\"sta_ssid_required\"}");
-            return ESP_OK;
-        }
-
-        if (strlen(new_ssid) == 0) {
-            /* Explicit WiFi clear — zero both SSID and password */
-            memset(cfg.sta_ssid, 0, sizeof(cfg.sta_ssid));
-            memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
-        } else {
-            /* Non-empty SSID — handle password */
-            bool has_pass = json_has_key(body, "sta_pass");
-            if (has_pass) {
-                json_extract_string(body, "sta_pass", new_pass, sizeof(new_pass));
-            }
-
-            /* Reject mask string */
-            if (has_pass && strcmp(new_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
-                httpd_resp_set_status(req, "400 Bad Request");
-                httpd_resp_sendstr(req, "{\"error\":\"mask_string_not_accepted\","
-                    "\"message\":\"Cannot use the mask string as a password\"}");
-                memset(new_pass, 0, sizeof(new_pass));
-                return ESP_OK;
-            }
-
-            if (has_pass && strlen(new_pass) > 0) {
-                /* New password supplied — replace */
-                snprintf(cfg.sta_pass, sizeof(cfg.sta_pass), "%s", new_pass);
-                memset(new_pass, 0, sizeof(new_pass));
-            } else if (strcmp(new_ssid, cfg.sta_ssid) == 0) {
-                /* Same SSID, no new password — preserve existing password */
-                /* (cfg.sta_pass already has the existing value from nvs_config_get) */
-            } else {
-                /* New SSID but no password — error */
-                httpd_resp_set_status(req, "400 Bad Request");
-                httpd_resp_sendstr(req, "{\"error\":\"password_required_for_new_ssid\","
-                    "\"message\":\"Password is required when changing the WiFi network\"}");
-                return ESP_OK;
-            }
-
-            snprintf(cfg.sta_ssid, sizeof(cfg.sta_ssid), "%s", new_ssid);
-        }
-
-    } else {
+    if (!overlay.success) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"error\":\"invalid_scope\","
-            "\"message\":\"scope must be identity or wifi\"}");
+        char errmsg[256];
+        snprintf(errmsg, sizeof(errmsg),
+            "{\"error\":\"%s\",\"message\":\"%s\"}",
+            overlay.error_code ? overlay.error_code : "overlay_failed",
+            overlay.error_message ? overlay.error_message : "Configuration overlay failed");
+        /* Identity lock is 403, not 400 */
+        if (overlay.error_code && strcmp(overlay.error_code, "identity_locked") == 0) {
+            httpd_resp_set_status(req, "403 Forbidden");
+        }
+        httpd_resp_sendstr(req, errmsg);
         return ESP_OK;
     }
 
     /* Validate the combined payload */
-    err = argus_nvs_config_validate(&cfg);
+    err = argus_nvs_config_validate(&out_cfg);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "{\"error\":\"validation_failed\","
             "\"message\":\"Combined configuration failed validation\"}");
-        memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+        memset(out_cfg.sta_pass, 0, sizeof(out_cfg.sta_pass));
         return ESP_OK;
     }
 
     /* Commit to NVS */
-    err = argus_nvs_config_commit(&cfg);
-    memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+    err = argus_nvs_config_commit(&out_cfg);
+    memset(out_cfg.sta_pass, 0, sizeof(out_cfg.sta_pass));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Config commit failed: %s (%d)", esp_err_to_name(err), err);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"commit_failed\"}");
         return ESP_OK;
     }
-
-
 
     httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
     return ESP_OK;

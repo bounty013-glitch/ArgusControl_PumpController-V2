@@ -14,6 +14,8 @@
 #include "argus_mqtt_broker.h"
 #include "argus_console_helpers.h"
 #include "argus_http_server.h"
+#include "argus_restart_mgr.h"
+#include "argus_config_overlay.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -42,6 +44,8 @@ typedef struct {
     bool has_slot_b;
     bool has_selector;
     bool reset_pending;
+    uint8_t provisioned_hwm;
+    bool has_provisioned_hwm;
 } mock_nvs_store_t;
 
 static esp_err_t mock_read_slot(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot)
@@ -114,6 +118,27 @@ static esp_err_t mock_erase_all(void *ctx)
     return ESP_OK;
 }
 
+static esp_err_t mock_read_provisioned_hwm(void *ctx, uint8_t *out_flags)
+{
+    mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
+    if (!store) return ESP_ERR_INVALID_ARG;
+    if (!store->has_provisioned_hwm) {
+        *out_flags = 0;
+        return ESP_OK;
+    }
+    *out_flags = store->provisioned_hwm;
+    return ESP_OK;
+}
+
+static esp_err_t mock_write_provisioned_hwm(void *ctx, uint8_t flags)
+{
+    mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
+    if (!store) return ESP_ERR_INVALID_ARG;
+    store->provisioned_hwm = flags;
+    store->has_provisioned_hwm = true;
+    return ESP_OK;
+}
+
 static void make_mock_driver(argus_nvs_driver_t *out_driver, mock_nvs_store_t *store)
 {
     out_driver->read_slot = mock_read_slot;
@@ -122,6 +147,8 @@ static void make_mock_driver(argus_nvs_driver_t *out_driver, mock_nvs_store_t *s
     out_driver->write_selector = mock_write_selector;
     out_driver->read_reset_pending = mock_read_reset_pending;
     out_driver->write_reset_pending = mock_write_reset_pending;
+    out_driver->read_provisioned_hwm = mock_read_provisioned_hwm;
+    out_driver->write_provisioned_hwm = mock_write_provisioned_hwm;
     out_driver->erase_all = mock_erase_all;
     out_driver->ctx = store;
 }
@@ -1004,7 +1031,7 @@ static esp_err_t test_http_json_escape_safety(void)
  */
 
 /* ═══════════════════════════════════════════════════════════════════
- * Phase 4B.2 Pure Tests (Tests 20–38)
+ * Phase 4B.2 Pure Tests (Tests 20–47)
  * ═══════════════════════════════════════════════════════════════════ */
 
 // Test 20: Identity-only config (no WiFi) passes validate + commit via core API
@@ -1316,8 +1343,8 @@ static esp_err_t test_provisioned_identity_immutable(void)
     return ESP_OK;
 }
 
-// Test 29: Storage errors fail closed — corrupted CRC treats identity as unprovisioned
-static esp_err_t test_storage_error_fails_closed(void)
+// Test 29: Monotonic provisioning LKG rollback — HWM prevents identity reopening
+static esp_err_t test_monotonic_provisioning_lkg_rollback(void)
 {
     mock_nvs_store_t store = {0};
     argus_nvs_driver_t driver;
@@ -1326,15 +1353,23 @@ static esp_err_t test_storage_error_fails_closed(void)
     argus_nvs_core_t core;
     TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
 
-    /* Write valid config with provisioned flag */
-    argus_config_payload_t cfg = {0};
-    snprintf(cfg.client_id, sizeof(cfg.client_id), "good_co");
-    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "good_unit");
-    snprintf(cfg.device_name, sizeof(cfg.device_name), "Good Pump");
-    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
-    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+    /* Step 1: Commit unprovisioned gen=1 */
+    argus_config_payload_t cfg1 = {0};
+    snprintf(cfg1.client_id, sizeof(cfg1.client_id), "old_co");
+    snprintf(cfg1.unit_id, sizeof(cfg1.unit_id), "old_unit");
+    snprintf(cfg1.device_name, sizeof(cfg1.device_name), "Old Pump");
+    cfg1.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg1) == ESP_OK, "Gen=1 commit failed");
 
-    /* Corrupt the stored CRC in the active slot */
+    /* Step 2: Commit provisioned gen=2 */
+    argus_config_payload_t cfg2 = {0};
+    snprintf(cfg2.client_id, sizeof(cfg2.client_id), "new_co");
+    snprintf(cfg2.unit_id, sizeof(cfg2.unit_id), "new_unit");
+    snprintf(cfg2.device_name, sizeof(cfg2.device_name), "New Pump");
+    cfg2.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg2) == ESP_OK, "Gen=2 commit failed");
+
+    /* Step 3: Corrupt the active (gen=2) slot CRC */
     uint8_t active = store.selector;
     if (active == 0) {
         store.slot_a.crc32 ^= 0xDEADBEEF;
@@ -1342,110 +1377,170 @@ static esp_err_t test_storage_error_fails_closed(void)
         store.slot_b.crc32 ^= 0xDEADBEEF;
     }
 
-    /* Reinit — corrupted slot should be rejected, has_valid_config = false */
+    /* Step 4: Reinit — should LKG from gen=1 */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
+    TEST_ASSERT(core2.has_valid_config, "LKG not recovered after active slot corruption");
 
+    /* Step 5: Readback — monotonic HWM prevents identity reopening */
     argus_config_payload_t readback;
-    esp_err_t get_err = argus_nvs_core_get(&core2, &readback);
-    /* We wrote to inactive slot, so both slots need to be considered.
-     * The active slot has corrupted CRC — fail closed means NOT_FOUND. */
-    if (get_err == ESP_OK) {
-        /* The OTHER slot was still valid (LKG) — this is the correct
-         * dual-slot behavior. The flag should still be set from LKG. */
-        TEST_ASSERT(core2.has_valid_config, "Valid config but has_valid_config false");
-    } else {
-        /* Both slots invalid — fail closed, identity is unprovisioned */
-        TEST_ASSERT(!core2.has_valid_config, "Invalid config but has_valid_config true");
+    TEST_ASSERT(argus_nvs_core_get(&core2, &readback) == ESP_OK, "LKG readback failed");
+    TEST_ASSERT((readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
+                "Monotonic HWM did not prevent identity reopening on LKG rollback");
+    TEST_ASSERT(strcmp(readback.client_id, "old_co") == 0,
+                "LKG data not from gen=1 (client_id mismatch)");
+    return ESP_OK;
+}
+
+// Test 30: Restart safety via production seam — unsafe states rejected
+static esp_err_t test_restart_safety_via_seam_unsafe(void)
+{
+    argus_machine_state_t unsafe_states[] = {
+        ARGUS_STATE_RUNNING,
+        ARGUS_STATE_EMERGENCY_STOPPED,
+        ARGUS_STATE_FAULTED,
+        ARGUS_STATE_STARTING,
+        ARGUS_STATE_DECELERATING,
+    };
+
+    for (int i = 0; i < (int)(sizeof(unsafe_states) / sizeof(unsafe_states[0])); i++) {
+        argus_state_snapshot_t snap = {0};
+        snap.machine_state = unsafe_states[i];
+        snap.estop_latched = (unsafe_states[i] == ARGUS_STATE_EMERGENCY_STOPPED);
+        TEST_ASSERT(!argus_restart_is_safe(&snap),
+                    "Unsafe state incorrectly classified as safe for restart");
     }
+
+    /* HOLDING with estop latched — estop overrides */
+    argus_state_snapshot_t holding_estop = {0};
+    holding_estop.machine_state = ARGUS_STATE_HOLDING;
+    holding_estop.estop_latched = true;
+    TEST_ASSERT(!argus_restart_is_safe(&holding_estop),
+                "HOLDING with E-stop latched classified as safe");
     return ESP_OK;
 }
 
-// Test 30: Restart safety check — active motion rejects restart
-static esp_err_t test_restart_safety_active_motion(void)
+// Test 31: Restart safety via production seam — safe states accepted
+static esp_err_t test_restart_safety_via_seam_safe(void)
 {
-    /* Construct a mock state snapshot with active motion */
-    argus_state_snapshot_t snap = {0};
-    snap.machine_state = ARGUS_STATE_RUNNING;
-    snap.estop_latched = false;
+    argus_state_snapshot_t holding = {0};
+    holding.machine_state = ARGUS_STATE_HOLDING;
+    holding.estop_latched = false;
+    TEST_ASSERT(argus_restart_is_safe(&holding),
+                "HOLDING state rejected by argus_restart_is_safe()");
 
-    bool is_safe = (!snap.estop_latched &&
-                    snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-                    snap.machine_state != ARGUS_STATE_FAULTED &&
-                    (snap.machine_state == ARGUS_STATE_HOLDING ||
-                     snap.machine_state == ARGUS_STATE_UNLOCKED));
-
-    TEST_ASSERT(!is_safe, "RUNNING state incorrectly classified as safe for restart");
+    argus_state_snapshot_t unlocked = {0};
+    unlocked.machine_state = ARGUS_STATE_UNLOCKED;
+    unlocked.estop_latched = false;
+    TEST_ASSERT(argus_restart_is_safe(&unlocked),
+                "UNLOCKED state rejected by argus_restart_is_safe()");
     return ESP_OK;
 }
 
-// Test 31: Restart safety check — E-stop/fault rejects restart
-static esp_err_t test_restart_safety_estop_fault(void)
+/* ── Restart transaction mock infrastructure ──────────────────────── */
+
+typedef struct {
+    int call_log[16];
+    int call_count;
+    argus_state_snapshot_t preflight_snap;
+    argus_state_snapshot_t final_snap;
+    bool revoke_fails;
+    bool http_stop_fails;
+    bool reboot_called;
+    int snapshot_call_count;
+} mock_restart_ctx_t;
+
+static void mock_restart_get_snapshot(void *ctx, argus_state_snapshot_t *out)
 {
-    /* E-stop latched */
-    argus_state_snapshot_t snap1 = {0};
-    snap1.machine_state = ARGUS_STATE_EMERGENCY_STOPPED;
-    snap1.estop_latched = true;
-
-    bool is_safe = (!snap1.estop_latched &&
-                    snap1.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-                    snap1.machine_state != ARGUS_STATE_FAULTED &&
-                    (snap1.machine_state == ARGUS_STATE_HOLDING ||
-                     snap1.machine_state == ARGUS_STATE_UNLOCKED));
-    TEST_ASSERT(!is_safe, "E-STOPPED state classified as safe for restart");
-
-    /* Faulted */
-    argus_state_snapshot_t snap2 = {0};
-    snap2.machine_state = ARGUS_STATE_FAULTED;
-    snap2.estop_latched = false;
-
-    is_safe = (!snap2.estop_latched &&
-               snap2.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-               snap2.machine_state != ARGUS_STATE_FAULTED &&
-               (snap2.machine_state == ARGUS_STATE_HOLDING ||
-                snap2.machine_state == ARGUS_STATE_UNLOCKED));
-    TEST_ASSERT(!is_safe, "FAULTED state classified as safe for restart");
-
-    /* E-stop latched but state says HOLDING — estop_latched overrides */
-    argus_state_snapshot_t snap3 = {0};
-    snap3.machine_state = ARGUS_STATE_HOLDING;
-    snap3.estop_latched = true;
-
-    is_safe = (!snap3.estop_latched &&
-               snap3.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-               snap3.machine_state != ARGUS_STATE_FAULTED &&
-               (snap3.machine_state == ARGUS_STATE_HOLDING ||
-                snap3.machine_state == ARGUS_STATE_UNLOCKED));
-    TEST_ASSERT(!is_safe, "HOLDING with E-stop latched classified as safe");
-    return ESP_OK;
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = (m->snapshot_call_count == 0)
+        ? ARGUS_RESTART_STEP_PREFLIGHT_SAFETY
+        : ARGUS_RESTART_STEP_FINAL_SAFETY;
+    if (m->snapshot_call_count == 0) {
+        *out = m->preflight_snap;
+    } else {
+        *out = m->final_snap;
+    }
+    m->snapshot_call_count++;
 }
 
-// Test 32: Restart safety check — safe state accepts restart
-static esp_err_t test_restart_safety_safe_state(void)
+static esp_err_t mock_restart_revoke(void *ctx)
 {
-    /* HOLDING — safe */
-    argus_state_snapshot_t snap1 = {0};
-    snap1.machine_state = ARGUS_STATE_HOLDING;
-    snap1.estop_latched = false;
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_REVOKE_AUTHORITY;
+    return m->revoke_fails ? ESP_ERR_INVALID_STATE : ESP_OK;
+}
 
-    bool is_safe = (!snap1.estop_latched &&
-                    snap1.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-                    snap1.machine_state != ARGUS_STATE_FAULTED &&
-                    (snap1.machine_state == ARGUS_STATE_HOLDING ||
-                     snap1.machine_state == ARGUS_STATE_UNLOCKED));
-    TEST_ASSERT(is_safe, "HOLDING state incorrectly rejected for restart");
+static void mock_restart_grace(void *ctx)
+{
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_RESPONSE_GRACE;
+}
 
-    /* UNLOCKED — safe */
-    argus_state_snapshot_t snap2 = {0};
-    snap2.machine_state = ARGUS_STATE_UNLOCKED;
-    snap2.estop_latched = false;
+static esp_err_t mock_restart_stop_http(void *ctx)
+{
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_STOP_HTTP;
+    return m->http_stop_fails ? ESP_ERR_INVALID_STATE : ESP_OK;
+}
 
-    is_safe = (!snap2.estop_latched &&
-               snap2.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
-               snap2.machine_state != ARGUS_STATE_FAULTED &&
-               (snap2.machine_state == ARGUS_STATE_HOLDING ||
-                snap2.machine_state == ARGUS_STATE_UNLOCKED));
-    TEST_ASSERT(is_safe, "UNLOCKED state incorrectly rejected for restart");
+static void mock_restart_reboot(void *ctx)
+{
+    mock_restart_ctx_t *m = (mock_restart_ctx_t *)ctx;
+    m->call_log[m->call_count++] = ARGUS_RESTART_STEP_REBOOT;
+    m->reboot_called = true;
+}
+
+static void init_mock_restart_ctx(mock_restart_ctx_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->preflight_snap.machine_state = ARGUS_STATE_HOLDING;
+    m->preflight_snap.estop_latched = false;
+    m->final_snap.machine_state = ARGUS_STATE_HOLDING;
+    m->final_snap.estop_latched = false;
+}
+
+static void make_mock_restart_ops(argus_restart_ops_t *ops, mock_restart_ctx_t *ctx)
+{
+    ops->get_state_snapshot = mock_restart_get_snapshot;
+    ops->revoke_authority = mock_restart_revoke;
+    ops->response_grace_delay = mock_restart_grace;
+    ops->stop_http = mock_restart_stop_http;
+    ops->reboot = mock_restart_reboot;
+    ops->ctx = ctx;
+}
+
+// Test 32: Restart transaction success — 6-step ordering verified
+static esp_err_t test_restart_transaction_success(void)
+{
+    mock_restart_ctx_t ctx;
+    init_mock_restart_ctx(&ctx);
+
+    argus_restart_ops_t ops;
+    make_mock_restart_ops(&ops, &ctx);
+
+    argus_restart_result_t result = argus_restart_execute(&ops);
+
+    TEST_ASSERT(result.accepted, "Restart transaction not accepted");
+    TEST_ASSERT(result.failed_at_step == 0, "Unexpected failure step");
+    TEST_ASSERT(result.authority_revoked, "Authority not revoked");
+    TEST_ASSERT(result.http_stopped, "HTTP not stopped");
+    TEST_ASSERT(result.reboot_called, "Reboot not called");
+
+    /* Verify exact 6-step call order */
+    TEST_ASSERT(ctx.call_count == 6, "Expected 6 calls in restart transaction");
+    static const int expected_order[] = {
+        ARGUS_RESTART_STEP_PREFLIGHT_SAFETY,
+        ARGUS_RESTART_STEP_REVOKE_AUTHORITY,
+        ARGUS_RESTART_STEP_RESPONSE_GRACE,
+        ARGUS_RESTART_STEP_STOP_HTTP,
+        ARGUS_RESTART_STEP_FINAL_SAFETY,
+        ARGUS_RESTART_STEP_REBOOT,
+    };
+    for (int i = 0; i < 6; i++) {
+        TEST_ASSERT(ctx.call_log[i] == expected_order[i],
+                    "Restart transaction call order mismatch");
+    }
     return ESP_OK;
 }
 
@@ -1530,80 +1625,319 @@ static esp_err_t test_schema_v1_migration(void)
     return ESP_OK;
 }
 
-// Test 35: AP visibility does not grant motor authority (lifecycle contract)
-static esp_err_t test_ap_visibility_no_motor_authority(void)
+// Test 35: Restart transaction preflight failure — RUNNING rejects, no side effects
+static esp_err_t test_restart_transaction_preflight_failure(void)
 {
-    /* In AP_DISCOVERABLE mode, authority must be NONE/NONE until MQTT connects.
-     * This verifies the contract: AP visibility alone does not grant authority. */
-    argus_authority_snapshot_t auth;
-    argus_authority_mgr_get_snapshot(&auth);
+    mock_restart_ctx_t ctx;
+    init_mock_restart_ctx(&ctx);
+    ctx.preflight_snap.machine_state = ARGUS_STATE_RUNNING;
 
-    /* Get current net mode */
-    argus_network_mode_t mode = argus_net_mgr_get_mode();
+    argus_restart_ops_t ops;
+    make_mock_restart_ops(&ops, &ctx);
 
-    if (mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
-        /* If no MQTT, authority should be NONE */
-        argus_net_snapshot_t net_snap;
-        argus_net_mgr_get_snapshot(&net_snap);
-        if (!net_snap.mqtt_broker_running) {
-            TEST_ASSERT(auth.mode == ARGUS_AUTHORITY_NONE,
-                        "AP_DISCOVERABLE without MQTT has non-NONE authority");
-        }
-    }
+    argus_restart_result_t result = argus_restart_execute(&ops);
 
-    /* In UNCOMMISSIONED_AP, authority must always be NONE */
-    if (mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
-        TEST_ASSERT(auth.mode == ARGUS_AUTHORITY_NONE,
-                    "UNCOMMISSIONED_AP has non-NONE authority");
-    }
+    TEST_ASSERT(!result.accepted, "Restart accepted despite unsafe preflight");
+    TEST_ASSERT(result.failed_at_step == ARGUS_RESTART_STEP_PREFLIGHT_SAFETY,
+                "failed_at_step not PREFLIGHT");
+    TEST_ASSERT(!result.reboot_called, "Reboot called on preflight failure");
+    TEST_ASSERT(!result.authority_revoked, "Authority revoked on preflight failure");
+    TEST_ASSERT(!result.http_stopped, "HTTP stopped on preflight failure");
     return ESP_OK;
 }
 
-// Test 36: Motor commands rejected without correct authority owner
-static esp_err_t test_motor_commands_rejected_without_authority(void)
+// Test 36: Restart transaction final safety failure — authority revoked (fail closed), no reboot
+static esp_err_t test_restart_transaction_final_safety_failure(void)
 {
-    /* When authority mode is NONE, no owner should have dispatch rights.
-     * This verifies the authority gate contract. */
-    argus_authority_snapshot_t snap;
-    argus_authority_mgr_get_snapshot(&snap);
+    mock_restart_ctx_t ctx;
+    init_mock_restart_ctx(&ctx);
+    ctx.preflight_snap.machine_state = ARGUS_STATE_HOLDING;
+    ctx.final_snap.machine_state = ARGUS_STATE_RUNNING;
 
-    if (snap.mode == ARGUS_AUTHORITY_NONE) {
-        /* In NONE mode, owner must also be NONE */
-        TEST_ASSERT(snap.owner == ARGUS_AUTH_OWNER_NONE,
-                    "NONE authority has non-NONE owner");
-    }
+    argus_restart_ops_t ops;
+    make_mock_restart_ops(&ops, &ctx);
 
-    /* Verify the API contract: owner name for NONE returns a valid string */
-    const char *name = argus_authority_mgr_get_owner_name(ARGUS_AUTH_OWNER_NONE);
-    TEST_ASSERT(name != NULL, "NULL owner name for NONE");
+    argus_restart_result_t result = argus_restart_execute(&ops);
+
+    TEST_ASSERT(!result.accepted, "Restart accepted despite unsafe final state");
+    TEST_ASSERT(result.failed_at_step == ARGUS_RESTART_STEP_FINAL_SAFETY,
+                "failed_at_step not FINAL_SAFETY");
+    TEST_ASSERT(!result.reboot_called, "Reboot called on final safety failure");
+    TEST_ASSERT(result.authority_revoked, "Authority NOT revoked on final safety failure (fail closed)");
+    TEST_ASSERT(result.http_stopped, "HTTP not stopped before final safety check");
     return ESP_OK;
 }
 
-// Test 37: HTTP server start/stop idempotency
-static esp_err_t test_http_start_stop_idempotent(void)
+// Test 37: Config overlay — identity scope sets PROVISIONED lock, preserves WiFi
+static esp_err_t test_overlay_identity_sets_lock(void)
 {
-    /* The HTTP server lifecycle must be idempotent.
-     * Multiple starts or stops should not crash or leak handles.
-     * We test this by calling stop when it's already in whatever state
-     * (the test runner has already started it for the dashboard). */
+    /* Current config: has WiFi, no identity lock */
+    argus_config_payload_t current = {0};
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "ExistingWiFi");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "ExistPass123");
+    current.provisioned_flags = 0;
 
-    /* Stop should succeed or be a no-op */
-    argus_http_server_stop();
-    /* Second stop — idempotent */
-    argus_http_server_stop();
+    /* Fields: all 3 identity fields provided */
+    argus_config_fields_t fields = {0};
+    fields.has_client_id = true;
+    fields.has_unit_id = true;
+    fields.has_device_name = true;
+    snprintf(fields.client_id, sizeof(fields.client_id), "new_co");
+    snprintf(fields.unit_id, sizeof(fields.unit_id), "new_unit");
+    snprintf(fields.device_name, sizeof(fields.device_name), "New Pump");
 
-    /* Start should succeed */
-    esp_err_t err = argus_http_server_start();
-    TEST_ASSERT(err == ESP_OK, "HTTP server start after double-stop failed");
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_IDENTITY, &fields, &out);
 
-    /* Second start — should be idempotent (already running) */
-    esp_err_t err2 = argus_http_server_start();
-    TEST_ASSERT(err2 == ESP_OK || err2 == ESP_ERR_INVALID_STATE,
-                "Second HTTP start caused unexpected error");
+    TEST_ASSERT(result.success, "Identity overlay failed");
+    TEST_ASSERT((out.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
+                "PROVISIONED flag not set by identity overlay");
+    TEST_ASSERT(strcmp(out.sta_ssid, "ExistingWiFi") == 0,
+                "WiFi SSID not preserved through identity overlay");
+    TEST_ASSERT(strcmp(out.sta_pass, "ExistPass123") == 0,
+                "WiFi password not preserved through identity overlay");
+    TEST_ASSERT(strcmp(out.client_id, "new_co") == 0,
+                "client_id not applied");
     return ESP_OK;
 }
 
-// Test 38: is_commissioned requires both identity AND WiFi
+// Test 38: Config overlay — locked identity rejected
+static esp_err_t test_overlay_locked_identity_rejected(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "locked_co");
+    snprintf(current.unit_id, sizeof(current.unit_id), "locked_unit");
+    snprintf(current.device_name, sizeof(current.device_name), "Locked Pump");
+    current.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+
+    argus_config_fields_t fields = {0};
+    fields.has_client_id = true;
+    fields.has_unit_id = true;
+    fields.has_device_name = true;
+    snprintf(fields.client_id, sizeof(fields.client_id), "hacker_co");
+    snprintf(fields.unit_id, sizeof(fields.unit_id), "hacker_unit");
+    snprintf(fields.device_name, sizeof(fields.device_name), "Hacked Pump");
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_IDENTITY, &fields, &out);
+
+    TEST_ASSERT(!result.success, "Locked identity overlay accepted");
+    TEST_ASSERT(result.error_code != NULL, "No error code on locked identity rejection");
+    return ESP_OK;
+}
+
+// Test 39: Config overlay — partial identity (missing unit_id) rejected
+static esp_err_t test_overlay_partial_identity_rejected(void)
+{
+    argus_config_payload_t current = {0};
+    current.provisioned_flags = 0;
+
+    argus_config_fields_t fields = {0};
+    fields.has_client_id = true;
+    fields.has_device_name = true;
+    /* unit_id NOT provided */
+    snprintf(fields.client_id, sizeof(fields.client_id), "c");
+    snprintf(fields.device_name, sizeof(fields.device_name), "d");
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_IDENTITY, &fields, &out);
+
+    TEST_ASSERT(!result.success, "Partial identity overlay accepted without unit_id");
+    return ESP_OK;
+}
+
+// Test 40: Config overlay — WiFi overlay preserves identity fields and lock flag
+static esp_err_t test_overlay_wifi_preserves_identity(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "keep_co");
+    snprintf(current.unit_id, sizeof(current.unit_id), "keep_unit");
+    snprintf(current.device_name, sizeof(current.device_name), "Keep Pump");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "OldSSID");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "OldPass123");
+    current.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    fields.has_sta_pass = true;
+    snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "NewSSID");
+    snprintf(fields.sta_pass, sizeof(fields.sta_pass), "NewPass456");
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(result.success, "WiFi overlay failed");
+    TEST_ASSERT(strcmp(out.client_id, "keep_co") == 0, "client_id not preserved");
+    TEST_ASSERT(strcmp(out.unit_id, "keep_unit") == 0, "unit_id not preserved");
+    TEST_ASSERT(strcmp(out.device_name, "Keep Pump") == 0, "device_name not preserved");
+    TEST_ASSERT((out.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
+                "Provisioned flag cleared by WiFi overlay");
+    TEST_ASSERT(strcmp(out.sta_ssid, "NewSSID") == 0, "SSID not updated");
+    TEST_ASSERT(strcmp(out.sta_pass, "NewPass456") == 0, "Password not updated");
+    return ESP_OK;
+}
+
+// Test 41: Config overlay — same SSID, no password field → existing password preserved
+static esp_err_t test_overlay_same_ssid_preserves_password(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "SameSSID");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "KeepThisPass");
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "SameSSID");
+    /* has_sta_pass = false → password not provided */
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(result.success, "Same-SSID overlay failed");
+    TEST_ASSERT(strcmp(out.sta_pass, "KeepThisPass") == 0,
+                "Existing password not preserved when SSID unchanged");
+    return ESP_OK;
+}
+
+// Test 42: Config overlay — new SSID without password rejected
+static esp_err_t test_overlay_new_ssid_no_password_rejected(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "OldSSID");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "OldPass123");
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "BrandNewSSID");
+    /* No password provided for a new SSID */
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(!result.success, "New SSID without password accepted");
+    TEST_ASSERT(result.error_code != NULL, "No error code on new-SSID-no-password rejection");
+    return ESP_OK;
+}
+
+// Test 43: Config overlay — explicit WiFi clear (empty SSID) clears both, preserves identity
+static esp_err_t test_overlay_explicit_wifi_clear(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "ToBeCleared");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "AlsoCleared");
+    current.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    fields.sta_ssid[0] = '\0';  /* Empty SSID → clear */
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(result.success, "Explicit WiFi clear failed");
+    TEST_ASSERT(strlen(out.sta_ssid) == 0, "SSID not cleared");
+    TEST_ASSERT(strlen(out.sta_pass) == 0, "Password not cleared");
+    TEST_ASSERT(strcmp(out.client_id, "c") == 0, "Identity corrupted by WiFi clear");
+    TEST_ASSERT((out.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
+                "Provisioned flag cleared by WiFi clear");
+    return ESP_OK;
+}
+
+// Test 44: Config overlay — mask string password rejected
+static esp_err_t test_overlay_mask_string_rejected(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "MySSID");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "RealPass123");
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    fields.has_sta_pass = true;
+    snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "MySSID");
+    snprintf(fields.sta_pass, sizeof(fields.sta_pass), "%s", ARGUS_CONFIG_MASK_STRING);
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(!result.success, "Mask string password accepted by overlay");
+    return ESP_OK;
+}
+
+// Test 45: Config overlay — unknown scope rejected + scope parser tests
+static esp_err_t test_overlay_unknown_scope_rejected(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+
+    argus_config_fields_t fields = {0};
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_INVALID, &fields, &out);
+
+    TEST_ASSERT(!result.success, "INVALID scope accepted by overlay");
+
+    /* Scope parser tests */
+    TEST_ASSERT(argus_config_overlay_parse_scope("identity") == ARGUS_CONFIG_SCOPE_IDENTITY,
+                "\"identity\" scope parsing failed");
+    TEST_ASSERT(argus_config_overlay_parse_scope("wifi") == ARGUS_CONFIG_SCOPE_WIFI,
+                "\"wifi\" scope parsing failed");
+    TEST_ASSERT(argus_config_overlay_parse_scope("bogus") == ARGUS_CONFIG_SCOPE_INVALID,
+                "Unknown scope not parsed as INVALID");
+    TEST_ASSERT(argus_config_overlay_parse_scope(NULL) == ARGUS_CONFIG_SCOPE_INVALID,
+                "NULL scope not parsed as INVALID");
+    return ESP_OK;
+}
+
+// Test 46: Config overlay — new password replaces old on same SSID
+static esp_err_t test_overlay_new_password_replaces(void)
+{
+    argus_config_payload_t current = {0};
+    snprintf(current.client_id, sizeof(current.client_id), "c");
+    snprintf(current.unit_id, sizeof(current.unit_id), "u");
+    snprintf(current.device_name, sizeof(current.device_name), "d");
+    snprintf(current.sta_ssid, sizeof(current.sta_ssid), "SameSSID");
+    snprintf(current.sta_pass, sizeof(current.sta_pass), "OldPassword1");
+
+    argus_config_fields_t fields = {0};
+    fields.has_sta_ssid = true;
+    fields.has_sta_pass = true;
+    snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "SameSSID");
+    snprintf(fields.sta_pass, sizeof(fields.sta_pass), "BrandNewPass");
+
+    argus_config_payload_t out = {0};
+    argus_config_overlay_result_t result = argus_config_overlay_apply(
+        &current, ARGUS_CONFIG_SCOPE_WIFI, &fields, &out);
+
+    TEST_ASSERT(result.success, "Password replacement overlay failed");
+    TEST_ASSERT(strcmp(out.sta_pass, "BrandNewPass") == 0,
+                "New password not applied on same SSID");
+    TEST_ASSERT(strcmp(out.sta_ssid, "SameSSID") == 0,
+                "SSID corrupted during password replacement");
+    return ESP_OK;
+}
+
+// Test 47: is_commissioned requires both identity AND WiFi
 static esp_err_t test_commissioned_requires_wifi(void)
 {
     /* Identity-only is NOT commissioned */
@@ -1688,15 +2022,24 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_explicit_wifi_clear);
         RUN_TEST(test_mask_string_input_rejected_4b2);
         RUN_TEST(test_provisioned_identity_immutable);
-        RUN_TEST(test_storage_error_fails_closed);
-        RUN_TEST(test_restart_safety_active_motion);
-        RUN_TEST(test_restart_safety_estop_fault);
-        RUN_TEST(test_restart_safety_safe_state);
+        RUN_TEST(test_monotonic_provisioning_lkg_rollback);
+        RUN_TEST(test_restart_safety_via_seam_unsafe);
+        RUN_TEST(test_restart_safety_via_seam_safe);
+        RUN_TEST(test_restart_transaction_success);
         RUN_TEST(test_new_ssid_without_password_rejected);
         RUN_TEST(test_schema_v1_migration);
-        RUN_TEST(test_ap_visibility_no_motor_authority);
-        RUN_TEST(test_motor_commands_rejected_without_authority);
-        RUN_TEST(test_http_start_stop_idempotent);
+        RUN_TEST(test_restart_transaction_preflight_failure);
+        RUN_TEST(test_restart_transaction_final_safety_failure);
+        RUN_TEST(test_overlay_identity_sets_lock);
+        RUN_TEST(test_overlay_locked_identity_rejected);
+        RUN_TEST(test_overlay_partial_identity_rejected);
+        RUN_TEST(test_overlay_wifi_preserves_identity);
+        RUN_TEST(test_overlay_same_ssid_preserves_password);
+        RUN_TEST(test_overlay_new_ssid_no_password_rejected);
+        RUN_TEST(test_overlay_explicit_wifi_clear);
+        RUN_TEST(test_overlay_mask_string_rejected);
+        RUN_TEST(test_overlay_unknown_scope_rejected);
+        RUN_TEST(test_overlay_new_password_replaces);
         RUN_TEST(test_commissioned_requires_wifi);
     }
 
@@ -1707,7 +2050,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
-    printf("  Distinct Test Cases : 38\n");
+    printf("  Distinct Test Cases : 47\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);

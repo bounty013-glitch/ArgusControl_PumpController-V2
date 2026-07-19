@@ -58,6 +58,8 @@ typedef struct {
     esp_err_t (*write_selector)(void *ctx, uint8_t selector);
     esp_err_t (*read_reset_pending)(void *ctx, bool *out_pending);
     esp_err_t (*write_reset_pending)(void *ctx, bool pending);
+    esp_err_t (*read_provisioned_hwm)(void *ctx, uint8_t *out_flags);   /**< Monotonic provisioning marker */
+    esp_err_t (*write_provisioned_hwm)(void *ctx, uint8_t flags);       /**< Write-once per provisioning event */
     esp_err_t (*erase_all)(void *ctx);
     void *ctx;
 } argus_nvs_driver_t;
