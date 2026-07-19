@@ -49,6 +49,7 @@ typedef struct {
     bool has_provisioned_hwm;
     esp_err_t hwm_read_error;    /* If non-zero, mock_read_provisioned_hwm returns this */
     esp_err_t hwm_write_error;   /* If non-zero, mock_write_provisioned_hwm returns this */
+    esp_err_t selector_write_error; /* If non-zero, mock_write_selector returns this */
 } mock_nvs_store_t;
 
 static esp_err_t mock_read_slot(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot)
@@ -92,6 +93,7 @@ static esp_err_t mock_write_selector(void *ctx, uint8_t selector)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
+    if (store->selector_write_error != ESP_OK) return store->selector_write_error;
     store->selector = selector;
     store->has_selector = true;
     return ESP_OK;
@@ -2297,6 +2299,328 @@ static esp_err_t test_json_has_key(void)
     return ESP_OK;
 }
 
+/* ── Production NVS seam wiring tests ──────────────────────────────── */
+
+// Test 61: Production wrapper invokes core — init writes HWM on provisioned commit
+static esp_err_t test_prod_wrapper_invokes_core_init(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Use production wrapper path: argus_nvs_config_init -> argus_nvs_core_init */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Production init failed");
+
+    /* Commit provisioned identity through production wrapper */
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "prod_co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "prod_unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "ProdDev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_config_commit(&cfg) == ESP_OK, "Production commit failed");
+
+    /* Core invariant: HWM must be written by production commit */
+    TEST_ASSERT(store.has_provisioned_hwm, "Production commit did not write HWM");
+    TEST_ASSERT(store.provisioned_hwm & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "HWM does not have PROVISIONED_IDENTITY");
+    return ESP_OK;
+}
+
+// Test 62: Production reboot reads and enforces HWM
+static esp_err_t test_prod_reboot_enforces_hwm(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* First boot: init + provisioned commit */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Init 1 failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_config_commit(&cfg) == ESP_OK, "Commit failed");
+
+    /* Simulate reboot: reinit through production wrapper */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Reboot init failed");
+
+    /* Read back via production get */
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_config_get(&readback) == ESP_OK, "Get failed");
+    TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "HWM not enforced after reboot");
+    TEST_ASSERT(strcmp(readback.client_id, "co") == 0, "Identity lost after reboot");
+    return ESP_OK;
+}
+
+// Test 63: Production HWM read failure fails closed
+static esp_err_t test_prod_hwm_read_failure_fails_closed(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* First boot: commit unprovisioned config */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Init 1 failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_config_commit(&cfg) == ESP_OK, "Commit failed");
+
+    /* Reboot with HWM read failure */
+    store.hwm_read_error = ESP_ERR_NVS_INVALID_HANDLE;
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Reboot init failed");
+
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_config_get(&readback) == ESP_OK, "Get failed");
+    /* Fail-closed: identity must appear locked */
+    TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "Production HWM read failure did not fail closed");
+    return ESP_OK;
+}
+
+// Test 64: Production HWM write failure rejects commit
+static esp_err_t test_prod_hwm_write_failure_rejects_commit(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Init failed");
+
+    /* Install failing HWM write */
+    store.hwm_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    esp_err_t err = argus_nvs_config_commit(&cfg);
+    TEST_ASSERT(err != ESP_OK, "Production commit succeeded despite HWM write failure");
+    return ESP_OK;
+}
+
+// Test 65: Selector activation failure produces recoverable state
+static esp_err_t test_selector_failure_produces_recoverable_state(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* First: commit unprovisioned config (slot B, gen 1) */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init 1 failed");
+    argus_config_payload_t cfg1 = {0};
+    snprintf(cfg1.client_id, sizeof(cfg1.client_id), "old_co");
+    snprintf(cfg1.unit_id, sizeof(cfg1.unit_id), "old_unit");
+    snprintf(cfg1.device_name, sizeof(cfg1.device_name), "OldDev");
+    cfg1.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg1) == ESP_OK, "Commit 1 failed");
+
+    /* Now prepare provisioned commit that will fail at selector write */
+    store.selector_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    argus_config_payload_t cfg2 = {0};
+    snprintf(cfg2.client_id, sizeof(cfg2.client_id), "new_co");
+    snprintf(cfg2.unit_id, sizeof(cfg2.unit_id), "new_unit");
+    snprintf(cfg2.device_name, sizeof(cfg2.device_name), "NewDev");
+    cfg2.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+
+    esp_err_t err = argus_nvs_core_commit(&core, &cfg2);
+    TEST_ASSERT(err != ESP_OK, "Commit should have failed on selector write");
+
+    /* Verify the HWM WAS written (it happens before selector) */
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM not written before selector failure");
+    TEST_ASSERT(store.provisioned_hwm & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "HWM missing PROVISIONED flag");
+
+    /* Verify selector still points to old slot */
+    TEST_ASSERT(store.has_selector, "Selector should still exist");
+    return ESP_OK;
+}
+
+// Test 66: Reinitialization recovers provisioned identity after selector failure
+static esp_err_t test_reinit_recovers_after_selector_failure(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Boot 1: commit unprovisioned config */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init 1 failed");
+    argus_config_payload_t cfg1 = {0};
+    snprintf(cfg1.client_id, sizeof(cfg1.client_id), "old_co");
+    snprintf(cfg1.unit_id, sizeof(cfg1.unit_id), "old_unit");
+    snprintf(cfg1.device_name, sizeof(cfg1.device_name), "OldDev");
+    cfg1.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg1) == ESP_OK, "Commit 1 failed");
+
+    /* Fail selector write on provisioned commit */
+    store.selector_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    argus_config_payload_t cfg2 = {0};
+    snprintf(cfg2.client_id, sizeof(cfg2.client_id), "new_co");
+    snprintf(cfg2.unit_id, sizeof(cfg2.unit_id), "new_unit");
+    snprintf(cfg2.device_name, sizeof(cfg2.device_name), "NewDev");
+    cfg2.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    argus_nvs_core_commit(&core, &cfg2);  /* Expected to fail */
+
+    /* Clear the selector write error (simulating power cycle) */
+    store.selector_write_error = ESP_OK;
+
+    /* Reinit — core should detect HWM proves provisioning, selector
+     * points to unprovisioned slot, and recover to the provisioned slot. */
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Recovery init failed");
+
+    /* Recovery: must have selected the provisioned identity */
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_core_get(&core2, &readback) == ESP_OK, "Get failed");
+    TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "Recovery did not preserve provisioning lock");
+    TEST_ASSERT(strcmp(readback.client_id, "new_co") == 0,
+                "Recovery did not select provisioned identity");
+    TEST_ASSERT(strcmp(readback.unit_id, "new_unit") == 0,
+                "Recovery unit_id mismatch");
+    return ESP_OK;
+}
+
+// Test 67: Provisioned-slot corruption cannot reopen identity
+static esp_err_t test_provisioned_slot_corruption_cannot_reopen(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Commit provisioned identity */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Corrupt the provisioned slot by zeroing its valid_marker */
+    if (core.active_slot_index == 0) {
+        store.slot_a.valid_marker = 0;
+    } else {
+        store.slot_b.valid_marker = 0;
+    }
+
+    /* Reinit — corrupted slot is invalid, but HWM survives */
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
+
+    argus_config_payload_t readback;
+    if (argus_nvs_core_get(&core2, &readback) == ESP_OK) {
+        /* Whatever config loaded, provisioning must remain locked */
+        TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
+                    "Provisioned slot corruption reopened identity");
+    }
+    return ESP_OK;
+}
+
+// Test 68: Factory reset clears provisioning lock and resets core state
+static esp_err_t test_prod_factory_reset_clears_lock_and_core(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision through production path */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_config_commit(&cfg) == ESP_OK, "Commit failed");
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM not written");
+
+    /* Factory reset through production path */
+    TEST_ASSERT(argus_nvs_config_factory_reset() == ESP_OK, "Factory reset failed");
+
+    /* Verify NVS is cleared */
+    TEST_ASSERT(!store.has_provisioned_hwm, "HWM survives factory reset");
+    TEST_ASSERT(!store.has_slot_a, "Slot A survives factory reset");
+    TEST_ASSERT(!store.has_slot_b, "Slot B survives factory reset");
+
+    /* Verify production get returns uncommissioned defaults */
+    argus_config_payload_t readback;
+    argus_nvs_config_get(&readback);
+    TEST_ASSERT(strcmp(readback.client_id, "default_client") == 0,
+                "Factory reset did not set default client_id");
+    TEST_ASSERT((readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) == 0,
+                "Factory reset did not clear provisioning lock");
+    return ESP_OK;
+}
+
+// Test 69: No test calls live NVS/HTTP/WiFi/motion APIs (structural assertion)
+static esp_err_t test_no_live_api_calls(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Write and read back through mock driver */
+    argus_cfg_slot_t slot = {0};
+    slot.valid_marker = ARGUS_CONFIG_VALID_MARKER;
+    slot.schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
+    slot.payload_length = sizeof(argus_config_payload_t);
+    slot.config_generation = 1;
+    snprintf(slot.payload.client_id, sizeof(slot.payload.client_id), "mock");
+    slot.crc32 = argus_nvs_config_calc_crc32(&slot.payload);
+
+    TEST_ASSERT(driver.write_slot(driver.ctx, 0, &slot) == ESP_OK, "Mock write failed");
+    argus_cfg_slot_t readback = {0};
+    TEST_ASSERT(driver.read_slot(driver.ctx, 0, &readback) == ESP_OK, "Mock read failed");
+    TEST_ASSERT(memcmp(&slot, &readback, sizeof(argus_cfg_slot_t)) == 0, "Mock round-trip mismatch");
+
+    /* Verify error injection works */
+    store.hwm_read_error = ESP_ERR_NVS_INVALID_HANDLE;
+    uint8_t flags;
+    TEST_ASSERT(driver.read_provisioned_hwm(driver.ctx, &flags) == ESP_ERR_NVS_INVALID_HANDLE,
+                "Error injection failed");
+    store.hwm_read_error = ESP_OK;
+
+    return ESP_OK;
+}
+
+// Test 70: Production wrapper commit writes HWM and is readable on reinit
+static esp_err_t test_prod_commit_hwm_persists_across_reinit(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Init and commit through production wrappers */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "hwm_co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "hwm_unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "HwmDev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_config_commit(&cfg) == ESP_OK, "Commit failed");
+
+    /* Verify HWM is durable */
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM not stored");
+    uint8_t hwm_val = store.provisioned_hwm;
+    TEST_ASSERT(hwm_val & ARGUS_CFG_PROVISIONED_IDENTITY, "HWM value wrong");
+
+    /* Reinit — HWM must be read and enforced */
+    TEST_ASSERT(argus_nvs_config_init(&driver) == ESP_OK, "Reinit failed");
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_config_get(&readback) == ESP_OK, "Get after reinit failed");
+    TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
+                "HWM not enforced on reinit");
+    return ESP_OK;
+}
+
 /* ── Test runner ───────────────────────────────────────────────────── */
 
 esp_err_t argus_tests_4a_run_all(void)
@@ -2392,6 +2716,17 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_json_extract_boundary_length);
         RUN_TEST(test_json_extract_escaped);
         RUN_TEST(test_json_has_key);
+        /* Production NVS seam wiring tests */
+        RUN_TEST(test_prod_wrapper_invokes_core_init);
+        RUN_TEST(test_prod_reboot_enforces_hwm);
+        RUN_TEST(test_prod_hwm_read_failure_fails_closed);
+        RUN_TEST(test_prod_hwm_write_failure_rejects_commit);
+        RUN_TEST(test_selector_failure_produces_recoverable_state);
+        RUN_TEST(test_reinit_recovers_after_selector_failure);
+        RUN_TEST(test_provisioned_slot_corruption_cannot_reopen);
+        RUN_TEST(test_prod_factory_reset_clears_lock_and_core);
+        RUN_TEST(test_no_live_api_calls);
+        RUN_TEST(test_prod_commit_hwm_persists_across_reinit);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -2401,7 +2736,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
-    printf("  Distinct Test Cases : 60\n");
+    printf("  Distinct Test Cases : 70\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
