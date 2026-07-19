@@ -51,8 +51,12 @@ typedef struct {
     esp_err_t hwm_write_error;   /* If non-zero, mock_write_provisioned_hwm returns this */
     esp_err_t selector_write_error; /* If non-zero, mock_write_selector returns this */
     esp_err_t erase_all_error;   /* If non-zero, mock_erase_all returns this */
-    esp_err_t reset_pend_write_error; /* If non-zero, mock_write_reset_pending returns this */
+    esp_err_t reset_pend_set_error;   /* If non-zero, mock_write_reset_pending(true) returns this */
+    esp_err_t reset_pend_clear_error; /* If non-zero, mock_write_reset_pending(false) returns this */
     esp_err_t reset_pend_read_error;  /* If non-zero, mock_read_reset_pending returns this */
+    int       pend_set_calls;         /* Count of write_reset_pending(true) calls */
+    int       pend_clear_calls;       /* Count of write_reset_pending(false) calls */
+    int       erase_calls;            /* Count of erase_all calls */
 } mock_nvs_store_t;
 
 static esp_err_t mock_read_slot(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot)
@@ -115,7 +119,13 @@ static esp_err_t mock_write_reset_pending(void *ctx, bool pending)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
-    if (store->reset_pend_write_error != ESP_OK) return store->reset_pend_write_error;
+    if (pending) {
+        store->pend_set_calls++;
+        if (store->reset_pend_set_error != ESP_OK) return store->reset_pend_set_error;
+    } else {
+        store->pend_clear_calls++;
+        if (store->reset_pend_clear_error != ESP_OK) return store->reset_pend_clear_error;
+    }
     store->reset_pending = pending;
     return ESP_OK;
 }
@@ -124,6 +134,7 @@ static esp_err_t mock_erase_all(void *ctx)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
+    store->erase_calls++;
     if (store->erase_all_error != ESP_OK) return store->erase_all_error;
     /* Erase CFG and SYS data but NOT the reset-pending marker.
      * In production, rst_pend lives in ARGUS_NVS_NS_RST which
@@ -131,19 +142,27 @@ static esp_err_t mock_erase_all(void *ctx)
      * by preserving reset_pending and all error-injection fields. */
     bool saved_reset_pending = store->reset_pending;
     esp_err_t saved_erase_err = store->erase_all_error;
-    esp_err_t saved_rpw_err = store->reset_pend_write_error;
+    esp_err_t saved_rps_err = store->reset_pend_set_error;
+    esp_err_t saved_rpc_err = store->reset_pend_clear_error;
     esp_err_t saved_rpr_err = store->reset_pend_read_error;
     esp_err_t saved_hwm_r_err = store->hwm_read_error;
     esp_err_t saved_hwm_w_err = store->hwm_write_error;
     esp_err_t saved_sel_w_err = store->selector_write_error;
+    int saved_pend_set = store->pend_set_calls;
+    int saved_pend_clear = store->pend_clear_calls;
+    int saved_erase = store->erase_calls;
     memset(store, 0, sizeof(mock_nvs_store_t));
     store->reset_pending = saved_reset_pending;
     store->erase_all_error = saved_erase_err;
-    store->reset_pend_write_error = saved_rpw_err;
+    store->reset_pend_set_error = saved_rps_err;
+    store->reset_pend_clear_error = saved_rpc_err;
     store->reset_pend_read_error = saved_rpr_err;
     store->hwm_read_error = saved_hwm_r_err;
     store->hwm_write_error = saved_hwm_w_err;
     store->selector_write_error = saved_sel_w_err;
+    store->pend_set_calls = saved_pend_set;
+    store->pend_clear_calls = saved_pend_clear;
+    store->erase_calls = saved_erase;
     return ESP_OK;
 }
 
@@ -2693,8 +2712,8 @@ static esp_err_t test_reset_pend_write_fails_no_erase(void)
     cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
     TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
 
-    /* Inject pending-write failure then call production helper */
-    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    /* Inject pending-set failure then call production helper */
+    store.reset_pend_set_error = ESP_ERR_NVS_INVALID_HANDLE;
     esp_err_t err = argus_nvs_core_factory_reset(&core, &driver);
     TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE, "Wrong error");
 
@@ -2702,6 +2721,8 @@ static esp_err_t test_reset_pend_write_fails_no_erase(void)
     TEST_ASSERT(store.has_provisioned_hwm, "HWM lost despite pend-write failure");
     TEST_ASSERT(store.has_slot_a || store.has_slot_b, "Slots lost despite pend-write failure");
     TEST_ASSERT(!store.reset_pending, "Pending set despite write failure");
+    TEST_ASSERT(store.erase_calls == 0, "Erase called despite pend-set failure");
+    TEST_ASSERT(store.pend_clear_calls == 0, "Clear called despite pend-set failure");
     return ESP_OK;
 }
 
@@ -2751,38 +2772,42 @@ static esp_err_t test_reset_clear_fails_pending_remains(void)
     cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
     TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
 
-    /* Erase will succeed; inject clear failure.
-     * The write_reset_pending mock returns error for ALL writes once set,
-     * so we must allow the initial pending=true write to succeed.
-     * We inject the error after erase completes by using a two-phase approach:
-     * The factory-reset helper writes pending=true, then erases, then writes
-     * pending=false. We cannot inject a write error that only fires on the
-     * second write with the current mock. Instead, we test the helper's exact
-     * documented behavior by calling it with a pending-clear error that also
-     * fails the initial pending=true write. Since we know T71 covers that case,
-     * here we directly verify the core logic by simulating the mid-transaction
-     * state: pending already true, erase done, and only the clear fails. */
+    /* Inject only a pending-clear failure; pending-set succeeds.
+     * The selective mock allows pending=true writes to succeed while
+     * pending=false writes return the injected error. */
+    store.reset_pend_clear_error = ESP_ERR_NVS_INVALID_HANDLE;
 
-    /* Set up pre-erase state: pending is true, data is erased */
-    store.reset_pending = true;
-    /* Erase the data (simulating successful erase step) */
-    driver.erase_all(driver.ctx);
-    /* Now inject the pending-clear failure */
-    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
-    esp_err_t clear_err = driver.write_reset_pending(driver.ctx, false);
-    TEST_ASSERT(clear_err == ESP_ERR_NVS_INVALID_HANDLE, "Clear should have failed");
+    /* Reset counters after provisioning */
+    store.pend_set_calls = 0;
+    store.pend_clear_calls = 0;
+    store.erase_calls = 0;
 
-    /* Pending MUST remain true — will retry on next boot */
-    TEST_ASSERT(store.reset_pending, "Pending cleared despite write failure");
-    /* Data IS erased (erase succeeded) */
+    /* Call the production-used factory-reset helper */
+    esp_err_t err = argus_nvs_core_factory_reset(&core, &driver);
+    TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE, "Wrong clear error from helper");
+
+    /* Verify the pending=true write succeeded */
+    TEST_ASSERT(store.pend_set_calls == 1, "Pending-set not called exactly once");
+
+    /* Verify erase occurred exactly once */
+    TEST_ASSERT(store.erase_calls == 1, "Erase not called exactly once");
+
+    /* Verify the pending-clear write was attempted exactly once */
+    TEST_ASSERT(store.pend_clear_calls == 1, "Pending-clear not called exactly once");
+
+    /* Reset pending MUST remain true — will retry on next boot */
+    TEST_ASSERT(store.reset_pending, "Pending cleared despite clear failure");
+
+    /* Configuration data IS erased (erase succeeded before clear failed) */
     TEST_ASSERT(!store.has_provisioned_hwm, "HWM survived successful erase");
+    TEST_ASSERT(!store.has_slot_a, "Slot A survived successful erase");
+    TEST_ASSERT(!store.has_slot_b, "Slot B survived successful erase");
+    TEST_ASSERT(!store.has_selector, "Selector survived successful erase");
 
-    /* Verify the production policy: core reinit still proceeds after clear failure.
-     * The helper does this; verify the core can init on erased store. */
-    store.reset_pend_write_error = ESP_OK; /* Allow reinit to work */
-    argus_nvs_core_t core2;
-    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Core reinit failed");
-    TEST_ASSERT(!core2.has_valid_config, "Config valid after erase");
+    /* Production policy: core was reinitialized despite clear failure.
+     * The helper reinitializes the caller-owned core to match the erased
+     * storage, so the in-memory state is consistent. */
+    TEST_ASSERT(!core.has_valid_config, "Core has valid config after factory reset");
     return ESP_OK;
 }
 
@@ -2893,7 +2918,7 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
 
     /* Inject clear failure — the recovery helper only writes pending=false,
      * not pending=true. Erase will succeed, then clear will fail. */
-    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    store.reset_pend_clear_error = ESP_ERR_NVS_INVALID_HANDLE;
 
     esp_err_t err = argus_nvs_core_recovery_check(&driver);
     TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE, "Wrong clear error from recovery");
