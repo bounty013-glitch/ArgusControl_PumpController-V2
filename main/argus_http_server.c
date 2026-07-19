@@ -1,6 +1,6 @@
 /**
  * @file argus_http_server.c
- * @brief Controller-Hosted HTTP Server — Phase 4B.1 Service Portal
+ * @brief Controller-Hosted HTTP Server — Phase 4B.1/4B.2/4B.3 Service Portal
  *
  * Architectural decisions:
  *
@@ -1299,6 +1299,189 @@ static esp_err_t restart_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Phase 4B.3: Service Entry/Exit Handlers ─────────────────────── */
+
+/**
+ * @brief POST /api/service/enter — Request transition to LOCAL_SERVICE/BROWSER
+ *
+ * Mode gate: AP_DISCOVERABLE or UNCOMMISSIONED_AP (or already SERVICE_AP_ONLY
+ * for idempotency).
+ *
+ * A1 DEADLOCK AVOIDANCE: argus_net_mgr_request_service() calls
+ * argus_http_server_stop() internally. Calling it from within an httpd
+ * handler would deadlock (httpd_stop waits for active handlers, but
+ * this handler IS the active handler). Instead, we validate preconditions,
+ * send the HTTP response, then post a SERVICE_REQUEST event to the net_mgr
+ * task queue. The net_mgr task executes the transition from its own context.
+ *
+ * Per A2, once the event is posted the transition runs to completion
+ * regardless of browser disconnect. The browser can poll /api/status
+ * after reconnecting to the AP to verify the transition completed.
+ */
+static esp_err_t service_enter_handler(httpd_req_t *req)
+{
+    if (req->method != HTTP_POST) {
+        httpd_resp_set_status(req, "405 Method Not Allowed");
+        httpd_resp_sendstr(req, "{\"error\":\"method_not_allowed\"}");
+        return ESP_OK;
+    }
+
+    if (!check_auth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    /* Check current state for idempotency */
+    argus_net_snapshot_t net_snap;
+    esp_err_t snap_err = argus_net_mgr_get_snapshot(&net_snap);
+    if (snap_err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
+        return ESP_OK;
+    }
+
+    /* Idempotent: already in SERVICE_AP_ONLY with BROWSER authority */
+    if (net_snap.mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        argus_authority_snapshot_t auth_snap;
+        argus_authority_mgr_get_snapshot(&auth_snap);
+        if (auth_snap.mode == ARGUS_AUTHORITY_LOCAL_SERVICE &&
+            auth_snap.owner == ARGUS_AUTH_OWNER_BROWSER) {
+            httpd_resp_sendstr(req,
+                "{\"status\":\"ok\",\"mode\":\"SERVICE_AP_ONLY\","
+                "\"owner\":\"BROWSER\",\"note\":\"already_in_service\"}");
+            return ESP_OK;
+        }
+    }
+
+    /* Mode gate: must be AP_DISCOVERABLE or UNCOMMISSIONED_AP */
+    if (net_snap.mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
+        net_snap.mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
+        httpd_resp_set_status(req, "409 Conflict");
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":409,\"reason\":\"mode_not_eligible\","
+            "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* Transition in progress check */
+    if (net_snap.mode == ARGUS_NET_MODE_SERVICE_TRANSITION) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"code\":409,\"reason\":\"transition_in_progress\"}");
+        return ESP_OK;
+    }
+
+    /* Post the event — net_mgr task will execute the transition.
+     * The HTTP server will be stopped during the transition (the handler
+     * has already returned by then, so no deadlock). The browser loses
+     * connection, then reconnects to the AP after the transition completes
+     * and the HTTP server restarts in SERVICE_AP_ONLY mode. */
+    argus_net_event_t evt = {
+        .type = ARGUS_NET_EVT_SERVICE_REQUEST,
+        .requested_owner = ARGUS_AUTH_OWNER_BROWSER
+    };
+    esp_err_t post_err = argus_net_mgr_post_event(&evt);
+    if (post_err != ESP_OK) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":503,\"reason\":\"queue_full\","
+            "\"detail\":\"%s\"}", esp_err_to_name(post_err));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* 202 Accepted — transition is in progress, browser should poll /api/status */
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"accepted\",\"action\":\"service_entry_requested\","
+        "\"note\":\"Poll /api/status after reconnecting to verify transition\"}");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief POST /api/service/exit — Revoke browser authority, reboot
+ *
+ * Mode gate: SERVICE_AP_ONLY with LOCAL_SERVICE/BROWSER authority.
+ *
+ * A1 DEADLOCK AVOIDANCE: Same pattern as service_enter. The handler
+ * validates preconditions, sends the response, then posts a SERVICE_EXIT
+ * event. The net_mgr task executes the controlled stop + reboot.
+ *
+ * The browser will lose connection after the response is sent because
+ * the device reboots — this is expected and documented behavior.
+ */
+static esp_err_t service_exit_handler(httpd_req_t *req)
+{
+    if (req->method != HTTP_POST) {
+        httpd_resp_set_status(req, "405 Method Not Allowed");
+        httpd_resp_sendstr(req, "{\"error\":\"method_not_allowed\"}");
+        return ESP_OK;
+    }
+
+    if (!check_auth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    /* Mode gate: must be SERVICE_AP_ONLY */
+    argus_net_snapshot_t net_snap;
+    esp_err_t snap_err = argus_net_mgr_get_snapshot(&net_snap);
+    if (snap_err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
+        return ESP_OK;
+    }
+
+    if (net_snap.mode != ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":403,\"reason\":\"not_in_service_mode\","
+            "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* Authority gate: must be LOCAL_SERVICE/BROWSER */
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
+    if (auth_snap.mode != ARGUS_AUTHORITY_LOCAL_SERVICE ||
+        auth_snap.owner != ARGUS_AUTH_OWNER_BROWSER) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"code\":403,\"reason\":\"not_browser_owner\"}");
+        return ESP_OK;
+    }
+
+    /* Post the event — net_mgr task will execute the exit + reboot */
+    argus_net_event_t evt = {
+        .type = ARGUS_NET_EVT_SERVICE_EXIT,
+        .requested_owner = ARGUS_AUTH_OWNER_BROWSER
+    };
+    esp_err_t post_err = argus_net_mgr_post_event(&evt);
+    if (post_err != ESP_OK) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":503,\"reason\":\"queue_full\","
+            "\"detail\":\"%s\"}", esp_err_to_name(post_err));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* 202 Accepted — device will reboot shortly after this response */
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"accepted\",\"action\":\"service_exit_requested\","
+        "\"note\":\"Device will reboot. Reconnect to verify.\"}");
+
+    return ESP_OK;
+}
+
 /* ── URI handler registrations ───────────────────────────────────── */
 
 
@@ -1468,6 +1651,20 @@ static const httpd_uri_t uri_restart = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t uri_service_enter = {
+    .uri       = "/api/service/enter",
+    .method    = HTTP_POST,
+    .handler   = service_enter_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_service_exit = {
+    .uri       = "/api/service/exit",
+    .method    = HTTP_POST,
+    .handler   = service_exit_handler,
+    .user_ctx  = NULL
+};
+
 /* ── Lifecycle implementation ────────────────────────────────────── */
 
 esp_err_t argus_http_server_init(void)
@@ -1532,7 +1729,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + headroom */
+    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + 2 (4B.3) + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -1575,6 +1772,11 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_wifi_page);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_restart);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.3 endpoints */
+    reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);
