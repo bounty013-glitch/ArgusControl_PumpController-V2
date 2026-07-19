@@ -236,18 +236,32 @@ static esp_err_t prod_write_provisioned_hwm(void *ctx, uint8_t flags)
 static esp_err_t prod_erase_all(void *ctx)
 {
     (void)ctx;
+    esp_err_t first_err = ESP_OK;
     nvs_handle_t handle;
-    if (nvs_open(ARGUS_NVS_NS_CFG, NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_erase_all(handle);
-        nvs_commit(handle);
+
+    esp_err_t open_err = nvs_open(ARGUS_NVS_NS_CFG, NVS_READWRITE, &handle);
+    if (open_err == ESP_OK) {
+        esp_err_t erase_err = nvs_erase_all(handle);
+        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
+        esp_err_t commit_err = nvs_commit(handle);
+        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
         nvs_close(handle);
+    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
+        first_err = open_err;
     }
-    if (nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_erase_all(handle);
-        nvs_commit(handle);
+
+    open_err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    if (open_err == ESP_OK) {
+        esp_err_t erase_err = nvs_erase_all(handle);
+        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
+        esp_err_t commit_err = nvs_commit(handle);
+        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
         nvs_close(handle);
+    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
+        first_err = open_err;
     }
-    return ESP_OK;
+
+    return first_err;
 }
 
 static const argus_nvs_driver_t s_prod_driver = {
@@ -347,24 +361,16 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
      * HWM write (power loss between HWM write and selector activation).
      *
      * Recovery: find the valid provisioned candidate among the two slots,
-     * prefer the newer generation, repair the selector, preserve the lock.
+     * switch to it, and attempt a best-effort selector repair.
+     *
+     * Selector repair is best-effort: if write_selector fails, the
+     * in-memory configuration is still correct for this boot. The next
+     * successful commit will establish a new durable selector.
      *
      * If neither slot is provisioned but HWM says it should be, the
      * provisioning data is unrecoverable (both slots corrupted). The
      * fail-closed monotonic enforcement above already locked provisioning
      * via the HWM flags merge, preventing identity reopening.            */
-    if (core->has_valid_config &&
-        (hwm_flags & ARGUS_CFG_PROVISIONED_IDENTITY) &&
-        !(core->active_config.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY)) {
-        /* This case cannot happen because we already ORed hwm_flags into
-         * active_config.provisioned_flags above. But if the selected slot's
-         * PAYLOAD (before merge) lacked provisioning, and another slot has
-         * the provisioned payload, prefer the provisioned slot's data. */
-    }
-
-    /* More specific recovery: if HWM says provisioned but the selector-chosen
-     * slot's pre-merge payload was unprovisioned, and the OTHER slot has the
-     * provisioned payload with the correct data, switch to it. */
     if (core->has_valid_config && valid_a && valid_b &&
         (hwm_flags & ARGUS_CFG_PROVISIONED_IDENTITY)) {
         bool sel_a_prov = (slot_a.payload.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY);
@@ -377,18 +383,19 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
             memcpy(&core->active_config, &slot_b.payload, sizeof(argus_config_payload_t));
             core->active_generation = slot_b.config_generation;
             core->active_config.provisioned_flags |= hwm_flags;
-            /* Repair selector */
+            /* Best-effort selector repair: failure is non-fatal.
+             * In-memory state is correct; next commit repairs durably. */
             if (driver->write_selector) {
-                driver->write_selector(driver->ctx, 1);
+                (void)driver->write_selector(driver->ctx, 1);
             }
         } else if (core->active_slot_index == 1 && !sel_b_prov && sel_a_prov) {
             core->active_slot_index = 0;
             memcpy(&core->active_config, &slot_a.payload, sizeof(argus_config_payload_t));
             core->active_generation = slot_a.config_generation;
             core->active_config.provisioned_flags |= hwm_flags;
-            /* Repair selector */
+            /* Best-effort selector repair */
             if (driver->write_selector) {
-                driver->write_selector(driver->ctx, 0);
+                (void)driver->write_selector(driver->ctx, 0);
             }
         }
     }
@@ -637,13 +644,40 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
 esp_err_t argus_nvs_config_factory_reset(void)
 {
     const argus_nvs_driver_t *drv = get_driver();
-    drv->write_reset_pending(drv->ctx, true);
-    drv->erase_all(drv->ctx);
-    drv->write_reset_pending(drv->ctx, false);
 
-    /* Reinit the production core — this reads back the now-empty NVS,
+    /* Mark reset-pending before destructive operations.
+     * If power is lost during erase, init recovery will detect this. */
+    esp_err_t pend_err = drv->write_reset_pending(drv->ctx, true);
+    if (pend_err != ESP_OK) {
+        ESP_LOGE(TAG, "Factory reset: write_reset_pending(true) failed: %s",
+                 esp_err_to_name(pend_err));
+        return pend_err;
+    }
+
+    esp_err_t erase_err = drv->erase_all(drv->ctx);
+    if (erase_err != ESP_OK) {
+        ESP_LOGE(TAG, "Factory reset: erase_all failed: %s",
+                 esp_err_to_name(erase_err));
+        /* Do NOT clear reset_pending — recovery will re-erase on next boot */
+        return erase_err;
+    }
+
+    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+    if (clear_err != ESP_OK) {
+        ESP_LOGE(TAG, "Factory reset: write_reset_pending(false) failed: %s",
+                 esp_err_to_name(clear_err));
+        /* Erase succeeded but pending marker stuck. Next boot will re-erase
+         * (idempotent). Continue to reinit core to match erased state. */
+    }
+
+    /* Reinit the production core — reads back now-empty NVS,
      * producing an unprovisioned state with no HWM. */
-    argus_nvs_core_init(&s_prod_core, drv);
+    esp_err_t core_err = argus_nvs_core_init(&s_prod_core, drv);
+    if (core_err != ESP_OK) {
+        ESP_LOGE(TAG, "Factory reset: core reinit failed: %s",
+                 esp_err_to_name(core_err));
+        return core_err;
+    }
 
     /* Set uncommissioned defaults */
     snprintf(s_prod_core.active_config.client_id,
@@ -653,7 +687,9 @@ esp_err_t argus_nvs_config_factory_reset(void)
     snprintf(s_prod_core.active_config.device_name,
              sizeof(s_prod_core.active_config.device_name), "Argus Peristaltic Pump V2");
 
-    return ESP_OK;
+    /* Return the first non-fatal error (clear_err) if erase and core succeeded
+     * but the pending-clear failed. */
+    return clear_err;
 }
 
 void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_payload_t *out_masked)
