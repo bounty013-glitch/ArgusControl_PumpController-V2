@@ -514,6 +514,101 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     return ESP_OK;
 }
 
+/**
+ * @brief Pure boot-recovery transaction operating on injected driver.
+ *
+ * Checks for a pending factory-reset marker. If pending is true,
+ * erases reset-scope data and clears the marker. Returns the exact
+ * originating error on failure without translating it.
+ *
+ * Missing marker/namespace is normal and treated as not pending.
+ * Real storage errors are propagated.
+ *
+ * @param drv  Injected storage driver (production or mock).
+ * @return ESP_OK if no recovery needed or recovery completed.
+ *         Exact error if marker read, erase, or clear failed.
+ */
+esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv)
+{
+    bool reset_pending = false;
+    esp_err_t pend_err = drv->read_reset_pending(drv->ctx, &reset_pending);
+    if (pend_err != ESP_OK) {
+        return pend_err;
+    }
+    if (!reset_pending) {
+        return ESP_OK;
+    }
+
+    /* Pending is true — erase reset-scope data */
+    esp_err_t erase_err = drv->erase_all(drv->ctx);
+    if (erase_err != ESP_OK) {
+        /* Do not clear the marker — recovery will retry on next boot */
+        return erase_err;
+    }
+
+    /* Erase succeeded — clear the marker */
+    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+    if (clear_err != ESP_OK) {
+        /* Marker remains true — next boot will re-erase (idempotent) */
+        return clear_err;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Pure factory-reset transaction operating on caller-owned core and injected driver.
+ *
+ * Orchestrates the durable reset transaction:
+ *   1. Write pending=true (fail-closed: returns immediately on failure)
+ *   2. Erase reset-scope data (returns immediately on failure; marker preserved)
+ *   3. Clear pending (non-fatal: erase succeeded, so core reinit proceeds)
+ *   4. Reinitialize caller-owned core to match the erased state
+ *
+ * Production policy: if clearing the pending marker fails after a successful
+ * erase, the core is still reinitialized to match the erased storage. The
+ * marker remains true and will trigger an idempotent recovery erase on next
+ * boot. The clear error is returned to the caller.
+ *
+ * @param core  Caller-owned core state to reinitialize.
+ * @param drv   Injected storage driver (production or mock).
+ * @return ESP_OK on full success.
+ *         Exact error from the first failing operation.
+ */
+esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_driver_t *drv)
+{
+    /* Step 1: Mark pending before destructive operations */
+    esp_err_t pend_err = drv->write_reset_pending(drv->ctx, true);
+    if (pend_err != ESP_OK) {
+        return pend_err;
+    }
+
+    /* Step 2: Erase reset-scope data (CFG + SYS namespaces) */
+    esp_err_t erase_err = drv->erase_all(drv->ctx);
+    if (erase_err != ESP_OK) {
+        /* Do NOT clear pending — recovery will re-erase on next boot */
+        return erase_err;
+    }
+
+    /* Step 3: Clear pending marker */
+    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+    if (clear_err != ESP_OK) {
+        /* Erase succeeded but marker stuck — next boot will re-erase
+         * (idempotent). Continue to reinit core to match erased state.
+         * This is the documented production policy. */
+    }
+
+    /* Step 4: Reinitialize core to match erased/uncommissioned state */
+    esp_err_t core_err = argus_nvs_core_init(core, drv);
+    if (core_err != ESP_OK) {
+        return core_err;
+    }
+
+    /* Return clear_err if the pending-clear failed but erase and core
+     * succeeded — caller knows the marker is stuck. */
+    return clear_err;
+}
+
 static const argus_nvs_driver_t *get_driver(void)
 {
     return s_custom_driver ? s_custom_driver : &s_prod_driver;
@@ -522,6 +617,7 @@ static const argus_nvs_driver_t *get_driver(void)
 esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
 {
     s_custom_driver = driver;
+    s_initialized = false;
 
     esp_err_t flash_err = ESP_OK;
     if (!s_custom_driver) {
@@ -530,14 +626,12 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
             esp_err_t erase_err = nvs_flash_erase();
             if (erase_err != ESP_OK) {
                 ESP_LOGE(TAG, "nvs_flash_erase() failed: %s", esp_err_to_name(erase_err));
-                s_initialized = true;
                 return erase_err;
             }
             flash_err = nvs_flash_init();
         }
         if (flash_err != ESP_OK) {
             ESP_LOGE(TAG, "nvs_flash_init() failed: %s", esp_err_to_name(flash_err));
-            s_initialized = true;
             return flash_err;
         }
         ESP_LOGI(TAG, "nvs_flash_init() result: %s (%d)", esp_err_to_name(flash_err), flash_err);
@@ -545,35 +639,13 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
 
     const argus_nvs_driver_t *drv = get_driver();
 
-    /* Check for power-interrupted factory reset recovery.
-     * The reset-pending marker lives in a dedicated namespace (ARGUS_NVS_NS_RST)
-     * that factory-reset erasure does not touch, ensuring durability across
-     * power-loss during the erase sequence. */
-    bool reset_pending = false;
-    esp_err_t pend_err = drv->read_reset_pending(drv->ctx, &reset_pending);
-    if (pend_err != ESP_OK) {
-        ESP_LOGE(TAG, "read_reset_pending failed: %s — cannot determine reset state",
-                 esp_err_to_name(pend_err));
-        s_initialized = true;
-        return pend_err;
-    }
-    if (reset_pending) {
-        ESP_LOGW(TAG, "Factory reset pending marker detected. Recovering...");
-        esp_err_t erase_err = drv->erase_all(drv->ctx);
-        if (erase_err != ESP_OK) {
-            ESP_LOGE(TAG, "Recovery erase failed: %s — pending marker preserved",
-                     esp_err_to_name(erase_err));
-            s_initialized = true;
-            return erase_err;
-        }
-        esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
-        if (clear_err != ESP_OK) {
-            ESP_LOGE(TAG, "Recovery pending-clear failed: %s — will retry next boot",
-                     esp_err_to_name(clear_err));
-            s_initialized = true;
-            return clear_err;
-        }
-        ESP_LOGI(TAG, "Factory reset recovery completed successfully.");
+    /* Delegate boot-recovery to the same pure helper exercised by tests.
+     * The reset-pending marker lives in ARGUS_NVS_NS_RST, which
+     * factory-reset erasure does not touch, ensuring durability. */
+    esp_err_t recovery_err = argus_nvs_core_recovery_check(drv);
+    if (recovery_err != ESP_OK) {
+        ESP_LOGE(TAG, "Boot recovery failed: %s", esp_err_to_name(recovery_err));
+        return recovery_err;
     }
 
     /* Delegate to the single core algorithm for slot selection,
@@ -581,7 +653,6 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
     esp_err_t core_err = argus_nvs_core_init(&s_prod_core, drv);
     if (core_err != ESP_OK) {
         ESP_LOGE(TAG, "Core init failed: %s", esp_err_to_name(core_err));
-        s_initialized = true;
         return core_err;
     }
 
@@ -695,51 +766,25 @@ esp_err_t argus_nvs_config_factory_reset(void)
 {
     const argus_nvs_driver_t *drv = get_driver();
 
-    /* Mark reset-pending before destructive operations.
-     * If power is lost during erase, init recovery will detect this. */
-    esp_err_t pend_err = drv->write_reset_pending(drv->ctx, true);
-    if (pend_err != ESP_OK) {
-        ESP_LOGE(TAG, "Factory reset: write_reset_pending(true) failed: %s",
-                 esp_err_to_name(pend_err));
-        return pend_err;
+    /* Delegate to the same pure helper exercised by tests */
+    esp_err_t err = argus_nvs_core_factory_reset(&s_prod_core, drv);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "Factory reset transaction failed: %s", esp_err_to_name(err));
+        /* On pending-clear failure (erase succeeded), the core has already
+         * been reinitialized by the helper. Set defaults regardless. */
     }
 
-    esp_err_t erase_err = drv->erase_all(drv->ctx);
-    if (erase_err != ESP_OK) {
-        ESP_LOGE(TAG, "Factory reset: erase_all failed: %s",
-                 esp_err_to_name(erase_err));
-        /* Do NOT clear reset_pending — recovery will re-erase on next boot */
-        return erase_err;
+    /* Set uncommissioned defaults if core was reinitialized */
+    if (!s_prod_core.has_valid_config) {
+        snprintf(s_prod_core.active_config.client_id,
+                 sizeof(s_prod_core.active_config.client_id), "default_client");
+        snprintf(s_prod_core.active_config.unit_id,
+                 sizeof(s_prod_core.active_config.unit_id), "unit_01");
+        snprintf(s_prod_core.active_config.device_name,
+                 sizeof(s_prod_core.active_config.device_name), "Argus Peristaltic Pump V2");
     }
 
-    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
-    if (clear_err != ESP_OK) {
-        ESP_LOGE(TAG, "Factory reset: write_reset_pending(false) failed: %s",
-                 esp_err_to_name(clear_err));
-        /* Erase succeeded but pending marker stuck. Next boot will re-erase
-         * (idempotent). Continue to reinit core to match erased state. */
-    }
-
-    /* Reinit the production core — reads back now-empty NVS,
-     * producing an unprovisioned state with no HWM. */
-    esp_err_t core_err = argus_nvs_core_init(&s_prod_core, drv);
-    if (core_err != ESP_OK) {
-        ESP_LOGE(TAG, "Factory reset: core reinit failed: %s",
-                 esp_err_to_name(core_err));
-        return core_err;
-    }
-
-    /* Set uncommissioned defaults */
-    snprintf(s_prod_core.active_config.client_id,
-             sizeof(s_prod_core.active_config.client_id), "default_client");
-    snprintf(s_prod_core.active_config.unit_id,
-             sizeof(s_prod_core.active_config.unit_id), "unit_01");
-    snprintf(s_prod_core.active_config.device_name,
-             sizeof(s_prod_core.active_config.device_name), "Argus Peristaltic Pump V2");
-
-    /* Return the first non-fatal error (clear_err) if erase and core succeeded
-     * but the pending-clear failed. */
-    return clear_err;
+    return err;
 }
 
 void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_payload_t *out_masked)

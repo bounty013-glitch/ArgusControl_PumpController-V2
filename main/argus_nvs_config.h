@@ -81,6 +81,25 @@ esp_err_t argus_nvs_core_get(const argus_nvs_core_t *core, argus_config_payload_
 esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_payload_t *in_cfg);
 
 /**
+ * @brief Pure boot-recovery transaction: check pending marker, re-erase if set, clear marker.
+ * @param drv  Injected storage driver.
+ * @return ESP_OK if no recovery needed or recovery completed successfully.
+ */
+esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv);
+
+/**
+ * @brief Pure factory-reset transaction: mark pending, erase, clear, reinit core.
+ *
+ * Production policy: if clearing the pending marker fails after a successful
+ * erase, the core is still reinitialized to match the erased storage.
+ *
+ * @param core  Caller-owned core state to reinitialize.
+ * @param drv   Injected storage driver.
+ * @return ESP_OK on full success; exact originating error otherwise.
+ */
+esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_driver_t *drv);
+
+/**
  * @brief Initialize NVS configuration manager using production or injected driver.
  * @param driver Optional mock driver for unit testing; pass NULL for production ESP-IDF NVS.
  * @return ESP_OK on success.
