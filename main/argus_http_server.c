@@ -187,28 +187,7 @@ static esp_err_t portal_set_password(const char *new_pw)
     return err;
 }
 
-/* ── Identity Provisioning Lock ──────────────────────────────── */
 
-static bool is_identity_provisioned(void)
-{
-    nvs_handle_t nvs;
-    if (nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return false;
-    uint8_t val = 0;
-    nvs_get_u8(nvs, "id_provisioned", &val);
-    nvs_close(nvs);
-    return (val == 1);
-}
-
-static esp_err_t set_identity_provisioned(void)
-{
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) return err;
-    err = nvs_set_u8(nvs, "id_provisioned", 1);
-    if (err == ESP_OK) err = nvs_commit(nvs);
-    nvs_close(nvs);
-    return err;
-}
 
 /* ── JSON String Extraction Helpers ─────────────────────────── */
 
@@ -833,6 +812,55 @@ static esp_err_t portal_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Phase 4B.2: Bounded HTTP body receiver ──────────────────────── */
+
+/**
+ * @brief Read complete HTTP request body with bounds checking.
+ *
+ * Uses content_len from the request, loops until all bytes are received,
+ * rejects oversized bodies, and always NUL-terminates on success.
+ *
+ * @param req      HTTP request handle.
+ * @param buf      Destination buffer (must have room for buf_size bytes including NUL).
+ * @param buf_size Size of destination buffer.
+ * @return Number of body bytes read on success (>= 0), or -1 on error.
+ *         On error, an appropriate HTTP error response has already been sent.
+ */
+static int recv_full_body(httpd_req_t *req, char *buf, size_t buf_size)
+{
+    size_t content_len = req->content_len;
+    if (content_len == 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"empty_body\"}");
+        return -1;
+    }
+    if (content_len >= buf_size) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_sendstr(req, "{\"error\":\"body_too_large\"}");
+        /* Drain the socket to prevent connection reuse issues */
+        char drain[64];
+        while (httpd_req_recv(req, drain, sizeof(drain)) > 0) {}
+        return -1;
+    }
+    size_t received = 0;
+    while (received < content_len) {
+        int ret = httpd_req_recv(req, buf + received, content_len - received);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                httpd_resp_set_status(req, "408 Request Timeout");
+                httpd_resp_sendstr(req, "{\"error\":\"recv_timeout\"}");
+            } else {
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_sendstr(req, "{\"error\":\"recv_failed\"}");
+            }
+            return -1;
+        }
+        received += (size_t)ret;
+    }
+    buf[received] = '\0';
+    return (int)received;
+}
+
 /* ── Phase 4B.2: Identity Config Page HTML ───────────────────────── */
 
 static const char IDENTITY_PAGE_HTML[] =
@@ -1060,7 +1088,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    bool id_prov = is_identity_provisioned();
+    bool id_prov = (cfg.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0;
     bool pass_set = (strlen(cfg.sta_pass) > 0);
 
     char esc_client[ARGUS_CFG_CLIENT_ID_MAX * 2 + 1];
@@ -1102,7 +1130,9 @@ static esp_err_t config_save_handler(httpd_req_t *req)
 
     /* Mode gate: config writes only in UNCOMMISSIONED_AP or SERVICE_AP_ONLY */
     argus_network_mode_t mode = argus_net_mgr_get_mode();
-    if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP && mode != ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+    if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP &&
+        mode != ARGUS_NET_MODE_SERVICE_AP_ONLY &&
+        mode != ARGUS_NET_MODE_AP_DISCOVERABLE) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_sendstr(req, "{\"error\":\"config_write_not_allowed_in_current_mode\"}");
         return ESP_OK;
@@ -1110,13 +1140,8 @@ static esp_err_t config_save_handler(httpd_req_t *req)
 
     /* Read request body */
     char body[512];
-    int body_len = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (body_len <= 0) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"error\":\"empty_body\"}");
-        return ESP_OK;
-    }
-    body[body_len] = '\0';
+    int body_len = recv_full_body(req, body, sizeof(body));
+    if (body_len < 0) return ESP_OK;  /* error response already sent */
 
     /* Extract scope */
     char scope[16] = {0};
@@ -1137,7 +1162,7 @@ static esp_err_t config_save_handler(httpd_req_t *req)
 
     if (strcmp(scope, "identity") == 0) {
         /* Identity scope: check provisioning lock */
-        if (is_identity_provisioned()) {
+        if (cfg.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) {
             httpd_resp_set_status(req, "403 Forbidden");
             httpd_resp_sendstr(req, "{\"error\":\"identity_locked\","
                 "\"message\":\"Identity is locked after initial provisioning\"}");
@@ -1195,6 +1220,9 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         snprintf(cfg.client_id, sizeof(cfg.client_id), "%s", new_client);
         snprintf(cfg.unit_id, sizeof(cfg.unit_id), "%s", new_unit);
         snprintf(cfg.device_name, sizeof(cfg.device_name), "%s", new_name);
+
+        /* Set provisioned flag — will be CRC'd and committed atomically */
+        cfg.provisioned_flags |= ARGUS_CFG_PROVISIONED_IDENTITY;
 
     } else if (strcmp(scope, "wifi") == 0) {
         /* WiFi scope */
@@ -1273,15 +1301,7 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Set identity provisioned lock if this was an identity save */
-    if (strcmp(scope, "identity") == 0) {
-        esp_err_t lock_err = set_identity_provisioned();
-        if (lock_err != ESP_OK) {
-            ESP_LOGW(TAG, "Identity saved but lock flag write failed: %s",
-                     esp_err_to_name(lock_err));
-            /* Config was saved — lock failure is non-fatal (fail-safe: re-saveable) */
-        }
-    }
+
 
     httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
     return ESP_OK;
@@ -1382,13 +1402,8 @@ static esp_err_t password_post_handler(httpd_req_t *req)
 
     /* Read body */
     char body[128];
-    int len = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (len <= 0) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"empty body\"}");
-        return ESP_OK;
-    }
-    body[len] = '\0';
+    int len = recv_full_body(req, body, sizeof(body));
+    if (len < 0) return ESP_OK;  /* error response already sent */
 
     /* Simple JSON parse — find "new_password":"..." */
     const char *key = "\"new_password\"";

@@ -184,6 +184,31 @@
 
 ---
 
+## DHR-011 — Always-Available Service AP and HTTP Portal on Commissioned Devices
+
+| Field | Value |
+|-------|-------|
+| **System Area** | Network Lifecycle / Portal |
+| **Phase Introduced** | Phase 4B.2 Corrections |
+| **Status** | OPEN |
+| **Target Phase** | Post-field-evaluation |
+| **Operator Decision** | 2026-07-18 |
+
+**Limitation:** Commissioned devices boot with the service AP and HTTP portal active by default in APSTA mode (`AP_DISCOVERABLE`). The portal is credential-protected but always advertised. No persistent enable/disable toggle exists.
+
+**Rationale:** The operator has determined that field-accessible configuration requires the portal to be reachable without CLI service entry. This is an accepted temporary lifecycle policy for bench and field evaluation. AP visibility does not grant motor authority — the portal is read/config only. Motor commands require MQTT supervisory authority from the STA network path.
+
+**Security posture:** Portal credential protection (DHR-002, DHR-003, DHR-004) applies. The AP is WPA2-PSK protected with build-time credentials. All endpoints require HTTP Basic Auth.
+
+**Deferred items:**
+- Persistent AP enable/disable toggle per-device
+- Final production default (AP on/off for commissioned devices)
+- Decision on whether production deployments should default to AP-off
+
+**Decision criteria:** Extended bench and field-use evaluation will determine whether the always-on AP is the correct production default or whether a toggle and/or default-off policy is needed.
+
+---
+
 ## Register Maintenance
 
 This register is maintained as a living document. New entries are appended as limitations are identified. Entries are closed when the limitation is resolved, with closure evidence documenting the specific change, test, or audit that addressed the item.

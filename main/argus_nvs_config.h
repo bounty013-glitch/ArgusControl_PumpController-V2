@@ -15,7 +15,9 @@
 extern "C" {
 #endif
 
-#define ARGUS_CONFIG_SCHEMA_VERSION     1
+#define ARGUS_CONFIG_SCHEMA_VERSION     2
+#define ARGUS_CONFIG_SCHEMA_V1          1
+#define ARGUS_CONFIG_PAYLOAD_V1_SIZE    228  /* packed size without provisioned_flags */
 #define ARGUS_CONFIG_VALID_MARKER       0xA5A55A5AU
 #define ARGUS_CONFIG_MASK_STRING        "********"
 
@@ -26,12 +28,15 @@ extern "C" {
 #define ARGUS_CFG_STA_PASS_MIN          8
 #define ARGUS_CFG_STA_PASS_MAX          63
 
+#define ARGUS_CFG_PROVISIONED_IDENTITY  0x01  /**< Bit 0: identity is locked after initial provisioning */
+
 typedef struct __attribute__((packed)) {
     char client_id[ARGUS_CFG_CLIENT_ID_MAX + 1];   /**< 32 chars + null */
     char unit_id[ARGUS_CFG_UNIT_ID_MAX + 1];       /**< 32 chars + null */
     char device_name[ARGUS_CFG_DEV_NAME_MAX + 1];  /**< 64 chars + null */
     char sta_ssid[ARGUS_CFG_STA_SSID_MAX + 1];     /**< 32 bytes + null */
     char sta_pass[ARGUS_CFG_STA_PASS_MAX + 1];     /**< 63 chars + null */
+    uint8_t provisioned_flags;                     /**< Bitfield: ARGUS_CFG_PROVISIONED_IDENTITY */
 } argus_config_payload_t;
 
 typedef struct __attribute__((packed)) {

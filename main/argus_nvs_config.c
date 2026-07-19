@@ -29,25 +29,11 @@ static bool s_initialized = false;
 
 static const argus_nvs_driver_t *s_custom_driver = NULL;
 
-// Standard IEEE 802.3 CRC32 pure C implementation for cross-platform portability
-uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload)
-{
-    if (!payload) return 0;
-    const uint8_t *data = (const uint8_t *)payload;
-    size_t len = sizeof(argus_config_payload_t);
-    uint32_t crc = 0xFFFFFFFFU;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320U;
-            } else {
-                crc = (crc >> 1);
-            }
-        }
-    }
-    return ~crc;
-}
+// Standard IEEE 802.3 CRC32 — delegates to internal raw helper after it's defined.
+// Forward declaration of calc_crc32_raw is not needed because argus_nvs_config_calc_crc32
+// is called externally and calc_crc32_raw is static. The public function is defined after
+// calc_crc32_raw below. We keep this position as a stub for the declaration order.
+// (Actual implementation moved below calc_crc32_raw.)
 
 bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b)
 {
@@ -56,16 +42,73 @@ bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b)
     return ((int32_t)(gen_a - gen_b)) > 0;
 }
 
-static bool is_slot_valid(const argus_cfg_slot_t *slot)
+/**
+ * @brief Compute CRC32 over raw bytes (used for V1 migration and V2 payloads).
+ */
+static uint32_t calc_crc32_raw(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320U;
+            else         crc = (crc >> 1);
+        }
+    }
+    return ~crc;
+}
+
+uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload)
+{
+    if (!payload) return 0;
+    return calc_crc32_raw((const uint8_t *)payload, sizeof(argus_config_payload_t));
+}
+
+/**
+ * @brief Validate a dual-slot record. Supports V1→V2 transparent migration.
+ *
+ * V1 slots have schema_version=1, payload_length=228 (no provisioned_flags).
+ * On valid V1 read, provisioned_flags is set to 0 (unprovisioned, eligible
+ * for one portal provisioning). This is a documented development migration
+ * rule, not an inferred universal production policy.
+ *
+ * V2 slots have schema_version=2, payload_length=229 (with provisioned_flags).
+ */
+static bool is_slot_valid(argus_cfg_slot_t *slot)
 {
     if (!slot) return false;
-    if (slot->schema_version != ARGUS_CONFIG_SCHEMA_VERSION) return false;
     if (slot->valid_marker != ARGUS_CONFIG_VALID_MARKER) return false;
     if (slot->config_generation == 0) return false;
-    if (slot->payload_length != sizeof(argus_config_payload_t)) return false;
-    uint32_t computed_crc = argus_nvs_config_calc_crc32(&slot->payload);
-    if (computed_crc != slot->crc32) return false;
-    return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+
+    if (slot->schema_version == ARGUS_CONFIG_SCHEMA_VERSION &&
+        slot->payload_length == sizeof(argus_config_payload_t)) {
+        /* Current schema — verify CRC over full payload */
+        uint32_t computed = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                           sizeof(argus_config_payload_t));
+        if (computed != slot->crc32) return false;
+        return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+    }
+
+    if (slot->schema_version == ARGUS_CONFIG_SCHEMA_V1 &&
+        slot->payload_length == ARGUS_CONFIG_PAYLOAD_V1_SIZE) {
+        /* V1 migration: CRC was over the old 228-byte payload (no flags field) */
+        uint32_t computed = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                           ARGUS_CONFIG_PAYLOAD_V1_SIZE);
+        if (computed != slot->crc32) return false;
+
+        /* Migrate in-place: set provisioned_flags to 0 (identity editable) */
+        slot->payload.provisioned_flags = 0;
+
+        /* Upgrade slot metadata so commit writes V2 */
+        slot->schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
+        slot->payload_length = sizeof(argus_config_payload_t);
+        slot->crc32 = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                      sizeof(argus_config_payload_t));
+
+        return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+    }
+
+    return false;  /* Unknown schema — reject */
 }
 
 // Default production NVS storage driver implementations

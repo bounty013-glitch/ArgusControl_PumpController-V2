@@ -139,8 +139,15 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        set_net_mode(ARGUS_NET_MODE_COMMISSIONED_STA);
+                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
+                        s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA ||
+                        s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
+                        /* Commissioned boot lands in AP_DISCOVERABLE (APSTA).
+                         * STA connect does NOT change to COMMISSIONED_STA —
+                         * AP and HTTP remain active per operator policy. */
+                        if (s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
+                            set_net_mode(ARGUS_NET_MODE_AP_DISCOVERABLE);
+                        }
                         if (s_broker_start_cb != NULL) {
                             s_broker_start_cb();
                         }
@@ -170,13 +177,54 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED:
                     break;
 
-                case ARGUS_NET_EVT_RESTART_REQUEST:
-                    ESP_LOGI(TAG, "Restart request received. Stopping HTTP server...");
+                case ARGUS_NET_EVT_RESTART_REQUEST: {
+                    ESP_LOGI(TAG, "Restart request received. Revalidating safety...");
+
+                    /* Phase 1: Revalidate machine state under safety check */
+                    argus_state_snapshot_t snap;
+                    argus_state_mgr_get_snapshot(&snap);
+                    bool is_safe = (!snap.estop_latched &&
+                                    snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
+                                    snap.machine_state != ARGUS_STATE_FAULTED &&
+                                    (snap.machine_state == ARGUS_STATE_HOLDING ||
+                                     snap.machine_state == ARGUS_STATE_UNLOCKED));
+                    if (!is_safe) {
+                        ESP_LOGW(TAG, "Restart rejected: machine state %s is not safe for reboot",
+                                 argus_state_mgr_get_state_name(snap.machine_state));
+                        break;
+                    }
+
+                    /* Phase 2: Revoke authority to prevent new motion commands */
+                    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+                    ESP_LOGI(TAG, "Authority revoked. Waiting 500ms for HTTP response grace...");
+
+                    /* Phase 3: HTTP response grace period — the handler already
+                     * returned its 200 response before posting this event */
+                    vTaskDelay(pdMS_TO_TICKS(500));
+
+                    /* Phase 4: Stop HTTP server */
                     argus_http_server_stop();
-                    ESP_LOGI(TAG, "HTTP server stopped. Restarting in 200ms...");
-                    vTaskDelay(pdMS_TO_TICKS(200));
+
+                    /* Phase 5: Final safety revalidation before reboot */
+                    argus_state_mgr_get_snapshot(&snap);
+                    is_safe = (!snap.estop_latched &&
+                               snap.machine_state != ARGUS_STATE_EMERGENCY_STOPPED &&
+                               snap.machine_state != ARGUS_STATE_FAULTED &&
+                               (snap.machine_state == ARGUS_STATE_HOLDING ||
+                                snap.machine_state == ARGUS_STATE_UNLOCKED));
+                    if (!is_safe) {
+                        ESP_LOGE(TAG, "Restart aborted: machine state changed to %s during grace",
+                                 argus_state_mgr_get_state_name(snap.machine_state));
+                        /* Fail closed: do NOT reboot, do NOT restore authority.
+                         * System is in an unknown transition state; operator
+                         * must power-cycle manually. */
+                        break;
+                    }
+
+                    ESP_LOGI(TAG, "Safety revalidated. Rebooting now.");
                     esp_restart();
                     break;  /* unreachable */
+                }
 
                 default:
                     break;
@@ -243,17 +291,40 @@ esp_err_t argus_net_mgr_init(void)
             ESP_LOGW(TAG, "HTTP server start failed in UNCOMMISSIONED_AP: %s", esp_err_to_name(http_err));
         }
     } else {
-        // Commissioned STA mode
-        s_net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+        /* Commissioned APSTA mode — AP and HTTP portal remain active.
+         * This is an operator-approved field-service policy (see DHR-011).
+         * STA connects to configured network for MQTT supervisory path.
+         * AP visibility does NOT grant local motor authority. */
+        s_net_mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
 
+        argus_identity_t id;
+        argus_identity_get(&id);
+
+        /* Configure AP interface */
+        wifi_config_t ap_config = {0};
+        strlcpy((char *)ap_config.ap.ssid, id.service_ssid, sizeof(ap_config.ap.ssid));
+        strlcpy((char *)ap_config.ap.password, CONFIG_ARGUS_SERVICE_AP_PASS, sizeof(ap_config.ap.password));
+        ap_config.ap.ssid_len = strlen(id.service_ssid);
+        ap_config.ap.max_connection = 1;
+        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+        /* Configure STA interface */
         wifi_config_t sta_config = {0};
         strlcpy((char *)sta_config.sta.ssid, cfg_payload.sta_ssid, sizeof(sta_config.sta.ssid));
         strlcpy((char *)sta_config.sta.password, cfg_payload.sta_pass, sizeof(sta_config.sta.password));
 
-        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+        esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         esp_wifi_start();
         esp_wifi_connect();
+
+        /* Start HTTP portal — non-fatal if it fails */
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
+        }
     }
 
     xTaskCreate(net_mgr_task, "argus_net_mgr", 4096, NULL, 4, NULL);
@@ -288,6 +359,12 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
+        /* Already in APSTA mode — idempotent success */
+        ESP_LOGI(TAG, "Already in AP_DISCOVERABLE mode (idempotent).");
+        xSemaphoreGive(s_net_mutex);
+        return ESP_OK;
+    }
     if (s_net_mode != ARGUS_NET_MODE_COMMISSIONED_STA) {
         ESP_LOGE(TAG, "Cannot enable AP discoverability: network mode must be COMMISSIONED_STA (current: %s)", argus_net_mgr_get_mode_name(s_net_mode));
         xSemaphoreGive(s_net_mutex);
