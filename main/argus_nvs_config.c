@@ -16,6 +16,10 @@ static const char *TAG = "argus_nvs_cfg";
 
 #define ARGUS_NVS_NS_CFG        "argus_cfg"
 #define ARGUS_NVS_NS_SYS        "argus_sys"
+#define ARGUS_NVS_NS_RST        "argus_rst"  /* Dedicated namespace for reset-pending marker.
+                                              * Factory reset erases CFG and SYS but never RST,
+                                              * ensuring the marker survives power-loss during
+                                              * reset and can trigger recovery on next boot. */
 #define ARGUS_NVS_KEY_SLOT_0    "slot_a"
 #define ARGUS_NVS_KEY_SLOT_1    "slot_b"
 #define ARGUS_NVS_KEY_SELECTOR  "active_slot"
@@ -172,16 +176,30 @@ static esp_err_t prod_read_reset_pending(void *ctx, bool *out_pending)
 {
     (void)ctx;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READONLY, &handle);
-    if (err != ESP_OK) {
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_RST, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Namespace doesn't exist → fresh device, no reset pending */
         *out_pending = false;
         return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        /* Real storage error → propagate, do not hide */
+        return err;
     }
 
     uint8_t val = 0;
     err = nvs_get_u8(handle, ARGUS_NVS_KEY_RESET_PEND, &val);
     nvs_close(handle);
-    *out_pending = (err == ESP_OK && val == 1);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Key doesn't exist → not pending */
+        *out_pending = false;
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        /* Real read error → propagate */
+        return err;
+    }
+    *out_pending = (val == 1);
     return ESP_OK;
 }
 
@@ -189,7 +207,7 @@ static esp_err_t prod_write_reset_pending(void *ctx, bool pending)
 {
     (void)ctx;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_RST, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
 
     err = nvs_set_u8(handle, ARGUS_NVS_KEY_RESET_PEND, pending ? 1 : 0);
@@ -509,21 +527,53 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
     if (!s_custom_driver) {
         flash_err = nvs_flash_init();
         if (flash_err == ESP_ERR_NVS_NO_FREE_PAGES || flash_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            nvs_flash_erase();
+            esp_err_t erase_err = nvs_flash_erase();
+            if (erase_err != ESP_OK) {
+                ESP_LOGE(TAG, "nvs_flash_erase() failed: %s", esp_err_to_name(erase_err));
+                s_initialized = true;
+                return erase_err;
+            }
             flash_err = nvs_flash_init();
+        }
+        if (flash_err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_flash_init() failed: %s", esp_err_to_name(flash_err));
+            s_initialized = true;
+            return flash_err;
         }
         ESP_LOGI(TAG, "nvs_flash_init() result: %s (%d)", esp_err_to_name(flash_err), flash_err);
     }
 
     const argus_nvs_driver_t *drv = get_driver();
 
-    /* Check for power-interrupted factory reset recovery */
+    /* Check for power-interrupted factory reset recovery.
+     * The reset-pending marker lives in a dedicated namespace (ARGUS_NVS_NS_RST)
+     * that factory-reset erasure does not touch, ensuring durability across
+     * power-loss during the erase sequence. */
     bool reset_pending = false;
-    drv->read_reset_pending(drv->ctx, &reset_pending);
+    esp_err_t pend_err = drv->read_reset_pending(drv->ctx, &reset_pending);
+    if (pend_err != ESP_OK) {
+        ESP_LOGE(TAG, "read_reset_pending failed: %s — cannot determine reset state",
+                 esp_err_to_name(pend_err));
+        s_initialized = true;
+        return pend_err;
+    }
     if (reset_pending) {
         ESP_LOGW(TAG, "Factory reset pending marker detected. Recovering...");
-        drv->erase_all(drv->ctx);
-        drv->write_reset_pending(drv->ctx, false);
+        esp_err_t erase_err = drv->erase_all(drv->ctx);
+        if (erase_err != ESP_OK) {
+            ESP_LOGE(TAG, "Recovery erase failed: %s — pending marker preserved",
+                     esp_err_to_name(erase_err));
+            s_initialized = true;
+            return erase_err;
+        }
+        esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+        if (clear_err != ESP_OK) {
+            ESP_LOGE(TAG, "Recovery pending-clear failed: %s — will retry next boot",
+                     esp_err_to_name(clear_err));
+            s_initialized = true;
+            return clear_err;
+        }
+        ESP_LOGI(TAG, "Factory reset recovery completed successfully.");
     }
 
     /* Delegate to the single core algorithm for slot selection,

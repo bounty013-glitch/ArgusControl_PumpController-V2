@@ -52,6 +52,7 @@ typedef struct {
     esp_err_t selector_write_error; /* If non-zero, mock_write_selector returns this */
     esp_err_t erase_all_error;   /* If non-zero, mock_erase_all returns this */
     esp_err_t reset_pend_write_error; /* If non-zero, mock_write_reset_pending returns this */
+    esp_err_t reset_pend_read_error;  /* If non-zero, mock_read_reset_pending returns this */
 } mock_nvs_store_t;
 
 static esp_err_t mock_read_slot(void *ctx, uint8_t slot_index, argus_cfg_slot_t *out_slot)
@@ -105,6 +106,7 @@ static esp_err_t mock_read_reset_pending(void *ctx, bool *out_pending)
 {
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
+    if (store->reset_pend_read_error != ESP_OK) return store->reset_pend_read_error;
     *out_pending = store->reset_pending;
     return ESP_OK;
 }
@@ -123,15 +125,22 @@ static esp_err_t mock_erase_all(void *ctx)
     mock_nvs_store_t *store = (mock_nvs_store_t *)ctx;
     if (!store) return ESP_ERR_INVALID_ARG;
     if (store->erase_all_error != ESP_OK) return store->erase_all_error;
-    /* Preserve error injection fields across erase */
+    /* Erase CFG and SYS data but NOT the reset-pending marker.
+     * In production, rst_pend lives in ARGUS_NVS_NS_RST which
+     * factory-reset erasure does not touch. The mock mirrors this
+     * by preserving reset_pending and all error-injection fields. */
+    bool saved_reset_pending = store->reset_pending;
     esp_err_t saved_erase_err = store->erase_all_error;
     esp_err_t saved_rpw_err = store->reset_pend_write_error;
+    esp_err_t saved_rpr_err = store->reset_pend_read_error;
     esp_err_t saved_hwm_r_err = store->hwm_read_error;
     esp_err_t saved_hwm_w_err = store->hwm_write_error;
     esp_err_t saved_sel_w_err = store->selector_write_error;
     memset(store, 0, sizeof(mock_nvs_store_t));
+    store->reset_pending = saved_reset_pending;
     store->erase_all_error = saved_erase_err;
     store->reset_pend_write_error = saved_rpw_err;
+    store->reset_pend_read_error = saved_rpr_err;
     store->hwm_read_error = saved_hwm_r_err;
     store->hwm_write_error = saved_hwm_w_err;
     store->selector_write_error = saved_sel_w_err;
@@ -2568,16 +2577,25 @@ static esp_err_t test_core_factory_reset_clears_lock(void)
     TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
     TEST_ASSERT(store.has_provisioned_hwm, "HWM not written");
 
-    /* Simulate factory reset: mark pending, erase, clear pending, reinit.
-     * This is the exact sequence argus_nvs_config_factory_reset() performs. */
+    /* Simulate factory reset: mark pending, erase, verify marker survived,
+     * clear pending, reinit. This is the exact sequence
+     * argus_nvs_config_factory_reset() performs. */
     TEST_ASSERT(driver.write_reset_pending(driver.ctx, true) == ESP_OK, "Pend write failed");
-    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
-    TEST_ASSERT(driver.write_reset_pending(driver.ctx, false) == ESP_OK, "Pend clear failed");
+    TEST_ASSERT(store.reset_pending, "Pending not set before erase");
 
-    /* Verify NVS is cleared */
+    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
+
+    /* Key invariant: pending marker MUST survive erase (separate namespace) */
+    TEST_ASSERT(store.reset_pending, "Pending marker erased with data — recovery hole");
+
+    /* Config data IS erased */
     TEST_ASSERT(!store.has_provisioned_hwm, "HWM survives factory reset");
     TEST_ASSERT(!store.has_slot_a, "Slot A survives factory reset");
     TEST_ASSERT(!store.has_slot_b, "Slot B survives factory reset");
+
+    /* Now clear the pending marker */
+    TEST_ASSERT(driver.write_reset_pending(driver.ctx, false) == ESP_OK, "Pend clear failed");
+    TEST_ASSERT(!store.reset_pending, "Pending not cleared");
 
     /* Reinit core on erased store */
     argus_nvs_core_t core2;
@@ -2669,7 +2687,244 @@ static esp_err_t test_core_hwm_persists_across_reinit(void)
     return ESP_OK;
 }
 
+/* ── Reset transaction durability tests ────────────────────────────── */
+
+// Test 71: write_reset_pending(true) failure — no erase, original data preserved
+static esp_err_t test_reset_pend_write_fails_no_erase(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Inject pending-write failure */
+    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    esp_err_t err = driver.write_reset_pending(driver.ctx, true);
+    TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE, "Pend write should have failed");
+
+    /* No erase should have occurred — original data intact */
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM lost despite pend-write failure");
+    TEST_ASSERT(store.has_slot_a || store.has_slot_b, "Slots lost despite pend-write failure");
+    TEST_ASSERT(!store.reset_pending, "Pending set despite write failure");
+    return ESP_OK;
+}
+
+// Test 72: Erase fails after pending=true — pending remains true, erase error returned
+static esp_err_t test_reset_erase_fails_pending_survives(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Set pending, then fail erase */
+    TEST_ASSERT(driver.write_reset_pending(driver.ctx, true) == ESP_OK, "Pend write failed");
+    store.erase_all_error = ESP_ERR_FLASH_BASE;
+    esp_err_t erase_err = driver.erase_all(driver.ctx);
+    TEST_ASSERT(erase_err == ESP_ERR_FLASH_BASE, "Wrong erase error");
+
+    /* Pending MUST remain true — recovery on next boot */
+    TEST_ASSERT(store.reset_pending, "Pending cleared despite erase failure");
+    /* Data must survive since erase failed */
+    TEST_ASSERT(store.has_provisioned_hwm, "HWM lost despite erase failure");
+    return ESP_OK;
+}
+
+// Test 73: Erase succeeds but clearing pending fails — pending remains true
+static esp_err_t test_reset_clear_fails_pending_remains(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Successful erase */
+    TEST_ASSERT(driver.write_reset_pending(driver.ctx, true) == ESP_OK, "Pend write failed");
+    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
+    TEST_ASSERT(store.reset_pending, "Pending lost during erase");
+
+    /* Fail the clear */
+    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    esp_err_t clear_err = driver.write_reset_pending(driver.ctx, false);
+    TEST_ASSERT(clear_err == ESP_ERR_NVS_INVALID_HANDLE, "Clear should have failed");
+
+    /* Pending MUST remain true — will retry on next boot */
+    TEST_ASSERT(store.reset_pending, "Pending cleared despite write failure");
+    /* Data IS erased (erase succeeded) */
+    TEST_ASSERT(!store.has_provisioned_hwm, "HWM survived successful erase");
+    return ESP_OK;
+}
+
+// Test 74: Next-boot recovery with pending=true — erase reruns, pending cleared
+static esp_err_t test_reset_boot_recovery_reruns_erase(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Simulate power loss after erase but before clearing pending.
+     * The marker survives because it's in a separate namespace. */
+    store.reset_pending = true;
+    /* Data already committed, simulating a stale state after a partial reset */
+
+    /* Simulate next boot: read_pending → true, erase, clear, init core */
+    bool pending = false;
+    TEST_ASSERT(driver.read_reset_pending(driver.ctx, &pending) == ESP_OK, "Read failed");
+    TEST_ASSERT(pending, "Pending should be true on recovery boot");
+
+    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Recovery erase failed");
+    TEST_ASSERT(store.reset_pending, "Pending cleared during erase");
+    TEST_ASSERT(!store.has_provisioned_hwm, "HWM survives recovery erase");
+    TEST_ASSERT(!store.has_slot_a, "Slot A survives recovery erase");
+    TEST_ASSERT(!store.has_slot_b, "Slot B survives recovery erase");
+
+    TEST_ASSERT(driver.write_reset_pending(driver.ctx, false) == ESP_OK, "Clear failed");
+    TEST_ASSERT(!store.reset_pending, "Pending not cleared after recovery");
+
+    /* Core initializes into erased/uncommissioned state */
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Recovery core init failed");
+    TEST_ASSERT(!core2.has_valid_config, "Config valid after recovery erase");
+    return ESP_OK;
+}
+
+// Test 75: Pending-marker read returns real storage error — not interpreted as false
+static esp_err_t test_reset_pend_read_error_propagates(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Inject read error */
+    store.reset_pend_read_error = ESP_ERR_NVS_INVALID_HANDLE;
+    bool pending = false;
+    esp_err_t err = driver.read_reset_pending(driver.ctx, &pending);
+    TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE,
+                "Read error not propagated — was hidden as false");
+    return ESP_OK;
+}
+
+// Test 76: Missing pending key/namespace — treated as not pending (normal)
+static esp_err_t test_reset_pend_missing_is_not_pending(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Fresh store: reset_pending defaults to false, no read error */
+    bool pending = true;
+    TEST_ASSERT(driver.read_reset_pending(driver.ctx, &pending) == ESP_OK, "Read failed");
+    TEST_ASSERT(!pending, "Fresh store should not have pending marker");
+
+    /* Core init should succeed normally */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    return ESP_OK;
+}
+
+// Test 77: Recovery erase failure during init — exact error returned, pending preserved
+static esp_err_t test_reset_recovery_erase_failure_propagates(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Set pending marker to trigger recovery on init */
+    store.reset_pending = true;
+
+    /* Inject erase failure */
+    store.erase_all_error = ESP_ERR_FLASH_BASE;
+
+    /* Simulate the init recovery sequence */
+    bool pending = false;
+    TEST_ASSERT(driver.read_reset_pending(driver.ctx, &pending) == ESP_OK, "Read failed");
+    TEST_ASSERT(pending, "Pending should be true");
+
+    esp_err_t erase_err = driver.erase_all(driver.ctx);
+    TEST_ASSERT(erase_err == ESP_ERR_FLASH_BASE, "Wrong erase error");
+
+    /* Pending must remain true for retry on next boot */
+    TEST_ASSERT(store.reset_pending, "Pending cleared despite erase failure");
+    return ESP_OK;
+}
+
+// Test 78: Recovery pending-clear failure during init — exact error, pending preserved
+static esp_err_t test_reset_recovery_clear_failure_propagates(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    /* Provision some data */
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init failed");
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Dev");
+    cfg.provisioned_flags = 0;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
+
+    /* Set pending marker */
+    store.reset_pending = true;
+
+    /* Recovery: erase succeeds, but clearing pending fails */
+    bool pending = false;
+    TEST_ASSERT(driver.read_reset_pending(driver.ctx, &pending) == ESP_OK, "Read failed");
+    TEST_ASSERT(pending, "Pending should be true");
+    TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
+
+    /* Inject clear failure */
+    store.reset_pend_write_error = ESP_ERR_NVS_INVALID_HANDLE;
+    esp_err_t clear_err = driver.write_reset_pending(driver.ctx, false);
+    TEST_ASSERT(clear_err == ESP_ERR_NVS_INVALID_HANDLE, "Clear should have failed");
+
+    /* Pending must remain true for another recovery attempt */
+    TEST_ASSERT(store.reset_pending, "Pending cleared despite write failure");
+    /* Data IS erased (erase succeeded) */
+    TEST_ASSERT(!store.has_slot_a && !store.has_slot_b, "Slots survived successful erase");
+    return ESP_OK;
+}
+
 /* ── Test runner ───────────────────────────────────────────────────── */
+
 
 esp_err_t argus_tests_4a_run_all(void)
 {
@@ -2775,6 +3030,15 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_core_factory_reset_clears_lock);
         RUN_TEST(test_core_reset_erase_failure_propagates);
         RUN_TEST(test_core_hwm_persists_across_reinit);
+        /* Reset transaction durability tests */
+        RUN_TEST(test_reset_pend_write_fails_no_erase);
+        RUN_TEST(test_reset_erase_fails_pending_survives);
+        RUN_TEST(test_reset_clear_fails_pending_remains);
+        RUN_TEST(test_reset_boot_recovery_reruns_erase);
+        RUN_TEST(test_reset_pend_read_error_propagates);
+        RUN_TEST(test_reset_pend_missing_is_not_pending);
+        RUN_TEST(test_reset_recovery_erase_failure_propagates);
+        RUN_TEST(test_reset_recovery_clear_failure_propagates);
     }
 
     if (capture_prod_snapshot(&snap_after) != ESP_OK) {
@@ -2784,7 +3048,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
-    printf("  Distinct Test Cases : 70\n");
+    printf("  Distinct Test Cases : 78\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
