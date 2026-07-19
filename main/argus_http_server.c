@@ -187,6 +187,63 @@ static esp_err_t portal_set_password(const char *new_pw)
     return err;
 }
 
+/* ── Identity Provisioning Lock ──────────────────────────────── */
+
+static bool is_identity_provisioned(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return false;
+    uint8_t val = 0;
+    nvs_get_u8(nvs, "id_provisioned", &val);
+    nvs_close(nvs);
+    return (val == 1);
+}
+
+static esp_err_t set_identity_provisioned(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(nvs, "id_provisioned", 1);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    return err;
+}
+
+/* ── JSON String Extraction Helpers ─────────────────────────── */
+
+/**
+ * @brief Extract a JSON string value by key from a flat JSON body.
+ *
+ * Lightweight parser sufficient for single-level config payloads.
+ * Handles backslash-escaped characters within the value string.
+ */
+static bool json_extract_string(const char *json, const char *key, char *out, size_t out_size)
+{
+    char search[80];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p == ' ' || *p == ':') p++;
+    if (*p != '"') return false;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i < out_size - 1) {
+        if (*p == '\\' && *(p+1)) { p++; }
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
+static bool json_has_key(const char *json, const char *key)
+{
+    char search[80];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    return strstr(json, search) != NULL;
+}
+
 /* ── HTTP Basic Auth ───────────────────────────────────────── */
 
 /**
@@ -587,6 +644,11 @@ static const char PORTAL_HTML[] =
     "<button class=\"refresh-btn\" style=\"background:#3f3f46\" onclick=\"window.location='/change-password'\">Change Password</button>"
     "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
     "</div>"
+    "<div style=\"display:flex;gap:8px;margin-top:16px;flex-wrap:wrap\">"
+    "<a href='/config/identity' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Identity</a>"
+    "<a href='/config/wifi' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>WiFi Config</a>"
+    "<button onclick='doRestart()' style='flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Restart</button>"
+    "</div>"
     "<div class=\"note\">Service portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
     /* h() — HTML-escape to prevent DOM injection from device-supplied values */
@@ -634,6 +696,13 @@ static const char PORTAL_HTML[] =
     "row('Device Name',d.device_name||'(not set)')+"
     "row('Model',d.device_model);"
     "}).catch(e=>{})}"
+    "function doRestart(){"
+    "if(!confirm('Restart the controller? Active connections will be lost.'))return;"
+    "fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='restart_initiated'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';"
+    "}else{alert(d.message||d.error||'Restart failed')}"
+    "}).catch(()=>alert('Connection lost'))}"
     "refresh();"
     "</script>"
     "</body>"
@@ -764,7 +833,513 @@ static esp_err_t portal_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Phase 4B.2: Identity Config Page HTML ───────────────────────── */
+
+static const char IDENTITY_PAGE_HTML[] =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Argus Identity</title>"
+    "<style>"
+    ":root{--bg:#0f1117;--card:#1a1b23;--border:#27272a;--text:#e4e4e7;--muted:#a1a1aa;"
+    "--accent:#7c3aed;--accent-light:#a78bfa;--accent-dark:#6d28d9;"
+    "--success:#22c55e;--warn:#f59e0b;--error:#ef4444;--input-bg:#27272a}"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"
+    "'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;"
+    "justify-content:center;padding:16px}"
+    ".card{background:var(--card);border:1px solid var(--border);border-radius:12px;"
+    "padding:24px;max-width:420px;width:100%}"
+    "h1{color:var(--accent-light);font-size:1.1rem;margin-bottom:16px}"
+    "h1::before{content:'\\25C6 ';color:var(--accent)}"
+    "label{display:block;color:var(--muted);font-size:0.8rem;margin:12px 0 4px;"
+    "text-transform:uppercase;letter-spacing:0.05em}"
+    "input{width:100%;padding:10px 12px;background:var(--input-bg);"
+    "border:1px solid var(--border);border-radius:8px;color:var(--text);"
+    "font-size:0.9rem;outline:none;transition:border 0.2s}"
+    "input:focus{border-color:var(--accent)}"
+    "input[readonly]{opacity:0.6;cursor:not-allowed}"
+    ".btn{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+    "font-size:0.9rem;font-weight:600;cursor:pointer;transition:opacity 0.2s;margin-top:16px}"
+    ".btn-primary{background:var(--accent);color:#fff}"
+    ".btn-primary:hover{opacity:0.9}"
+    ".btn-back{background:var(--border);color:var(--text);margin-top:8px;"
+    "text-align:center;text-decoration:none;display:block;padding:10px;border-radius:8px;"
+    "font-size:0.85rem}"
+    ".alert{padding:10px 12px;border-radius:8px;font-size:0.85rem;margin-top:12px;display:none}"
+    ".alert-ok{background:#052e16;border:1px solid #166534;color:#4ade80;display:block}"
+    ".alert-err{background:#350a0a;border:1px solid #991b1b;color:#fca5a5;display:block}"
+    ".alert-warn{background:#351f05;border:1px solid #92400e;color:#fcd34d;display:block}"
+    ".locked{color:var(--warn);font-size:0.8rem;margin-bottom:12px}"
+    "</style></head><body>"
+    "<div class='card'><h1>Identity Configuration</h1>"
+    "<div id='lock' class='locked' style='display:none'>"
+    "Identity is locked. Contact Argus support to modify.</div>"
+    "<form id='frm'>"
+    "<label>Client ID</label>"
+    "<input id='cid' type='text' maxlength='32' placeholder='e.g. acme_corp'>"
+    "<label>Unit ID</label>"
+    "<input id='uid' type='text' maxlength='32' placeholder='e.g. pump_001'>"
+    "<label>Device Name</label>"
+    "<input id='dname' type='text' maxlength='64' placeholder='e.g. Main Process Pump'>"
+    "<button type='submit' class='btn btn-primary' id='btn'>Save Identity</button>"
+    "</form>"
+    "<div id='msg' class='alert'></div>"
+    "<a href='/' class='btn-back'>Back to Dashboard</a>"
+    "</div>"
+    "<script>"
+    "function h(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}"
+    "var locked=false,origCfg={};"
+    "fetch('/api/config').then(r=>r.json()).then(d=>{"
+    "origCfg=d;"
+    "document.getElementById('cid').value=d.client_id||'';"
+    "document.getElementById('uid').value=d.unit_id||'';"
+    "document.getElementById('dname').value=d.device_name||'';"
+    "if(d.identity_provisioned){"
+    "locked=true;"
+    "document.getElementById('lock').style.display='block';"
+    "document.getElementById('cid').readOnly=true;"
+    "document.getElementById('uid').readOnly=true;"
+    "document.getElementById('dname').readOnly=true;"
+    "document.getElementById('btn').style.display='none';"
+    "}"
+    "}).catch(()=>{});"
+    "document.getElementById('frm').onsubmit=function(e){"
+    "e.preventDefault();"
+    "if(locked)return;"
+    "var msg=document.getElementById('msg'),btn=document.getElementById('btn');"
+    "btn.disabled=true;btn.textContent='Saving...';"
+    "msg.className='alert';msg.style.display='none';"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({scope:'identity',"
+    "client_id:document.getElementById('cid').value,"
+    "unit_id:document.getElementById('uid').value,"
+    "device_name:document.getElementById('dname').value})})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='Identity saved and locked. Restart required for changes to take effect.';"
+    "msg.style.display='block';"
+    "document.getElementById('cid').readOnly=true;"
+    "document.getElementById('uid').readOnly=true;"
+    "document.getElementById('dname').readOnly=true;"
+    "btn.style.display='none';"
+    "document.getElementById('lock').style.display='block';"
+    "}else{"
+    "msg.className='alert alert-err';"
+    "var t=d.error||'Save failed';"
+    "if(d.fields){var f=d.fields;for(var k in f)t+='\\n'+k+': '+f[k]}"
+    "msg.textContent=t;msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save Identity'}"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save Identity'})};"
+    "</script></body></html>";
+
+/* ── Phase 4B.2: WiFi Config Page HTML ───────────────────────────── */
+
+static const char WIFI_PAGE_HTML[] =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Argus WiFi</title>"
+    "<style>"
+    ":root{--bg:#0f1117;--card:#1a1b23;--border:#27272a;--text:#e4e4e7;--muted:#a1a1aa;"
+    "--accent:#7c3aed;--accent-light:#a78bfa;--accent-dark:#6d28d9;"
+    "--success:#22c55e;--warn:#f59e0b;--error:#ef4444;--input-bg:#27272a}"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"
+    "'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;"
+    "justify-content:center;padding:16px}"
+    ".card{background:var(--card);border:1px solid var(--border);border-radius:12px;"
+    "padding:24px;max-width:420px;width:100%}"
+    "h1{color:var(--accent-light);font-size:1.1rem;margin-bottom:16px}"
+    "h1::before{content:'\\25C6 ';color:var(--accent)}"
+    "label{display:block;color:var(--muted);font-size:0.8rem;margin:12px 0 4px;"
+    "text-transform:uppercase;letter-spacing:0.05em}"
+    "input{width:100%;padding:10px 12px;background:var(--input-bg);"
+    "border:1px solid var(--border);border-radius:8px;color:var(--text);"
+    "font-size:0.9rem;outline:none;transition:border 0.2s}"
+    "input:focus{border-color:var(--accent)}"
+    ".btn{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+    "font-size:0.9rem;font-weight:600;cursor:pointer;transition:opacity 0.2s;margin-top:16px}"
+    ".btn-primary{background:var(--accent);color:#fff}"
+    ".btn-primary:hover{opacity:0.9}"
+    ".btn-danger{background:var(--error);color:#fff;margin-top:8px}"
+    ".btn-back{background:var(--border);color:var(--text);margin-top:8px;"
+    "text-align:center;text-decoration:none;display:block;padding:10px;border-radius:8px;"
+    "font-size:0.85rem}"
+    ".alert{padding:10px 12px;border-radius:8px;font-size:0.85rem;margin-top:12px;display:none}"
+    ".alert-ok{background:#052e16;border:1px solid #166534;color:#4ade80;display:block}"
+    ".alert-err{background:#350a0a;border:1px solid #991b1b;color:#fca5a5;display:block}"
+    ".alert-warn{background:#351f05;border:1px solid #92400e;color:#fcd34d;display:block}"
+    ".note{color:var(--muted);font-size:0.75rem;margin-top:8px}"
+    "</style></head><body>"
+    "<div class='card'><h1>WiFi Configuration</h1>"
+    "<form id='frm'>"
+    "<label>WiFi SSID</label>"
+    "<input id='ssid' type='text' maxlength='32' placeholder='Network name'>"
+    "<label>WiFi Password</label>"
+    "<input id='pass' type='password' maxlength='63' placeholder='Enter WiFi password'>"
+    "<p class='note' id='passnote'></p>"
+    "<button type='submit' class='btn btn-primary' id='btn'>Save WiFi</button>"
+    "</form>"
+    "<button class='btn btn-danger' id='clrbtn' onclick='clearWifi()'>Clear WiFi</button>"
+    "<div id='msg' class='alert'></div>"
+    "<a href='/' class='btn-back'>Back to Dashboard</a>"
+    "</div>"
+    "<script>"
+    "var origSsid='';"
+    "fetch('/api/config').then(r=>r.json()).then(d=>{"
+    "document.getElementById('ssid').value=d.sta_ssid||'';"
+    "origSsid=d.sta_ssid||'';"
+    "if(d.sta_pass_set){"
+    "document.getElementById('pass').placeholder='Password configured (leave blank to keep)';"
+    "document.getElementById('passnote').textContent='Leave password blank to keep the existing one.'}"
+    "}).catch(()=>{});"
+    "document.getElementById('frm').onsubmit=function(e){"
+    "e.preventDefault();"
+    "var msg=document.getElementById('msg'),btn=document.getElementById('btn');"
+    "var ssid=document.getElementById('ssid').value;"
+    "var pass=document.getElementById('pass').value;"
+    "btn.disabled=true;btn.textContent='Saving...';"
+    "msg.className='alert';msg.style.display='none';"
+    "var body={scope:'wifi',sta_ssid:ssid};"
+    "if(pass.length>0)body.sta_pass=pass;"
+    "else if(ssid!==origSsid){"
+    "msg.className='alert alert-err';"
+    "msg.textContent='Password required when changing SSID';"
+    "msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save WiFi';return}"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify(body)})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='WiFi saved. Restart required for changes to take effect.';"
+    "msg.style.display='block';origSsid=ssid;"
+    "}else{"
+    "msg.className='alert alert-err';"
+    "var t=d.error||'Save failed';"
+    "if(d.fields){var f=d.fields;for(var k in f)t+='\\n'+k+': '+f[k]}"
+    "msg.textContent=t;msg.style.display='block'}"
+    "btn.disabled=false;btn.textContent='Save WiFi';"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save WiFi'})};"
+    "function clearWifi(){"
+    "if(!confirm('Clear WiFi credentials? The controller will not connect to any network after restart.'))return;"
+    "var msg=document.getElementById('msg');"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({scope:'wifi',sta_ssid:'',sta_pass:''})})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='WiFi cleared. Restart required.';"
+    "msg.style.display='block';"
+    "document.getElementById('ssid').value='';"
+    "document.getElementById('pass').value='';origSsid='';"
+    "}else{msg.className='alert alert-err';"
+    "msg.textContent=d.error||'Failed';msg.style.display='block'}"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block'})}"
+    "</script></body></html>";
+
+/* ── Phase 4B.2: GET /api/config handler ─────────────────────────── */
+
+static esp_err_t config_get_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    argus_config_payload_t cfg;
+    esp_err_t err = argus_nvs_config_get(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
+        return ESP_OK;
+    }
+
+    bool id_prov = is_identity_provisioned();
+    bool pass_set = (strlen(cfg.sta_pass) > 0);
+
+    char esc_client[ARGUS_CFG_CLIENT_ID_MAX * 2 + 1];
+    char esc_unit[ARGUS_CFG_UNIT_ID_MAX * 2 + 1];
+    char esc_name[ARGUS_CFG_DEV_NAME_MAX * 2 + 1];
+    char esc_ssid[ARGUS_CFG_STA_SSID_MAX * 2 + 1];
+    json_escape(cfg.client_id, esc_client, sizeof(esc_client));
+    json_escape(cfg.unit_id, esc_unit, sizeof(esc_unit));
+    json_escape(cfg.device_name, esc_name, sizeof(esc_name));
+    json_escape(cfg.sta_ssid, esc_ssid, sizeof(esc_ssid));
+
+    /* Zero password immediately after determining if it was set */
+    memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"client_id\":\"%s\",\"unit_id\":\"%s\",\"device_name\":\"%s\","
+        "\"sta_ssid\":\"%s\",\"sta_pass_set\":%s,\"identity_provisioned\":%s}",
+        esc_client, esc_unit, esc_name, esc_ssid,
+        pass_set ? "true" : "false",
+        id_prov ? "true" : "false");
+
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"response_overflow\"}");
+        return ESP_OK;
+    }
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: POST /api/config/save handler ───────────────────── */
+
+static esp_err_t config_save_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_POST) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    /* Mode gate: config writes only in UNCOMMISSIONED_AP or SERVICE_AP_ONLY */
+    argus_network_mode_t mode = argus_net_mgr_get_mode();
+    if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP && mode != ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"error\":\"config_write_not_allowed_in_current_mode\"}");
+        return ESP_OK;
+    }
+
+    /* Read request body */
+    char body[512];
+    int body_len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (body_len <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"empty_body\"}");
+        return ESP_OK;
+    }
+    body[body_len] = '\0';
+
+    /* Extract scope */
+    char scope[16] = {0};
+    if (!json_extract_string(body, "scope", scope, sizeof(scope))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"missing_scope\",\"message\":\"scope must be identity or wifi\"}");
+        return ESP_OK;
+    }
+
+    /* Load current config from NVS as base for overlay */
+    argus_config_payload_t cfg;
+    esp_err_t err = argus_nvs_config_get(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
+        return ESP_OK;
+    }
+
+    if (strcmp(scope, "identity") == 0) {
+        /* Identity scope: check provisioning lock */
+        if (is_identity_provisioned()) {
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_sendstr(req, "{\"error\":\"identity_locked\","
+                "\"message\":\"Identity is locked after initial provisioning\"}");
+            return ESP_OK;
+        }
+
+        /* Extract all three identity fields — all required */
+        char new_client[ARGUS_CFG_CLIENT_ID_MAX + 1] = {0};
+        char new_unit[ARGUS_CFG_UNIT_ID_MAX + 1] = {0};
+        char new_name[ARGUS_CFG_DEV_NAME_MAX + 1] = {0};
+
+        bool has_client = json_extract_string(body, "client_id", new_client, sizeof(new_client));
+        bool has_unit = json_extract_string(body, "unit_id", new_unit, sizeof(new_unit));
+        bool has_name = json_extract_string(body, "device_name", new_name, sizeof(new_name));
+
+        if (!has_client || !has_unit || !has_name) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"all_identity_fields_required\","
+                "\"message\":\"client_id, unit_id, and device_name are all required\"}");
+            return ESP_OK;
+        }
+
+        /* Per-field validation with specific error reporting */
+        char errbuf[256];
+        int eoff = 0;
+        bool valid = true;
+        eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff, "{\"error\":\"validation_failed\",\"fields\":{");
+
+        if (!argus_identity_validate_client_id(new_client)) {
+            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
+                "\"client_id\":\"1-32 alphanumeric, hyphens, or underscores\",");
+            valid = false;
+        }
+        if (!argus_identity_validate_unit_id(new_unit)) {
+            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
+                "\"unit_id\":\"1-32 alphanumeric, hyphens, or underscores\",");
+            valid = false;
+        }
+        if (!argus_identity_validate_device_name(new_name)) {
+            eoff += snprintf(errbuf + eoff, sizeof(errbuf) - eoff,
+                "\"device_name\":\"1-64 printable ASCII characters\",");
+            valid = false;
+        }
+
+        if (!valid) {
+            /* Remove trailing comma and close JSON */
+            if (eoff > 0 && errbuf[eoff - 1] == ',') eoff--;
+            snprintf(errbuf + eoff, sizeof(errbuf) - eoff, "}}");
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, errbuf);
+            return ESP_OK;
+        }
+
+        /* Overlay identity fields (WiFi untouched) */
+        snprintf(cfg.client_id, sizeof(cfg.client_id), "%s", new_client);
+        snprintf(cfg.unit_id, sizeof(cfg.unit_id), "%s", new_unit);
+        snprintf(cfg.device_name, sizeof(cfg.device_name), "%s", new_name);
+
+    } else if (strcmp(scope, "wifi") == 0) {
+        /* WiFi scope */
+        char new_ssid[ARGUS_CFG_STA_SSID_MAX + 1] = {0};
+        char new_pass[ARGUS_CFG_STA_PASS_MAX + 1] = {0};
+        bool has_ssid = json_extract_string(body, "sta_ssid", new_ssid, sizeof(new_ssid));
+
+        if (!has_ssid) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"sta_ssid_required\"}");
+            return ESP_OK;
+        }
+
+        if (strlen(new_ssid) == 0) {
+            /* Explicit WiFi clear — zero both SSID and password */
+            memset(cfg.sta_ssid, 0, sizeof(cfg.sta_ssid));
+            memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+        } else {
+            /* Non-empty SSID — handle password */
+            bool has_pass = json_has_key(body, "sta_pass");
+            if (has_pass) {
+                json_extract_string(body, "sta_pass", new_pass, sizeof(new_pass));
+            }
+
+            /* Reject mask string */
+            if (has_pass && strcmp(new_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_sendstr(req, "{\"error\":\"mask_string_not_accepted\","
+                    "\"message\":\"Cannot use the mask string as a password\"}");
+                memset(new_pass, 0, sizeof(new_pass));
+                return ESP_OK;
+            }
+
+            if (has_pass && strlen(new_pass) > 0) {
+                /* New password supplied — replace */
+                snprintf(cfg.sta_pass, sizeof(cfg.sta_pass), "%s", new_pass);
+                memset(new_pass, 0, sizeof(new_pass));
+            } else if (strcmp(new_ssid, cfg.sta_ssid) == 0) {
+                /* Same SSID, no new password — preserve existing password */
+                /* (cfg.sta_pass already has the existing value from nvs_config_get) */
+            } else {
+                /* New SSID but no password — error */
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_sendstr(req, "{\"error\":\"password_required_for_new_ssid\","
+                    "\"message\":\"Password is required when changing the WiFi network\"}");
+                return ESP_OK;
+            }
+
+            snprintf(cfg.sta_ssid, sizeof(cfg.sta_ssid), "%s", new_ssid);
+        }
+
+    } else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"invalid_scope\","
+            "\"message\":\"scope must be identity or wifi\"}");
+        return ESP_OK;
+    }
+
+    /* Validate the combined payload */
+    err = argus_nvs_config_validate(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"validation_failed\","
+            "\"message\":\"Combined configuration failed validation\"}");
+        memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+        return ESP_OK;
+    }
+
+    /* Commit to NVS */
+    err = argus_nvs_config_commit(&cfg);
+    memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Config commit failed: %s (%d)", esp_err_to_name(err), err);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"commit_failed\"}");
+        return ESP_OK;
+    }
+
+    /* Set identity provisioned lock if this was an identity save */
+    if (strcmp(scope, "identity") == 0) {
+        esp_err_t lock_err = set_identity_provisioned();
+        if (lock_err != ESP_OK) {
+            ESP_LOGW(TAG, "Identity saved but lock flag write failed: %s",
+                     esp_err_to_name(lock_err));
+            /* Config was saved — lock failure is non-fatal (fail-safe: re-saveable) */
+        }
+    }
+
+    httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: Config page handlers ────────────────────────────── */
+
+static esp_err_t identity_page_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_send(req, IDENTITY_PAGE_HTML, sizeof(IDENTITY_PAGE_HTML) - 1);
+    return ESP_OK;
+}
+
+static esp_err_t wifi_page_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_send(req, WIFI_PAGE_HTML, sizeof(WIFI_PAGE_HTML) - 1);
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: POST /api/restart handler ───────────────────────── */
+
+static esp_err_t restart_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_POST) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    esp_err_t err = argus_net_mgr_request_restart();
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"motion_active\","
+            "\"message\":\"Cannot restart while motion is active or machine is in fault state\"}");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        char errmsg[128];
+        snprintf(errmsg, sizeof(errmsg),
+            "{\"error\":\"restart_failed\",\"detail\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_sendstr(req, errmsg);
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"restart_initiated\"}");
+    return ESP_OK;
+}
+
 /* ── URI handler registrations ───────────────────────────────────── */
+
 
 static const httpd_uri_t uri_status = {
     .uri       = "/api/status",
@@ -900,6 +1475,43 @@ static const httpd_uri_t uri_logout = {
     .user_ctx  = NULL
 };
 
+/* Phase 4B.2 URI handler registrations */
+
+static const httpd_uri_t uri_config_get = {
+    .uri       = "/api/config",
+    .method    = HTTP_GET,
+    .handler   = config_get_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_config_save = {
+    .uri       = "/api/config/save",
+    .method    = HTTP_POST,
+    .handler   = config_save_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_identity_page = {
+    .uri       = "/config/identity",
+    .method    = HTTP_GET,
+    .handler   = identity_page_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_wifi_page = {
+    .uri       = "/config/wifi",
+    .method    = HTTP_GET,
+    .handler   = wifi_page_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_restart = {
+    .uri       = "/api/restart",
+    .method    = HTTP_POST,
+    .handler   = restart_handler,
+    .user_ctx  = NULL
+};
+
 /* ── Lifecycle implementation ────────────────────────────────────── */
 
 esp_err_t argus_http_server_init(void)
@@ -964,7 +1576,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 10;
+    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -996,6 +1608,17 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_change_password);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_logout);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.2 endpoints */
+    reg_err = httpd_register_uri_handler(s_server, &uri_config_get);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_config_save);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_identity_page);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_wifi_page);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_restart);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);

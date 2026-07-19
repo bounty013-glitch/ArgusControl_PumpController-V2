@@ -170,6 +170,14 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED:
                     break;
 
+                case ARGUS_NET_EVT_RESTART_REQUEST:
+                    ESP_LOGI(TAG, "Restart request received. Stopping HTTP server...");
+                    argus_http_server_stop();
+                    ESP_LOGI(TAG, "HTTP server stopped. Restarting in 200ms...");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                    break;  /* unreachable */
+
                 default:
                     break;
             }
@@ -826,6 +834,35 @@ esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap)
     xSemaphoreGive(s_net_mutex);
 
     return ESP_OK;
+}
+
+esp_err_t argus_net_mgr_request_restart(void)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+
+    /* Pre-flight machine safety check — reject if motion is active */
+    argus_state_snapshot_t state_snap;
+    argus_state_mgr_get_snapshot(&state_snap);
+
+    if (state_snap.estop_latched ||
+        state_snap.machine_state == ARGUS_STATE_EMERGENCY_STOPPED ||
+        state_snap.machine_state == ARGUS_STATE_FAULTED) {
+        ESP_LOGE(TAG, "Restart rejected: machine in fault/E-stop state (state=%s, estop=%d)",
+                 argus_state_mgr_get_state_name(state_snap.machine_state),
+                 (int)state_snap.estop_latched);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (state_snap.machine_state != ARGUS_STATE_HOLDING &&
+        state_snap.machine_state != ARGUS_STATE_UNLOCKED) {
+        ESP_LOGE(TAG, "Restart rejected: motion may be active (state=%s)",
+                 argus_state_mgr_get_state_name(state_snap.machine_state));
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Post restart event to net_mgr task — deferred so HTTP can respond first */
+    argus_net_event_t evt = { .type = ARGUS_NET_EVT_RESTART_REQUEST };
+    return argus_net_mgr_post_event(&evt);
 }
 
 esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner)

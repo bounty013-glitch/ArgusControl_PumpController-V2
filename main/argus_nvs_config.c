@@ -475,7 +475,7 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
 {
     if (!in_cfg) return ESP_ERR_INVALID_ARG;
 
-    if (strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
+    if (strlen(in_cfg->sta_pass) > 0 && strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
         ESP_LOGE(TAG, "Commit rejected: Mask string submitted as password");
         return ESP_ERR_INVALID_ARG;
     }
@@ -541,9 +541,13 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!argus_nvs_config_is_commissioned(in_cfg)) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 11 (is_commissioned evaluated false)");
-        return ESP_ERR_INVALID_STATE;
+    /* Log commissioning status for diagnostics, but do not gate commit on it.
+     * Identity-only configs (no WiFi) are valid and saveable. */
+    if (argus_nvs_config_is_commissioned(in_cfg)) {
+        ESP_LOGI(TAG, "Commit Step 11/12: Payload is fully commissioned (STA credentials present)");
+    } else {
+        ESP_LOGW(TAG, "Commit Step 11/12: Payload is identity-only (no STA credentials). "
+                 "Reason: %s", argus_nvs_config_get_uncommissioned_reason(in_cfg));
     }
 
     // Update in-memory active state only after 100% verification

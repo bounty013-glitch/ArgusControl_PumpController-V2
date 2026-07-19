@@ -50,7 +50,8 @@ typedef enum {
     ARGUS_NET_EVT_STA_CONNECTED,
     ARGUS_NET_EVT_STA_DISCONNECTED,
     ARGUS_NET_EVT_AP_CLIENT_CONNECTED,
-    ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED
+    ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED,
+    ARGUS_NET_EVT_RESTART_REQUEST          /**< Coordinated restart (deferred to net_mgr task) */
 } argus_net_event_type_t;
 
 typedef struct {
@@ -126,6 +127,21 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
  * @return ESP_OK if reboot initiated, error code on failure (reboot does not occur on error).
  */
 esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner);
+
+/**
+ * @brief Request a coordinated restart via the net_mgr event queue.
+ *
+ * Checks machine state before accepting. Rejects if motion is active
+ * (machine not in HOLDING/UNLOCKED) or E-stop is latched.
+ *
+ * The actual restart is deferred to the net_mgr task so that the calling
+ * context (e.g. HTTP handler) can transmit its response before shutdown.
+ *
+ * @return ESP_OK if restart accepted and queued,
+ *         ESP_ERR_INVALID_STATE if motion active or machine unsafe,
+ *         ESP_ERR_NO_MEM if event queue is full.
+ */
+esp_err_t argus_net_mgr_request_restart(void);
 
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
