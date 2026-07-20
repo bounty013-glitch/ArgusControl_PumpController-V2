@@ -60,7 +60,6 @@ static _Atomic bool s_sta_started = false;
 static _Atomic bool s_sta_connected = false;
 static _Atomic bool s_sta_ip_acquired = false;
 static _Atomic bool s_ap_started = false;
-||||||||
 static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
 
 // Unused: event group removed; verification uses bounded atomic polling.
@@ -166,7 +165,7 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_STA_DISCONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
                     if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
-                        ESP_LOGW(TAG, \"STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.\");
+                        ESP_LOGW(TAG, "STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.");
                         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
                         argus_mqtt_broker_stop();
                     }

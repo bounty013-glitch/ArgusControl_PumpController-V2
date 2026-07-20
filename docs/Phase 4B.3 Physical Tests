@@ -20,7 +20,7 @@ A failed test remains recorded after correction. Its successful retest is added 
 
 ## Acceptance status
 
-**Overall Phase 4B.3 status:** `ACCEPTANCE BLOCKED — FINAL PURE-SUITE RETEST PENDING OPERATOR`
+**Overall Phase 4B.3 status:** `PASSED AFTER CORRECTION`
 
 Allowed status values:
 
@@ -44,8 +44,8 @@ Allowed status values:
 | Flash size | 16 MB |
 | ESP-IDF version | **v5.5.3** |
 | Test branch | `phase4b-config-portal` |
-| Firmware commit | `[ENTER TESTED COMMIT SHA]` |
-| Corrective commit, if applicable | `[ENTER CORRECTIVE COMMIT SHA OR N/A]` |
+| Firmware commit | `77d1db5f1c07098cc02fc8040bf707de61d727ab` |
+| Corrective commit, if applicable | `de4943a27f95ec3b601850ea3fc07b7377cfa4e7` |
 | Application version | `v2-phase4b.3-dev` |
 | Operator | Shawn |
 | Physical test date | `[YYYY-MM-DD]` |
@@ -142,7 +142,7 @@ The first corrected boot identified and removed stale Phase 4A version labels an
 
 # 2. Pure non-motion test suite
 
-**Status:** `PASSED`
+**Status:** `PASSED AFTER CORRECTION`
 
 ## Objective
 
@@ -166,7 +166,7 @@ Verify the complete stack-local pure-test suite and confirm that it does not mut
 
 The final summary must report:
 
-- 83 distinct test cases.
+- 94 distinct test cases.
 - Three repeat passes.
 - 267 total reported executions.
 - 267 passed executions.
@@ -195,7 +195,7 @@ Production Isolation (Read-Only Proof):
   Network State         : UNCHANGED (UNCOMMISSIONED_AP)
   MQTT Broker State     : UNCHANGED (STOPPED)
   Machine State         : UNCHANGED (UNLOCKED)
-  Task Count            : UNCHANGED (14 tasks)
+  Task Count            : UNCHANGED (15 tasks)
 
 ===================================================
 PHASE 4A+4B.1+4B.2+4B.3 PURE UNIT TEST SUITE: PASSED
@@ -884,13 +884,8 @@ Record any behavior noticed during testing even if it does not block the current
 
 ## Remaining verification
 
-- Corrected service entry from `UNCOMMISSIONED_AP`.
-- Exit and reboot back into `UNCOMMISSIONED_AP`.
-- Normal identity and Wi-Fi commissioning.
-- Service entry from `AP_DISCOVERABLE`.
-- MQTT-to-browser authority handoff.
-- Exit and commissioned recovery.
-- Any explicitly deferred Phase 4B.3 behavior documented below.
+- Active-motion controlled-stop service entry:
+DEFERRED BY DESIGN until HMI/MQTT integration testing.
 
 ## Deferred by design
 

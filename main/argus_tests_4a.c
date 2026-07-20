@@ -3517,9 +3517,9 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2+4B.3 Pure Tests:\n");
-    printf("  Distinct Test Cases : %d\n", (passed_executions + failed_executions) / 3);
-    printf("  Repeat Passes       : 3\n");
-    printf("  Total Executions    : %d\n", passed_executions + failed_executions);
+    printf("  Distinct Test Cases : %d\n", distinct_test_cases);
+    printf("  Repeat Passes       : %d\n", repeat_passes);
+    printf("  Total Executions    : %d\n", total_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
     printf("  Failed Executions   : %d\n", failed_executions);
 
@@ -3548,28 +3548,3 @@ esp_err_t argus_tests_4a_run_all(void)
 
     return overall_pass ? ESP_OK : ESP_FAIL;
 }
-/* ─────────────────────────────────────────────────────────────────────────────
- * Phase 4B.3: Wi-Fi Recovery, Observability, and Identity Reconciliation
- * ───────────────────────────────────────────────────────────────────────────*/
-
-static esp_err_t test_4b3_identity_composition(void)
-{
-    argus_identity_t hw = {0};
-    strlcpy(hw.mac_uid, "ESP32S3-123", sizeof(hw.mac_uid));
-    strlcpy(hw.fw_version, "v2-dev", sizeof(hw.fw_version));
-
-    argus_config_payload_t cfg = {0};
-    strlcpy(cfg.client_id, "test_client", sizeof(cfg.client_id));
-    strlcpy(cfg.unit_id, "test_unit", sizeof(cfg.unit_id));
-    strlcpy(cfg.device_name, "Test Name", sizeof(cfg.device_name));
-
-    argus_identity_t composed = {0};
-    argus_identity_compose_effective(&composed, &hw, &cfg, true);
-
-    TEST_ASSERT(strcmp(composed.mac_uid, "ESP32S3-123") == 0, "Immutable metadata preserved");
-    TEST_ASSERT(strcmp(composed.client_id, "test_client") == 0, "Mutable NVS data applied");
-
-    return ESP_OK;
-}
-
-

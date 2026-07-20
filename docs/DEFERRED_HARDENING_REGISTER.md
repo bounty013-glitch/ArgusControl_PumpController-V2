@@ -131,6 +131,8 @@
 | **Status** | OPEN |
 | **Closure Evidence** | Not yet applicable |
 
+
+**Update:** Acknowledging the existing service-entry/service-exit POST endpoints introduced in Phase 4B.3, while retaining Phase 4D hardening.
 ---
 
 ## DHR-008 — Credential Recovery and Factory Reset Not Unified
@@ -148,6 +150,8 @@
 | **Status** | OPEN |
 | **Closure Evidence** | Not yet applicable |
 
+
+**Update:** Field personnel will not have serial-console access.
 ---
 
 ## DHR-009 — Comprehensive Security Audit Deferred
@@ -216,7 +220,7 @@
 | **Date Recorded** | 2026-07-19 |
 | **System Area** | Flash Partition Layout |
 | **Phase Introduced** | Phase 4B.2 Final Corrections |
-| **Status** | OPEN |
+| **Status** | CLOSED |
 | **Target Phase** | Phase 4B.3 (before significant UI additions) |
 | **Operator Decision** | 2026-07-19 |
 
@@ -230,6 +234,8 @@
 - Adjust NVS and factory partitions as needed to reclaim space
 
 **Decision criteria:** Implement custom partition table before any phase that adds significant embedded HTML/CSS/JS or new feature modules.
+
+**Closure:** The app-partition constraint is resolved by the dual 3 MB OTA layout introduced in Phase 4B.3.
 
 ---
 
