@@ -48,7 +48,7 @@ The correction uses one production policy for dashboard permission, `/api/servic
 
 Queued browser entry carries its accepted snapshot fingerprint. The network manager revalidates the fingerprint and policy before and after dispatch serialization, with no recovery, evidence, network, authority, broker, or STA mutation on rejection. After acceptance, cancellation invalidates transaction and timer generations, scrubs staged credentials, attempts both timer stops, and reports the exact failing timer operation if either command fails. The server exposes `service_entry_permitted`, and dashboard JavaScript consumes that result without recreating policy from network mode.
 
-Physical Test 8 remains pending. No hardware execution, physical readiness, or acceptance is claimed. The corrected registration count remains source-derived and provisional until diagnostic option `t` runs on the controller.
+The earlier review singled out Physical Test 8, but no checklist item had executed: all ten physical tests remain pending. No hardware execution, physical readiness, or acceptance is claimed. The corrected registration count remains source-derived and provisional until diagnostic option `t` runs on the controller.
 
 ## Build verification
 
@@ -77,6 +77,36 @@ The post-`d8c898f` correction was full-clean built and sized with ESP-IDF v5.5.3
 - Source registrations: 139 total, including 45 Phase 4B.3a; provisional until hardware execution
 
 These correction-build facts supersede the earlier candidate size for the new commit only. They do not erase the earlier build record and do not establish runtime or physical acceptance.
+
+### Final independent-review runtime findings
+
+The `0e5aa1b` correction remains the valid recovery service-entry policy fix. A subsequent independent review found additional runtime-state defects outside that policy decision:
+
+- AP-only service entry did not explicitly converge authoritative STA state to `DISABLED`.
+- Delayed STA IP-success events could mutate state and erase evidence before service-mode exclusion.
+- The live retry countdown still used underflow-capable unsigned `expiry - now` arithmetic.
+- Timer-cancellation failure could advertise a retry whose generation had already been invalidated.
+- Broker `STOPPED` observation did not itself prove absence of task, listener, and clients.
+
+The final closure adds post-verification STA disablement to the service orchestrator; mode/generation decisions before every STA association, IP, disconnect, and stop mutation; modular half-range tick arithmetic; explicit timer-cancellation failure identity/error and `ACTION_REQUIRED` guidance; and coherent broker-stop observation. AP-only delayed disconnect/stop events retain `DISABLED`, while delayed association/IP events cannot clear evidence, counters, errors, or restart broker/authority behavior.
+
+The earlier policy correction was not ineffective; these were later runtime convergence and event-ordering findings. All ten physical tests remain pending, and no final runtime test count exists until diagnostic option `t` executes on hardware.
+
+### Final runtime-state closure build
+
+The final source was full-clean built and sized with ESP-IDF v5.5.3:
+
+- Build result: success
+- Compiler warnings: 0
+- Compiler errors: 0
+- Failed build commands: 0
+- Application image: `0xf9820` bytes
+- Smallest application partition: `0x300000` bytes
+- OTA headroom: `0x2067e0` bytes (68% free)
+- Embedded JavaScript: 4 of 4 script blocks passed syntax validation
+- Source registrations: 140 total, including 46 Phase 4B.3a; provisional until diagnostic `t` execution
+
+These facts supersede only the prior candidate size and source-registration checkpoint. They do not claim diagnostic-suite execution, physical readiness, or acceptance; all ten physical tests remain pending.
 
 ## Remaining acceptance
 

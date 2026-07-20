@@ -37,8 +37,15 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
  */
 bool argus_mqtt_broker_is_running(void);
 
+typedef enum {
+    BROKER_STATE_STOPPED = 0,
+    BROKER_STATE_STARTING,
+    BROKER_STATE_RUNNING,
+    BROKER_STATE_STOPPING
+} argus_broker_state_t;
+
 typedef struct {
-    int state;           // argus_broker_state_t cast to int
+    argus_broker_state_t state;
     int32_t active_client_count;
     bool has_server_task;
     bool has_listener;
@@ -46,4 +53,6 @@ typedef struct {
     bool stopped;
 } argus_mqtt_broker_lifecycle_obs_t;
 
+bool argus_mqtt_broker_observation_is_stopped(
+    const argus_mqtt_broker_lifecycle_obs_t *obs);
 esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t *out);

@@ -95,8 +95,23 @@ typedef enum {
     ARGUS_NET_EVT_RESTART_REQUEST,         /**< Coordinated restart (deferred to net_mgr task) */
     ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
     ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP,   /**< Timer wakeup for auto-reconnect */
-    ARGUS_NET_EVT_APPLY_WIFI_CONFIG        /**< Apply new Wi-Fi credentials without restart */
+    ARGUS_NET_EVT_APPLY_WIFI_CONFIG,       /**< Apply new Wi-Fi credentials without restart */
+    ARGUS_NET_EVT_STA_STOPPED              /**< Wi-Fi driver confirms physical STA stop */
 } argus_net_event_type_t;
+
+typedef enum {
+    ARGUS_STA_EVENT_ASSOCIATED = 0,
+    ARGUS_STA_EVENT_IP_ACQUIRED,
+    ARGUS_STA_EVENT_DISCONNECTED,
+    ARGUS_STA_EVENT_IP_TIMEOUT,
+    ARGUS_STA_EVENT_STOPPED
+} argus_sta_lifecycle_event_t;
+
+typedef enum {
+    ARGUS_STA_EVENT_IGNORE = 0,
+    ARGUS_STA_EVENT_PROCESS,
+    ARGUS_STA_EVENT_CONFIRM_DISABLED
+} argus_sta_event_action_t;
 
 typedef enum {
     ARGUS_SVC_POLICY_OK = 0,
@@ -142,6 +157,20 @@ esp_err_t argus_net_event_post_status(bool queued);
 bool argus_net_timer_generation_is_current(uint32_t event_generation,
                                            uint32_t active_generation);
 esp_err_t argus_net_timer_command_status(bool command_queued);
+argus_sta_event_action_t argus_net_decide_sta_event(
+    argus_network_mode_t mode,
+    argus_sta_lifecycle_event_t event,
+    uint32_t event_generation,
+    uint32_t active_transaction_generation,
+    bool sta_started,
+    bool sta_connected,
+    bool sta_ip_acquired);
+void argus_net_apply_sta_event_action(argus_network_mode_t mode,
+                                      argus_sta_event_action_t action,
+                                      argus_sta_state_t *sta_state,
+                                      bool *sta_started,
+                                      bool *sta_connected,
+                                      bool *sta_ip_acquired);
 
 
 typedef struct {
@@ -298,6 +327,20 @@ typedef enum {
 } argus_service_cancel_failure_t;
 
 typedef struct {
+    argus_sta_state_t sta_state;
+    argus_net_err_t net_error;
+    argus_service_cancel_failure_t cancel_failure;
+    esp_err_t cancel_error;
+} argus_service_cancel_state_t;
+
+void argus_net_record_service_cancel_failure(
+    argus_service_cancel_state_t *state,
+    argus_service_cancel_failure_t failure,
+    esp_err_t error);
+const char *argus_net_service_cancel_guidance(
+    argus_service_cancel_failure_t failure);
+
+typedef struct {
     argus_wifi_transaction_t *transaction;
     uint32_t *timer_generation;
     _Atomic uint32_t *active_transaction_generation;
@@ -310,6 +353,19 @@ typedef struct {
 
 esp_err_t argus_net_cancel_recovery_for_service(
     const argus_service_recovery_cancel_ops_t *ops,
+    argus_service_cancel_failure_t *out_failure);
+
+typedef struct {
+    esp_err_t (*cancel_recovery)(void *ctx,
+                                 argus_service_cancel_failure_t *out_failure);
+    void *ctx;
+} argus_service_commit_ops_t;
+
+esp_err_t argus_net_service_commit_recovery(
+    argus_svc_policy_result_t policy,
+    const argus_service_entry_fingerprint_t *expected,
+    const argus_service_entry_fingerprint_t *actual,
+    const argus_service_commit_ops_t *ops,
     argus_service_cancel_failure_t *out_failure);
 
 /* Compatibility entry point for existing pure tests; production owns a
@@ -331,6 +387,13 @@ void argus_net_failure_evidence_record(argus_wifi_failure_evidence_t *evidence,
                                        argus_disconnect_category_t category);
 void argus_net_failure_evidence_clear(argus_wifi_failure_evidence_t *evidence);
 uint32_t argus_net_retry_countdown_seconds(uint32_t remaining_ms);
+uint32_t argus_net_retry_remaining_ms(uint32_t current_tick,
+                                      uint32_t expiry_tick,
+                                      bool timer_active,
+                                      uint32_t timer_generation,
+                                      uint32_t current_generation,
+                                      argus_sta_state_t sta_state,
+                                      uint32_t tick_period_ms);
 
 typedef struct {
     esp_err_t (*request_normal_stop)(void *ctx);
@@ -342,6 +405,7 @@ typedef struct {
     esp_err_t (*verify_sta_ip_released)(void *ctx);
     esp_err_t (*set_wifi_ap_only)(void *ctx);
     esp_err_t (*verify_ap_active)(void *ctx);
+    esp_err_t (*set_sta_disabled)(void *ctx);
     esp_err_t (*verify_machine_safe)(void *ctx);  /**< Final pre-grant machine-state/E-stop check */
     
     // Hooks for structural orchestration without singleton pollution
@@ -428,6 +492,8 @@ typedef struct {
     uint32_t auto_retry_timer_generation;
     bool ip_timeout_timer_active;
     uint32_t ip_timeout_timer_generation;
+    argus_service_cancel_failure_t last_service_cancel_failure;
+    esp_err_t last_service_cancel_error;
 } argus_net_snapshot_t;
 
 esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);

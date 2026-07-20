@@ -47,4 +47,25 @@ HTTP preflight and queued execution use the same pure evaluator. An accepted bro
 
 Only after eligibility is proven does production invalidate recovery generations, cancel and scrub the transaction, and stop both timers before continuing through the existing service-entry orchestrator. A timer-command failure preserves the exact callback error and identifies whether retry-timer or IP-timeout stopping failed; generations remain invalidated so a delayed event cannot restart recovery.
 
-Physical Test 8 remains pending. No physical acceptance has occurred. The corrected runner contains 139 source registrations, including 45 Phase 4B.3a registrations; both counts remain provisional until diagnostic option `t` executes the suite on hardware.
+The earlier correction record singled out Physical Test 8, but no Phase 4B.3a physical test had executed. All ten tests remain pending. At that checkpoint the runner contained 139 source registrations, including 45 Phase 4B.3a registrations; those historical source counts were provisional pending diagnostic option `t` execution on hardware.
+
+## Final runtime-state and delayed-event closure
+
+Commit `0e5aa1b` validly corrected recovery service-entry eligibility, shared dashboard/API policy, preflight fingerprinting, and mutation ordering. Independent review afterward found four separate runtime-state defects that the policy correction did not address:
+
+1. Successful AP-only convergence did not explicitly commit the authoritative STA lifecycle to `DISABLED`, so a disconnected recovery state could remain reported as `RETRY_WAIT`, `ACTION_REQUIRED`, or `CONNECTING` in Local Service.
+2. The production STA-IP handler mutated lifecycle, evidence, counters, errors, broker, and authority state before excluding delayed events in `SERVICE_TRANSITION` or `SERVICE_AP_ONLY`.
+3. Production retry countdown still subtracted unsigned tick values before the tested millisecond-rounding helper, allowing an expired timer to appear as a huge future countdown.
+4. A service timer-cancellation failure invalidated generations but could leave `RETRY_WAIT`, scheduled-retry guidance, and a visible countdown even though the event could no longer perform recovery.
+
+The final closure adds a required `set_sta_disabled` orchestration operation after AP-only and physical STA-absence verification and before machine-safety revalidation and authority grant. Any later failure enters `NETWORK_FAULT` while retaining truthful `DISABLED` STA state.
+
+STA association, IP acquisition, disconnect, and stop events now pass through an explicit mode/generation decision before lifecycle or recovery mutations. Association and IP events are ignored in both service modes; AP-only disconnect and stop events reconfirm `DISABLED`; stale transaction generations are ignored; operational modes, including explicit `NETWORK_FAULT` recovery, continue accepting legitimate events. Ignored service/stale events clear optimistic physical flags without clearing failure evidence, counters, network errors, broker state, or authority.
+
+Retry countdown now derives a modular tick delta only when the timer is active, its generation is current, and state is `RETRY_WAIT`. Zero/past expiry and modular distances beyond the valid half-range return zero; future expiry across a 32-bit tick wrap remains valid. Millisecond multiplication is bounded before partial seconds round upward.
+
+Timer-cancellation failure now records exact timer identity and `esp_err_t`, preserves prior disconnect evidence and counters, transitions to `ACTION_REQUIRED`, exposes zero retry countdown, and provides Reconnect Wi-Fi and Enter Local Service guidance. Invalidated delayed callbacks remain harmless and observable as ignored.
+
+Broker `stopped` observation now requires `STOPPED`, no server task, no listener, and zero active clients. The final source contains 140 registrations, including 46 Phase 4B.3a registrations. These source-derived counts remain provisional until diagnostic option `t` runs on hardware. All ten Phase 4B.3a physical tests remain pending.
+
+The final closure was full-clean built with ESP-IDF v5.5.3. The application image is `0xf9820` bytes in a `0x300000`-byte smallest application partition, leaving `0x2067e0` bytes (68%) OTA headroom. The clean log contains zero compiler warnings, zero compiler errors, and zero failed commands. All four embedded JavaScript blocks passed syntax validation. These are static/build facts only and do not establish runtime or physical acceptance.

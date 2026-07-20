@@ -72,6 +72,9 @@ static _Atomic uint32_t s_active_transaction_generation = 0;
 static _Atomic uint32_t s_auto_retry_timer_generation = 0;
 static _Atomic uint32_t s_ip_timeout_timer_generation = 0;
 static uint32_t s_auth_failures = 0;
+static argus_service_cancel_failure_t s_last_service_cancel_failure =
+    ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+static esp_err_t s_last_service_cancel_error = ESP_OK;
 static TimerHandle_t s_auto_retry_timer = NULL;
 static TimerHandle_t s_ip_timeout_timer = NULL;
 
@@ -175,6 +178,82 @@ esp_err_t argus_net_timer_command_status(bool command_queued)
     return command_queued ? ESP_OK : ESP_FAIL;
 }
 
+argus_sta_event_action_t argus_net_decide_sta_event(
+    argus_network_mode_t mode,
+    argus_sta_lifecycle_event_t event,
+    uint32_t event_generation,
+    uint32_t active_transaction_generation,
+    bool sta_started,
+    bool sta_connected,
+    bool sta_ip_acquired)
+{
+    if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        return (event == ARGUS_STA_EVENT_DISCONNECTED ||
+                event == ARGUS_STA_EVENT_STOPPED)
+                   ? ARGUS_STA_EVENT_CONFIRM_DISABLED
+                   : ARGUS_STA_EVENT_IGNORE;
+    }
+    if (mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
+        mode == ARGUS_NET_MODE_BOOTSTRAP) {
+        return ARGUS_STA_EVENT_IGNORE;
+    }
+    if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP &&
+        mode != ARGUS_NET_MODE_COMMISSIONED_STA &&
+        mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
+        mode != ARGUS_NET_MODE_NETWORK_FAULT) {
+        return ARGUS_STA_EVENT_IGNORE;
+    }
+
+    if (event_generation != active_transaction_generation &&
+        (event_generation != 0 || active_transaction_generation != 0)) {
+        return ARGUS_STA_EVENT_IGNORE;
+    }
+
+    switch (event) {
+        case ARGUS_STA_EVENT_ASSOCIATED:
+            return sta_started && sta_connected
+                       ? ARGUS_STA_EVENT_PROCESS : ARGUS_STA_EVENT_IGNORE;
+        case ARGUS_STA_EVENT_IP_ACQUIRED:
+            return sta_started && sta_connected && sta_ip_acquired
+                       ? ARGUS_STA_EVENT_PROCESS : ARGUS_STA_EVENT_IGNORE;
+        case ARGUS_STA_EVENT_DISCONNECTED:
+            return sta_started && !sta_connected && !sta_ip_acquired
+                       ? ARGUS_STA_EVENT_PROCESS : ARGUS_STA_EVENT_IGNORE;
+        case ARGUS_STA_EVENT_IP_TIMEOUT:
+            return sta_started && !sta_ip_acquired
+                       ? ARGUS_STA_EVENT_PROCESS : ARGUS_STA_EVENT_IGNORE;
+        case ARGUS_STA_EVENT_STOPPED:
+            return !sta_started && !sta_connected && !sta_ip_acquired
+                       ? ARGUS_STA_EVENT_PROCESS : ARGUS_STA_EVENT_IGNORE;
+        default:
+            return ARGUS_STA_EVENT_IGNORE;
+    }
+}
+
+void argus_net_apply_sta_event_action(argus_network_mode_t mode,
+                                      argus_sta_event_action_t action,
+                                      argus_sta_state_t *sta_state,
+                                      bool *sta_started,
+                                      bool *sta_connected,
+                                      bool *sta_ip_acquired)
+{
+    if (!sta_state || !sta_started || !sta_connected || !sta_ip_acquired ||
+        action == ARGUS_STA_EVENT_PROCESS) {
+        return;
+    }
+    if (action == ARGUS_STA_EVENT_IGNORE ||
+        mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
+        mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        *sta_started = false;
+        *sta_connected = false;
+        *sta_ip_acquired = false;
+    }
+    if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY &&
+        action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
+        *sta_state = ARGUS_STA_DISABLED;
+    }
+}
+
 void argus_net_failure_evidence_record(argus_wifi_failure_evidence_t *evidence,
                                        uint8_t reason,
                                        argus_disconnect_category_t category)
@@ -198,6 +277,28 @@ void argus_net_failure_evidence_clear(argus_wifi_failure_evidence_t *evidence)
 uint32_t argus_net_retry_countdown_seconds(uint32_t remaining_ms)
 {
     return remaining_ms == 0 ? 0 : ((remaining_ms - 1U) / 1000U) + 1U;
+}
+
+uint32_t argus_net_retry_remaining_ms(uint32_t current_tick,
+                                      uint32_t expiry_tick,
+                                      bool timer_active,
+                                      uint32_t timer_generation,
+                                      uint32_t current_generation,
+                                      argus_sta_state_t sta_state,
+                                      uint32_t tick_period_ms)
+{
+    if (!timer_active || timer_generation != current_generation ||
+        sta_state != ARGUS_STA_RETRY_WAIT || tick_period_ms == 0) {
+        return 0;
+    }
+
+    uint32_t modular_delta = expiry_tick - current_tick;
+    if (modular_delta == 0 || modular_delta > (UINT32_MAX / 2U)) {
+        return 0;
+    }
+
+    uint64_t remaining_ms = (uint64_t)modular_delta * tick_period_ms;
+    return remaining_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining_ms;
 }
 
 
@@ -263,9 +364,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             atomic_store(&s_sta_started, false);
             atomic_store(&s_sta_connected, false);
             atomic_store(&s_sta_ip_acquired, false);
+            argus_net_event_t evt = {
+                .type = ARGUS_NET_EVT_STA_STOPPED,
+                .transaction_generation = atomic_load(&s_active_transaction_generation)
+            };
+            argus_net_mgr_post_event(&evt);
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
             atomic_store(&s_sta_connected, true);
-            argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_ASSOCIATED };
+            argus_net_event_t evt = {
+                .type = ARGUS_NET_EVT_STA_ASSOCIATED,
+                .transaction_generation = atomic_load(&s_active_transaction_generation)
+            };
             argus_net_mgr_post_event(&evt);
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             atomic_store(&s_sta_connected, false);
@@ -302,6 +411,20 @@ static void argus_wifi_apply_get_production_ops(argus_wifi_apply_ops_t *ops);
 static esp_err_t argus_net_mgr_request_service_internal(
     argus_authority_owner_t requested_owner,
     const argus_service_entry_fingerprint_t *expected_preflight);
+
+static void apply_sta_event_action_locked(argus_sta_event_action_t action)
+{
+    argus_sta_state_t state = s_sta_state;
+    bool started = atomic_load(&s_sta_started);
+    bool connected = atomic_load(&s_sta_connected);
+    bool ip_acquired = atomic_load(&s_sta_ip_acquired);
+    argus_net_apply_sta_event_action(s_net_mode, action, &state, &started,
+                                     &connected, &ip_acquired);
+    s_sta_state = state;
+    atomic_store(&s_sta_started, started);
+    atomic_store(&s_sta_connected, connected);
+    atomic_store(&s_sta_ip_acquired, ip_acquired);
+}
 
 static void net_mgr_task(void *pvParameters)
 {
@@ -365,7 +488,13 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_STA_ASSOCIATED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
+                    argus_sta_event_action_t assoc_action = argus_net_decide_sta_event(
+                        s_net_mode, ARGUS_STA_EVENT_ASSOCIATED,
+                        evt.transaction_generation,
+                        atomic_load(&s_active_transaction_generation),
+                        atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
+                        atomic_load(&s_sta_ip_acquired));
+                    if (assoc_action == ARGUS_STA_EVENT_PROCESS) {
                         s_sta_state = ARGUS_STA_ASSOCIATED_WAITING_IP;
                         ESP_LOGI(TAG, "STA associated; waiting for IP");
                         atomic_store(&s_ip_timeout_timer_generation, s_timer_generation);
@@ -375,12 +504,29 @@ static void net_mgr_task(void *pvParameters)
                             s_last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
                             ESP_LOGE(TAG, "Failed to schedule STA IP timeout");
                         }
+                    } else {
+                        apply_sta_event_action_locked(assoc_action);
+                        ESP_LOGW(TAG, "Ignored delayed STA association in mode %s",
+                                 argus_net_mgr_get_mode_name(s_net_mode));
                     }
                     xSemaphoreGive(s_net_mutex);
                     break;
 
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+                    argus_sta_event_action_t ip_action = argus_net_decide_sta_event(
+                        s_net_mode, ARGUS_STA_EVENT_IP_ACQUIRED,
+                        evt.transaction_generation,
+                        atomic_load(&s_active_transaction_generation),
+                        atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
+                        atomic_load(&s_sta_ip_acquired));
+                    if (ip_action != ARGUS_STA_EVENT_PROCESS) {
+                        apply_sta_event_action_locked(ip_action);
+                        ESP_LOGW(TAG, "Ignored delayed STA IP acquisition in mode %s",
+                                 argus_net_mgr_get_mode_name(s_net_mode));
+                        xSemaphoreGive(s_net_mutex);
+                        break;
+                    }
                     s_timer_generation++;
                     if (xTimerStop(s_ip_timeout_timer, 0) != pdPASS ||
                         xTimerStop(s_auto_retry_timer, 0) != pdPASS) {
@@ -402,6 +548,8 @@ static void net_mgr_task(void *pvParameters)
                     s_last_disconnect_category = ARGUS_DISCONNECT_CAT_NONE;
                     s_last_disconnect_reason = 0;
                     s_last_error = ARGUS_NET_ERR_NONE;
+                    s_last_service_cancel_failure = ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+                    s_last_service_cancel_error = ESP_OK;
                     if (s_net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP ||
                         s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
                         s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA ||
@@ -428,6 +576,28 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_STA_DISCONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+                    bool is_ip_timeout = evt.disconnect_reason == 0;
+                    argus_sta_event_action_t disconnect_action = argus_net_decide_sta_event(
+                        s_net_mode, is_ip_timeout ? ARGUS_STA_EVENT_IP_TIMEOUT
+                                                  : ARGUS_STA_EVENT_DISCONNECTED,
+                        is_ip_timeout ? evt.timer_generation
+                                      : evt.transaction_generation,
+                        is_ip_timeout ? s_timer_generation
+                                      : atomic_load(&s_active_transaction_generation),
+                        atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
+                        atomic_load(&s_sta_ip_acquired));
+                    if (disconnect_action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
+                        apply_sta_event_action_locked(disconnect_action);
+                        ESP_LOGI(TAG, "Delayed STA disconnect confirmed disabled service state");
+                        xSemaphoreGive(s_net_mutex);
+                        break;
+                    }
+                    if (disconnect_action == ARGUS_STA_EVENT_IGNORE) {
+                        ESP_LOGW(TAG, "Ignored delayed STA disconnect in mode %s",
+                                 argus_net_mgr_get_mode_name(s_net_mode));
+                        xSemaphoreGive(s_net_mutex);
+                        break;
+                    }
                     if (xTimerStop(s_ip_timeout_timer, 0) != pdPASS) {
                         s_last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
                     }
@@ -544,6 +714,29 @@ static void net_mgr_task(void *pvParameters)
                         atomic_store(&s_active_transaction_generation, 0);
                         s_last_error = ARGUS_NET_ERR_WIFI_TRANSACTION_FAILED;
                         ESP_LOGE(TAG, "Wi-Fi config apply failed: %s", esp_err_to_name(err));
+                    }
+                    xSemaphoreGive(s_net_mutex);
+                    break;
+
+                case ARGUS_NET_EVT_STA_STOPPED:
+                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+                    argus_sta_event_action_t stop_action = argus_net_decide_sta_event(
+                        s_net_mode, ARGUS_STA_EVENT_STOPPED,
+                        evt.transaction_generation,
+                        atomic_load(&s_active_transaction_generation),
+                        atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
+                        atomic_load(&s_sta_ip_acquired));
+                    if (stop_action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
+                        apply_sta_event_action_locked(stop_action);
+                        ESP_LOGI(TAG, "STA stop confirmed disabled service state");
+                    } else if (stop_action == ARGUS_STA_EVENT_PROCESS) {
+                        s_sta_state = ARGUS_STA_DISABLED;
+                        argus_authority_mgr_set_mode(
+                            ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+                        argus_mqtt_broker_stop();
+                        set_net_mode(ARGUS_NET_MODE_NETWORK_FAULT);
+                        s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
+                        ESP_LOGE(TAG, "Unexpected operational STA stop; entered NETWORK_FAULT");
                     }
                     xSemaphoreGive(s_net_mutex);
                     break;
@@ -801,7 +994,7 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
     if (!ops->request_normal_stop || !ops->verify_stopped || !ops->stop_broker ||
         !ops->verify_broker_stopped || !ops->disconnect_sta || !ops->verify_sta_disconnected ||
         !ops->verify_sta_ip_released || !ops->set_wifi_ap_only || !ops->verify_ap_active ||
-        !ops->verify_machine_safe) {
+        !ops->set_sta_disabled || !ops->verify_machine_safe) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -861,6 +1054,9 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
 
     op_err = ops->verify_ap_active(ops->ctx);
     if (op_err != ESP_OK) { fail_stage = "verify AP active"; goto abort_transition; }
+
+    op_err = ops->set_sta_disabled(ops->ctx);
+    if (op_err != ESP_OK) { fail_stage = "commit STA disabled state"; goto abort_transition; }
 
     op_err = ops->verify_machine_safe(ops->ctx);
     if (op_err != ESP_OK) { fail_stage = "verify machine safe"; goto abort_transition; }
@@ -1155,6 +1351,17 @@ static void wifi_transaction_scrub_config(argus_wifi_transaction_t *txn)
     txn->config_staged = false;
 }
 
+static esp_err_t prod_set_sta_disabled(void *ctx)
+{
+    (void)ctx;
+    if (atomic_load(&s_sta_started) || atomic_load(&s_sta_connected) ||
+        atomic_load(&s_sta_ip_acquired)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_sta_state = ARGUS_STA_DISABLED;
+    return ESP_OK;
+}
+
 static esp_err_t wifi_transaction_finish_error(argus_wifi_transaction_t *txn,
                                                esp_err_t err)
 {
@@ -1402,6 +1609,51 @@ esp_err_t argus_net_cancel_recovery_for_service(
     return ESP_OK;
 }
 
+void argus_net_record_service_cancel_failure(
+    argus_service_cancel_state_t *state,
+    argus_service_cancel_failure_t failure,
+    esp_err_t error)
+{
+    if (!state || failure == ARGUS_SERVICE_CANCEL_FAILURE_NONE ||
+        error == ESP_OK) {
+        return;
+    }
+    state->sta_state = ARGUS_STA_ACTION_REQUIRED;
+    state->net_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
+    state->cancel_failure = failure;
+    state->cancel_error = error;
+}
+
+const char *argus_net_service_cancel_guidance(
+    argus_service_cancel_failure_t failure)
+{
+    if (failure == ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER) {
+        return "Auto-retry timer stop failed. Use Reconnect Wi-Fi or Enter Local Service.";
+    }
+    if (failure == ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER) {
+        return "IP-timeout timer stop failed. Use Reconnect Wi-Fi or Enter Local Service.";
+    }
+    return "";
+}
+
+esp_err_t argus_net_service_commit_recovery(
+    argus_svc_policy_result_t policy,
+    const argus_service_entry_fingerprint_t *expected,
+    const argus_service_entry_fingerprint_t *actual,
+    const argus_service_commit_ops_t *ops,
+    argus_service_cancel_failure_t *out_failure)
+{
+    if (out_failure) *out_failure = ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+    if (!actual || !ops || !ops->cancel_recovery) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (policy != ARGUS_SVC_POLICY_OK ||
+        (expected && !argus_service_entry_fingerprint_matches(expected, actual))) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ops->cancel_recovery(ops->ctx, out_failure);
+}
+
 esp_err_t argus_net_mgr_orchestrate_wifi_apply(argus_network_mode_t *net_mode,
                                                argus_sta_state_t *sta_state,
                                                bool sta_connected,
@@ -1530,6 +1782,8 @@ static void populate_net_snapshot_locked(argus_net_snapshot_t *out_snap)
         s_ip_timeout_timer && xTimerIsTimerActive(s_ip_timeout_timer);
     out_snap->ip_timeout_timer_generation =
         atomic_load(&s_ip_timeout_timer_generation);
+    out_snap->last_service_cancel_failure = s_last_service_cancel_failure;
+    out_snap->last_service_cancel_error = s_last_service_cancel_error;
 
     if (out_snap->sta_ip_acquired && s_netif_sta) {
         esp_netif_ip_info_t ip_info;
@@ -1550,6 +1804,13 @@ static esp_err_t service_stop_ip_timeout_timer(void *ctx)
 {
     (void)ctx;
     return xTimerStop(s_ip_timeout_timer, 0) == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t service_commit_cancel_recovery(
+    void *ctx, argus_service_cancel_failure_t *out_failure)
+{
+    return argus_net_cancel_recovery_for_service(
+        (const argus_service_recovery_cancel_ops_t *)ctx, out_failure);
 }
 
 esp_err_t argus_net_mgr_request_manual_reconnect(void)
@@ -1624,15 +1885,6 @@ static esp_err_t argus_net_mgr_request_service_internal(
     }
     policy = argus_service_policy_evaluate_entry_for_owner(
         &net_locked, &auth_locked, requested_owner, &locked_evt);
-    if (policy != ARGUS_SVC_POLICY_OK ||
-        (expected_preflight && !argus_service_entry_fingerprint_matches(
-            expected_preflight, &locked_evt.service_preflight))) {
-        ESP_LOGW(TAG, "Service entry state changed before dispatch ownership; request rejected without mutation");
-        argus_cmd_router_unlock_dispatch();
-        xSemaphoreGive(s_net_mutex);
-        return ESP_ERR_INVALID_STATE;
-    }
-
     argus_service_recovery_cancel_ops_t cancel_ops = {
         .transaction = &s_wifi_transaction,
         .timer_generation = &s_timer_generation,
@@ -1643,19 +1895,44 @@ static esp_err_t argus_net_mgr_request_service_internal(
         .stop_ip_timeout_timer = service_stop_ip_timeout_timer,
         .ctx = NULL
     };
-    argus_service_cancel_failure_t cancel_failure;
-    esp_err_t cancel_err = argus_net_cancel_recovery_for_service(
-        &cancel_ops, &cancel_failure);
-    if (cancel_err != ESP_OK) {
-        s_last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
+    argus_service_commit_ops_t commit_ops = {
+        .cancel_recovery = service_commit_cancel_recovery,
+        .ctx = &cancel_ops
+    };
+    argus_service_cancel_failure_t cancel_failure =
+        ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+    esp_err_t commit_err = argus_net_service_commit_recovery(
+        policy, expected_preflight, &locked_evt.service_preflight,
+        &commit_ops, &cancel_failure);
+    if (commit_err != ESP_OK) {
+        if (cancel_failure == ARGUS_SERVICE_CANCEL_FAILURE_NONE) {
+            ESP_LOGW(TAG, "Service entry state changed before mutation; request rejected");
+            argus_cmd_router_unlock_dispatch();
+            xSemaphoreGive(s_net_mutex);
+            return commit_err;
+        }
+        argus_service_cancel_state_t failure_state = {
+            .sta_state = s_sta_state,
+            .net_error = s_last_error,
+            .cancel_failure = s_last_service_cancel_failure,
+            .cancel_error = s_last_service_cancel_error
+        };
+        argus_net_record_service_cancel_failure(
+            &failure_state, cancel_failure, commit_err);
+        s_sta_state = failure_state.sta_state;
+        s_last_error = failure_state.net_error;
+        s_last_service_cancel_failure = failure_state.cancel_failure;
+        s_last_service_cancel_error = failure_state.cancel_error;
         ESP_LOGE(TAG, "Service entry recovery cancellation failed at %s: %s",
                  cancel_failure == ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER
                      ? "auto-retry timer stop" : "IP-timeout timer stop",
-                 esp_err_to_name(cancel_err));
+                 esp_err_to_name(commit_err));
         argus_cmd_router_unlock_dispatch();
         xSemaphoreGive(s_net_mutex);
-        return cancel_err;
+        return commit_err;
     }
+    s_last_service_cancel_failure = ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+    s_last_service_cancel_error = ESP_OK;
 
     argus_service_authority_ops_t auth_ops;
     argus_authority_get_production_service_ops(&auth_ops);
@@ -1670,6 +1947,7 @@ static esp_err_t argus_net_mgr_request_service_internal(
         .verify_sta_ip_released = prod_verify_sta_ip_released,
         .set_wifi_ap_only = prod_set_wifi_ap_only,
         .verify_ap_active = prod_verify_ap_active,
+        .set_sta_disabled = prod_set_sta_disabled,
         .verify_machine_safe = prod_verify_machine_safe,
         .stop_http = prod_stop_http,
         .start_http = prod_start_http,
@@ -1949,15 +2227,13 @@ uint32_t argus_net_mgr_get_consecutive_failures(void) { return s_consecutive_fai
 
 uint32_t argus_net_mgr_get_retry_seconds(void)
 {
-    if (s_sta_state == ARGUS_STA_RETRY_WAIT && s_auto_retry_timer && xTimerIsTimerActive(s_auto_retry_timer)) {
-        TickType_t expiry = xTimerGetExpiryTime(s_auto_retry_timer);
-        TickType_t now = xTaskGetTickCount();
-        TickType_t remaining_ticks = expiry - now;
-        uint64_t remaining_ms = (uint64_t)remaining_ticks * portTICK_PERIOD_MS;
-        if (remaining_ms > UINT32_MAX) remaining_ms = UINT32_MAX;
-        return argus_net_retry_countdown_seconds((uint32_t)remaining_ms);
-    }
-    return 0;
+    bool active = s_auto_retry_timer && xTimerIsTimerActive(s_auto_retry_timer);
+    uint32_t expiry = active ? (uint32_t)xTimerGetExpiryTime(s_auto_retry_timer) : 0;
+    uint32_t remaining_ms = argus_net_retry_remaining_ms(
+        (uint32_t)xTaskGetTickCount(), expiry, active,
+        atomic_load(&s_auto_retry_timer_generation), s_timer_generation,
+        s_sta_state, portTICK_PERIOD_MS);
+    return argus_net_retry_countdown_seconds(remaining_ms);
 }
 
 const char *argus_net_mgr_get_wifi_apply_state_name(argus_wifi_apply_state_t state)
@@ -1979,6 +2255,9 @@ bool argus_net_mgr_is_action_required(void) { return s_sta_state == ARGUS_STA_AC
 
 const char *argus_net_mgr_get_operator_guidance(void)
 {
+    if (s_last_service_cancel_failure != ARGUS_SERVICE_CANCEL_FAILURE_NONE) {
+        return argus_net_service_cancel_guidance(s_last_service_cancel_failure);
+    }
     if (s_wifi_transaction.active) {
         if (s_wifi_transaction.kind == ARGUS_WIFI_TXN_APPLY_CONFIG) {
             return "Applying saved Wi-Fi configuration; previous failure remains visible until recovery";

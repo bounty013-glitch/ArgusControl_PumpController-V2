@@ -36,13 +36,6 @@ static const char *TAG = "argus_mqtt_broker";
 /* ---------------------------------------------------------------------------
  * Broker state machine
  * -----------------------------------------------------------------------*/
-typedef enum {
-    BROKER_STATE_STOPPED = 0,
-    BROKER_STATE_STARTING,
-    BROKER_STATE_RUNNING,
-    BROKER_STATE_STOPPING,
-} argus_broker_state_t;
-
 typedef struct {
     bool in_use;
     int sock;
@@ -1009,12 +1002,21 @@ esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t 
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-    out->state = (int)s_broker.state;
+    out->state = s_broker.state;
     out->active_client_count = atomic_load(&s_broker.active_client_count);
     out->has_server_task = (s_broker.server_task_handle != NULL);
     out->has_listener = (s_broker.listen_sock >= 0);
-    out->running = s_broker.state == BROKER_STATE_RUNNING;
-    out->stopped = s_broker.state == BROKER_STATE_STOPPED;
+    out->running = s_broker.state == BROKER_STATE_RUNNING &&
+                   out->has_server_task && out->has_listener;
+    out->stopped = argus_mqtt_broker_observation_is_stopped(out);
     xSemaphoreGive(s_broker.lifecycle_mutex);
     return ESP_OK;
+}
+
+bool argus_mqtt_broker_observation_is_stopped(
+    const argus_mqtt_broker_lifecycle_obs_t *obs)
+{
+    return obs && obs->state == BROKER_STATE_STOPPED &&
+           !obs->has_server_task && !obs->has_listener &&
+           obs->active_client_count == 0;
 }

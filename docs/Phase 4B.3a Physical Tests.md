@@ -1,6 +1,6 @@
 # Phase 4B.3a - Physical Tests: Wi-Fi Observability and Recovery
 
-This checklist is pending execution. It is not physical-readiness or acceptance evidence until an independent source review authorizes flashing and the recorded results are reviewed.
+All ten tests in this checklist remain pending execution. This is not physical-readiness or acceptance evidence until independent source review authorizes flashing and the recorded results are reviewed.
 
 ## Prerequisites
 
@@ -95,4 +95,4 @@ Actual: `[PENDING]`
 
 ## Acceptance note
 
-All physical tests, including corrected Test 8, remain pending. No physical acceptance has occurred. Any source-derived registration count is provisional until diagnostic option `t` executes on hardware.
+All ten physical tests, including corrected Test 8, remain pending. No physical acceptance has occurred. Any source-derived registration count is provisional until diagnostic option `t` executes on hardware.

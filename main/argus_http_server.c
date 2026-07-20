@@ -403,7 +403,18 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
 
     const char *operator_guidance = "No network issues detected.";
-    if (net_snap.apply_state == ARGUS_WIFI_APPLY_PREPARING ||
+    const char *timer_cancel_failure = "NONE";
+    if (net_snap.last_service_cancel_failure ==
+        ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER) {
+        timer_cancel_failure = "AUTO_RETRY_TIMER_STOP";
+        operator_guidance = argus_net_service_cancel_guidance(
+            net_snap.last_service_cancel_failure);
+    } else if (net_snap.last_service_cancel_failure ==
+               ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER) {
+        timer_cancel_failure = "IP_TIMEOUT_TIMER_STOP";
+        operator_guidance = argus_net_service_cancel_guidance(
+            net_snap.last_service_cancel_failure);
+    } else if (net_snap.apply_state == ARGUS_WIFI_APPLY_PREPARING ||
         net_snap.apply_state == ARGUS_WIFI_APPLY_WAITING_DISCONNECT ||
         net_snap.apply_state == ARGUS_WIFI_APPLY_APPLYING_CONFIG ||
         net_snap.apply_state == ARGUS_WIFI_APPLY_CONNECTING) {
@@ -426,7 +437,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
 
     /* Build JSON response */
-    char buf[1408];
+    char buf[1536];
     int len = snprintf(buf, sizeof(buf),
         "{"
         "\"machine\":{\"state\":\"%s\","
@@ -452,6 +463,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"manual_reconnect_permitted\":%s,"
         "\"service_entry_permitted\":%s,"
         "\"operator_action_required\":%s,"
+        "\"timer_cancel_failure\":\"%s\","
+        "\"timer_cancel_error\":\"%s\","
         "\"operator_guidance\":\"%s\"},"
         "\"broker\":{\"running\":%s,"
         "\"active_clients\":%" PRId32 ","
@@ -482,6 +495,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.manual_reconnect_permitted ? "true" : "false",
         service_entry_permitted ? "true" : "false",
         net_snap.action_required ? "true" : "false",
+        timer_cancel_failure,
+        esp_err_to_name(net_snap.last_service_cancel_error),
         operator_guidance,
         net_snap.mqtt_broker_running ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
