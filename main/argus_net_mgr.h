@@ -27,24 +27,6 @@ typedef enum {
 } argus_network_mode_t;
 
 typedef enum {
-    ARGUS_STA_DISABLED = 0,
-    ARGUS_STA_IDLE,
-    ARGUS_STA_CONNECTING,
-    ARGUS_STA_ASSOCIATED_WAITING_IP,
-    ARGUS_STA_CONNECTED,
-    ARGUS_STA_RETRY_WAIT,
-    ARGUS_STA_ACTION_REQUIRED
-} argus_sta_state_t;
-
-typedef enum {
-    ARGUS_DISCONNECT_CAT_NONE = 0,
-    ARGUS_DISCONNECT_CAT_AUTHENTICATION,
-    ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
-    ARGUS_DISCONNECT_CAT_IP_TIMEOUT,
-    ARGUS_DISCONNECT_CAT_UNKNOWN
-} argus_disconnect_category_t;
-
-typedef enum {
     ARGUS_NET_ERR_NONE = 0,
     ARGUS_NET_ERR_NVS_CORRUPT,
     ARGUS_NET_ERR_SLOT_CRC_FAILED,
@@ -71,21 +53,13 @@ typedef enum {
     ARGUS_NET_EVT_STA_DISCONNECTED,
     ARGUS_NET_EVT_AP_CLIENT_CONNECTED,
     ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED,
-    ARGUS_NET_EVT_RESTART_REQUEST,         /**< Coordinated restart (deferred to net_mgr task) */
-    ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
-    ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP    /**< Timer wakeup for auto-reconnect */
+    ARGUS_NET_EVT_RESTART_REQUEST          /**< Coordinated restart (deferred to net_mgr task) */
 } argus_net_event_type_t;
 
-
-/* Pure helpers for classification and retry decisions */
-argus_disconnect_category_t argus_net_classify_disconnect(uint8_t reason, const char **out_name);
-argus_sta_state_t argus_net_evaluate_retry(argus_disconnect_category_t cat, uint32_t consecutive_failures);
-bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode, argus_sta_state_t sta_state);
 
 typedef struct {
     argus_net_event_type_t type;
     argus_authority_owner_t requested_owner;
-    uint8_t disconnect_reason;             /**< Captured from WIFI_EVENT_STA_DISCONNECTED */
 } argus_net_event_t;
 
 /**
@@ -120,51 +94,6 @@ const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode);
  * @brief Enable service AP discoverability alongside active STA (APSTA mode).
  */
 esp_err_t argus_net_mgr_enable_ap_discoverable(void);
-
-/**
- * @brief Get current STA lifecycle state.
- */
-argus_sta_state_t argus_net_mgr_get_sta_state(void);
-
-/**
- * @brief Get human-readable string for STA lifecycle state.
- */
-const char *argus_net_mgr_get_sta_state_name(argus_sta_state_t state);
-
-/**
- * @brief Get the numeric reason code of the last STA disconnection.
- */
-uint8_t argus_net_mgr_get_last_disconnect_reason(void);
-
-/**
- * @brief Get the string name of the last disconnect reason.
- */
-const char *argus_net_mgr_get_last_disconnect_reason_name(void);
-
-/**
- * @brief Get the failure category of the last disconnection.
- */
-const char *argus_net_mgr_get_last_disconnect_category_name(void);
-
-/**
- * @brief Get the number of consecutive STA connection failures.
- */
-uint32_t argus_net_mgr_get_consecutive_failures(void);
-
-/**
- * @brief Get the number of seconds until the next automatic retry.
- */
-uint32_t argus_net_mgr_get_retry_seconds(void);
-
-/**
- * @brief Check if operator action is required to resolve Wi-Fi connection issues.
- */
-bool argus_net_mgr_is_action_required(void);
-
-/**
- * @brief Get operator guidance message for current Wi-Fi status.
- */
-const char *argus_net_mgr_get_operator_guidance(void);
 
 typedef struct {
     esp_err_t (*request_normal_stop)(void *ctx);

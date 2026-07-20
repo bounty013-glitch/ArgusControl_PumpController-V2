@@ -60,67 +60,7 @@ static _Atomic bool s_sta_started = false;
 static _Atomic bool s_sta_connected = false;
 static _Atomic bool s_sta_ip_acquired = false;
 static _Atomic bool s_ap_started = false;
-
-static argus_sta_state_t s_sta_state = ARGUS_STA_DISABLED;
-static uint8_t s_last_disconnect_reason = 0;
-static argus_disconnect_category_t s_last_disconnect_category = ARGUS_DISCONNECT_CAT_NONE;
-static uint32_t s_consecutive_failures = 0;
-static TimerHandle_t s_auto_retry_timer = NULL;
-static TimerHandle_t s_ip_timeout_timer = NULL;
-
-
-argus_disconnect_category_t argus_net_classify_disconnect(uint8_t reason, const char **out_name)
-{
-    argus_disconnect_category_t cat;
-    switch(reason) {
-        case WIFI_REASON_AUTH_EXPIRE: *out_name = "AUTH_EXPIRE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_AUTH_LEAVE: *out_name = "AUTH_LEAVE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_MIC_FAILURE: *out_name = "MIC_FAILURE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: *out_name = "4WAY_HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_802_1X_AUTH_FAILED: *out_name = "802_1X_AUTH_FAILED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_AUTH_FAIL: *out_name = "AUTH_FAIL"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_HANDSHAKE_TIMEOUT: *out_name = "HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        
-        case WIFI_REASON_NO_AP_FOUND: *out_name = "NO_AP_FOUND"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        
-        default: *out_name = "UNKNOWN"; cat = ARGUS_DISCONNECT_CAT_UNKNOWN; break;
-    }
-    return cat;
-}
-
-argus_sta_state_t argus_net_evaluate_retry(argus_disconnect_category_t cat, uint32_t consecutive_failures)
-{
-    if (cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION && consecutive_failures >= 3) {
-        return ARGUS_STA_ACTION_REQUIRED;
-    }
-    return ARGUS_STA_RETRY_WAIT;
-}
-
-bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode, argus_sta_state_t sta_state)
-{
-    if (net_mode == ARGUS_NET_MODE_SERVICE_TRANSITION || net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
-        return false;
-    }
-    if (sta_state == ARGUS_STA_ACTION_REQUIRED || sta_state == ARGUS_STA_RETRY_WAIT || sta_state == ARGUS_STA_DISABLED || sta_state == ARGUS_STA_IDLE) {
-        return true;
-    }
-    return false;
-}
-
-
-static void auto_retry_timer_cb(TimerHandle_t xTimer)
-{
-    argus_net_event_t evt = { .type = ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP };
-    argus_net_mgr_post_event(&evt);
-}
-
-static void ip_timeout_timer_cb(TimerHandle_t xTimer)
-{
-    /* Fake a disconnect reason 0 for IP timeout */
-    argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED, .disconnect_reason = 0 };
-    argus_net_mgr_post_event(&evt);
-}
-
+||||||||
 static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
 
 // Unused: event group removed; verification uses bounded atomic polling.
@@ -162,13 +102,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             atomic_store(&s_sta_ip_acquired, false);
         } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
             atomic_store(&s_sta_connected, true);
-            argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_ASSOCIATED };
-            argus_net_mgr_post_event(&evt);
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             atomic_store(&s_sta_connected, false);
             atomic_store(&s_sta_ip_acquired, false);
-            wifi_event_sta_disconnected_t *disconn = (wifi_event_sta_disconnected_t *)event_data;
-            argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED, .disconnect_reason = disconn->reason };
+            argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED };
             argus_net_mgr_post_event(&evt);
         } else if (event_id == WIFI_EVENT_AP_START) {
             atomic_store(&s_ap_started, true);
@@ -202,44 +139,8 @@ static void net_mgr_task(void *pvParameters)
                     argus_net_mgr_request_service_exit(evt.requested_owner);
                     break;
 
-                case ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST:
-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        if (argus_net_can_manual_reconnect(s_net_mode, s_sta_state)) {
-                            ESP_LOGI(TAG, "Manual reconnect requested");
-                            xTimerStop(s_auto_retry_timer, 0);
-                            s_sta_state = ARGUS_STA_CONNECTING;
-                            esp_wifi_connect();
-                        }
-                    }
-                    xSemaphoreGive(s_net_mutex);
-                    break;
-
-                case ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP:
-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_sta_state == ARGUS_STA_RETRY_WAIT) {
-                        ESP_LOGI(TAG, "Auto-reconnect timer fired. Retrying connection...");
-                        s_sta_state = ARGUS_STA_CONNECTING;
-                        esp_wifi_connect();
-                    }
-                    xSemaphoreGive(s_net_mutex);
-                    break;
-
-                case ARGUS_NET_EVT_STA_ASSOCIATED:
-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        s_sta_state = ARGUS_STA_ASSOCIATED_WAITING_IP;
-                        ESP_LOGI(TAG, "STA associated; waiting for IP");
-                        xTimerStart(s_ip_timeout_timer, 0);
-                    }
-                    xSemaphoreGive(s_net_mutex);
-                    break;
-
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    xTimerStop(s_ip_timeout_timer, 0);
-                    s_sta_state = ARGUS_STA_CONNECTED;
-                    s_consecutive_failures = 0;
                     if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
                         s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA ||
                         s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
@@ -264,39 +165,11 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_STA_DISCONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    xTimerStop(s_ip_timeout_timer, 0);
-                    
                     if (s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
-                        ESP_LOGW(TAG, "STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.");
+                        ESP_LOGW(TAG, \"STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.\");
                         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
                         argus_mqtt_broker_stop();
-                        
-                        s_last_disconnect_reason = evt.disconnect_reason;
-                        const char *reason_name;
-                        
-                        if (evt.disconnect_reason == 0) {
-                            reason_name = "IP_ACQUISITION_TIMEOUT";
-                            s_last_disconnect_category = ARGUS_DISCONNECT_CAT_IP_TIMEOUT;
-                        } else {
-                            s_last_disconnect_category = argus_net_classify_disconnect(evt.disconnect_reason, &reason_name);
-                        }
-                        
-                        s_consecutive_failures++;
-                        
-                        ESP_LOGW(TAG, "STA disconnected: reason=%d (%s), category=%d", evt.disconnect_reason, reason_name, s_last_disconnect_category);
-                        
-                        s_sta_state = argus_net_evaluate_retry(s_last_disconnect_category, s_consecutive_failures);
-                        if (s_sta_state == ARGUS_STA_ACTION_REQUIRED) {
-                            ESP_LOGE(TAG, "Automatic retry suppressed after consecutive authentication failures");
-                            ESP_LOGE(TAG, "Operator action required: verify Wi-Fi configuration");
-                        } else {
-                            ESP_LOGI(TAG, "Retry %lu scheduled in 15 seconds", s_consecutive_failures);
-                            xTimerStart(s_auto_retry_timer, pdMS_TO_TICKS(15000));
-                        }
-                    } else {
-                        s_sta_state = ARGUS_STA_IDLE;
                     }
-                    
                     xSemaphoreGive(s_net_mutex);
                     break;
 
@@ -337,9 +210,6 @@ esp_err_t argus_net_mgr_init(void)
 
     s_net_mutex = xSemaphoreCreateMutexStatic(&s_net_mutex_buffer);
     s_event_queue = xQueueCreate(10, sizeof(argus_net_event_t));
-    s_auto_retry_timer = xTimerCreate("auto_reconnect", pdMS_TO_TICKS(15000), pdFALSE, NULL, auto_retry_timer_cb);
-    s_ip_timeout_timer = xTimerCreate("ip_timeout", pdMS_TO_TICKS(10000), pdFALSE, NULL, ip_timeout_timer_cb);
-
     // Validate build service credential
     if (!validate_build_service_credential()) {
         s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
@@ -1147,71 +1017,4 @@ exit_fail_closed:
     s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
     xSemaphoreGive(s_net_mutex);
     return stop_err;
-}
-
-argus_sta_state_t argus_net_mgr_get_sta_state(void) { return s_sta_state; }
-
-const char *argus_net_mgr_get_sta_state_name(argus_sta_state_t state)
-{
-    switch(state) {
-        case ARGUS_STA_DISABLED: return "DISABLED";
-        case ARGUS_STA_IDLE: return "IDLE";
-        case ARGUS_STA_CONNECTING: return "CONNECTING";
-        case ARGUS_STA_ASSOCIATED_WAITING_IP: return "ASSOCIATED_WAITING_IP";
-        case ARGUS_STA_CONNECTED: return "CONNECTED";
-        case ARGUS_STA_RETRY_WAIT: return "RETRY_WAIT";
-        case ARGUS_STA_ACTION_REQUIRED: return "ACTION_REQUIRED";
-        default: return "UNKNOWN";
-    }
-}
-
-uint8_t argus_net_mgr_get_last_disconnect_reason(void) { return s_last_disconnect_reason; }
-
-const char *argus_net_mgr_get_last_disconnect_reason_name(void)
-{
-    if (s_last_disconnect_reason == 0 && s_last_disconnect_category == ARGUS_DISCONNECT_CAT_IP_TIMEOUT) {
-        return "IP_ACQUISITION_TIMEOUT";
-    }
-    const char *name;
-    argus_disconnect_category_t cat;
-    argus_net_classify_disconnect(s_last_disconnect_reason, &name);
-    return name;
-}
-
-const char *argus_net_mgr_get_last_disconnect_category_name(void)
-{
-    switch(s_last_disconnect_category) {
-        case ARGUS_DISCONNECT_CAT_NONE: return "NONE";
-        case ARGUS_DISCONNECT_CAT_AUTHENTICATION: return "AUTHENTICATION";
-        case ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE: return "AP_UNAVAILABLE";
-        case ARGUS_DISCONNECT_CAT_IP_TIMEOUT: return "IP_TIMEOUT";
-        case ARGUS_DISCONNECT_CAT_UNKNOWN: return "UNKNOWN";
-        default: return "UNKNOWN";
-    }
-}
-
-uint32_t argus_net_mgr_get_consecutive_failures(void) { return s_consecutive_failures; }
-
-uint32_t argus_net_mgr_get_retry_seconds(void)
-{
-    if (s_sta_state == ARGUS_STA_RETRY_WAIT && s_auto_retry_timer) {
-        TickType_t remaining = xTimerGetExpiryTime(s_auto_retry_timer) - xTaskGetTickCount();
-        return (remaining * portTICK_PERIOD_MS) / 1000;
-    }
-    return 0;
-}
-
-bool argus_net_mgr_is_action_required(void) { return s_sta_state == ARGUS_STA_ACTION_REQUIRED; }
-
-const char *argus_net_mgr_get_operator_guidance(void)
-{
-    if (s_sta_state == ARGUS_STA_ACTION_REQUIRED) {
-        if (s_last_disconnect_category == ARGUS_DISCONNECT_CAT_AUTHENTICATION) {
-            return "Check Wi-Fi SSID/password, then Save or Reconnect";
-        }
-        return "Manual intervention required. Check Wi-Fi configuration.";
-    } else if (s_sta_state == ARGUS_STA_RETRY_WAIT) {
-        return "Automatic retry scheduled";
-    }
-    return "Normal operation";
 }

@@ -3517,7 +3517,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
     printf("\nPhase 4A+4B.1+4B.2+4B.3 Pure Tests:\n");
-    printf("  Distinct Test Cases : 83\n");
+    printf("  Distinct Test Cases : %d\n", (passed_executions + failed_executions) / 3);
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
@@ -3551,52 +3551,6 @@ esp_err_t argus_tests_4a_run_all(void)
 /* ─────────────────────────────────────────────────────────────────────────────
  * Phase 4B.3: Wi-Fi Recovery, Observability, and Identity Reconciliation
  * ───────────────────────────────────────────────────────────────────────────*/
-
-static esp_err_t test_4b3_classify_reasons(void)
-{
-    const char *name;
-    argus_disconnect_category_t cat;
-
-    cat = argus_net_classify_disconnect(WIFI_REASON_AUTH_EXPIRE, &name);
-    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "AUTH_EXPIRE should be AUTHENTICATION");
-
-    cat = argus_net_classify_disconnect(WIFI_REASON_NO_AP_FOUND, &name);
-    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "NO_AP_FOUND should be AP_UNAVAILABLE");
-
-    cat = argus_net_classify_disconnect(99, &name);
-    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_UNKNOWN, "99 should be UNKNOWN");
-
-    return ESP_OK;
-}
-
-static esp_err_t test_4b3_evaluate_retry(void)
-{
-    argus_sta_state_t state;
-
-    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 1);
-    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "1 auth fail -> RETRY_WAIT");
-
-    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 3);
-    TEST_ASSERT(state == ARGUS_STA_ACTION_REQUIRED, "3 auth fails -> ACTION_REQUIRED");
-
-    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, 5);
-    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "5 AP fails -> RETRY_WAIT");
-
-    return ESP_OK;
-}
-
-static esp_err_t test_4b3_can_manual_reconnect(void)
-{
-    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_AP_ONLY, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_AP_ONLY");
-    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_TRANSITION, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_TRANSITION");
-
-    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_ACTION_REQUIRED) == true, "Can reconnect in COMMISSIONED_STA if ACTION_REQUIRED");
-    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_RETRY_WAIT) == true, "Can reconnect in AP_DISCOVERABLE if RETRY_WAIT");
-
-    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_CONNECTED) == false, "Cannot reconnect if CONNECTED");
-
-    return ESP_OK;
-}
 
 static esp_err_t test_4b3_identity_composition(void)
 {
