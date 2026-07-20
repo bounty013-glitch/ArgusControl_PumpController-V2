@@ -198,6 +198,11 @@ typedef struct {
  */
 esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs);
 
+/**
+ * @brief Pure helper for read-only observation.
+ */
+esp_err_t argus_nvs_core_get_observation_snapshot(const argus_nvs_driver_t *drv, argus_nvs_observation_t *out_obs);
+
 #ifdef __cplusplus
 }
 #endif

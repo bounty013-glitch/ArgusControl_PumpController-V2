@@ -71,6 +71,18 @@ Both handlers use an event-driven architecture to avoid deadlocks:
 
 ---
 
+### 3. Fresh-NVS Observation Correction
+
+The production NVS driver returns `ESP_ERR_NVS_NOT_FOUND` when the configuration namespace or slots do not yet exist, which is a legitimate state for a freshly erased uncommissioned device. Previously, `argus_nvs_config_get_observation_snapshot()` misinterpreted this as a snapshot failure.
+
+**Corrections:**
+1. **Pure Helper:** Extracted observation logic into a pure helper `argus_nvs_core_get_observation_snapshot(const argus_nvs_driver_t *drv, argus_nvs_observation_t *out_obs)`.
+2. **Missing-Value Normalization:** Both `ESP_ERR_NOT_FOUND` and `ESP_ERR_NVS_NOT_FOUND` are now successfully normalized as valid absence states (setting `present = false`, `valid = false`).
+3. **Regression Tests:** Added 6 new pure stack-local test cases validating generic missing, NVS missing, mixed missing, unexpected selector/slot errors, and successful observations.
+4. **Failure Diagnostics:** Improved test runner output to print exact error names and broken-down statuses for initial and final snapshots if they fail.
+
+---
+
 ## Registered Endpoints (13/16 slots used)
 
 | Phase | Endpoint | Method | Handler |
@@ -95,10 +107,10 @@ Both handlers use an event-driven architecture to avoid deadlocks:
 
 | # | Item | Result |
 |---|------|--------|
-| 1 | Incremental build | 1090 objects, zero errors, zero warnings (previous warning count was a false positive) |
-| 2 | Binary size | 992,149 bytes (0xf2395) |
-| 3 | Partition free | 68% (2,153,579 bytes on 3MB) |
-| 4 | Test count | 83 distinct, 83 RUN_TEST |
+| 1 | Full build | 1096 objects, zero errors, zero warnings |
+| 2 | Binary size | 968,736 bytes (0xec820) |
+| 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
+| 4 | Test count | 89 distinct, 89 RUN_TEST |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |

@@ -796,19 +796,18 @@ void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_pa
     }
 }
 
-esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
+esp_err_t argus_nvs_core_get_observation_snapshot(const argus_nvs_driver_t *drv, argus_nvs_observation_t *out_obs)
 {
-    if (!out_obs) return ESP_ERR_INVALID_ARG;
+    if (!drv || !out_obs) return ESP_ERR_INVALID_ARG;
 
-    const argus_nvs_driver_t *drv = get_driver();
     esp_err_t first_unexpected = ESP_OK;
+    memset(out_obs, 0, sizeof(*out_obs));
 
     // Read selector
-    memset(out_obs, 0, sizeof(*out_obs));
     out_obs->selector_status = drv->read_selector(drv->ctx, &out_obs->selector);
     if (out_obs->selector_status == ESP_OK) {
         out_obs->selector_present = true;
-    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND || out_obs->selector_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->selector_present = false;
     } else {
         out_obs->selector_present = false;
@@ -820,7 +819,7 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     if (out_obs->slot_a_status == ESP_OK) {
         out_obs->slot_a_present = true;
         out_obs->slot_a_valid = is_slot_valid(&out_obs->slot_a);
-    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND || out_obs->slot_a_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->slot_a_present = false;
         out_obs->slot_a_valid = false;
     } else {
@@ -834,7 +833,7 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     if (out_obs->slot_b_status == ESP_OK) {
         out_obs->slot_b_present = true;
         out_obs->slot_b_valid = is_slot_valid(&out_obs->slot_b);
-    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND || out_obs->slot_b_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->slot_b_present = false;
         out_obs->slot_b_valid = false;
     } else {
@@ -844,4 +843,10 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     }
 
     return first_unexpected;
+}
+
+esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
+{
+    if (!out_obs) return ESP_ERR_INVALID_ARG;
+    return argus_nvs_core_get_observation_snapshot(get_driver(), out_obs);
 }

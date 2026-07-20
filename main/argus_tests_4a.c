@@ -3017,6 +3017,71 @@ static esp_err_t test_service_policy_exit_rejected(void)
 }
 
 /* ── Test runner ───────────────────────────────────────────────────── */
+static esp_err_t mock_obs_read_selector(void *ctx, uint8_t *out_sel) { return ((esp_err_t*)ctx)[0]; }
+static esp_err_t mock_obs_read_slot(void *ctx, uint8_t slot_idx, argus_cfg_slot_t *out_slot) {
+    if (slot_idx == 0) return ((esp_err_t*)ctx)[1];
+    return ((esp_err_t*)ctx)[2];
+}
+
+// Test 84: Generic ESP_ERR_NOT_FOUND for missing selector and slots
+static esp_err_t test_nvs_observation_generic_not_found(void) {
+    esp_err_t errs[3] = {ESP_ERR_NOT_FOUND, ESP_ERR_NOT_FOUND, ESP_ERR_NOT_FOUND};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_OK, "Unexpected overall error");
+    TEST_ASSERT(!obs.selector_present && !obs.slot_a_present && !obs.slot_b_present, "Records should be absent");
+    return ESP_OK;
+}
+
+// Test 85: Production-native ESP_ERR_NVS_NOT_FOUND for missing selector and slots
+static esp_err_t test_nvs_observation_nvs_not_found(void) {
+    esp_err_t errs[3] = {ESP_ERR_NVS_NOT_FOUND, ESP_ERR_NVS_NOT_FOUND, ESP_ERR_NVS_NOT_FOUND};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_OK, "Unexpected overall error");
+    TEST_ASSERT(!obs.selector_present && !obs.slot_a_present && !obs.slot_b_present, "Records should be absent");
+    return ESP_OK;
+}
+
+// Test 86: Mixed missing results across selector, Slot A, and Slot B
+static esp_err_t test_nvs_observation_mixed_missing(void) {
+    esp_err_t errs[3] = {ESP_OK, ESP_ERR_NVS_NOT_FOUND, ESP_ERR_NOT_FOUND};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_OK, "Unexpected overall error");
+    TEST_ASSERT(obs.selector_present && !obs.slot_a_present && !obs.slot_b_present, "Incorrect absence state");
+    return ESP_OK;
+}
+
+// Test 87: An unexpected selector error that must propagate
+static esp_err_t test_nvs_observation_unexpected_selector_err(void) {
+    esp_err_t errs[3] = {ESP_ERR_NO_MEM, ESP_OK, ESP_OK};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_ERR_NO_MEM, "Should propagate selector err");
+    TEST_ASSERT(!obs.selector_present, "Selector should be absent on err");
+    return ESP_OK;
+}
+
+// Test 88: An unexpected slot error that must propagate
+static esp_err_t test_nvs_observation_unexpected_slot_err(void) {
+    esp_err_t errs[3] = {ESP_OK, ESP_OK, ESP_ERR_INVALID_SIZE};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_ERR_INVALID_SIZE, "Should propagate slot err");
+    TEST_ASSERT(!obs.slot_b_present, "Slot should be absent on err");
+    return ESP_OK;
+}
+
+// Test 89: Successful observation of present valid records
+static esp_err_t test_nvs_observation_successful(void) {
+    esp_err_t errs[3] = {ESP_OK, ESP_OK, ESP_OK};
+    argus_nvs_driver_t drv = { .read_selector = mock_obs_read_selector, .read_slot = mock_obs_read_slot, .ctx = errs };
+    argus_nvs_observation_t obs;
+    TEST_ASSERT(argus_nvs_core_get_observation_snapshot(&drv, &obs) == ESP_OK, "Should succeed");
+    TEST_ASSERT(obs.selector_present && obs.slot_a_present && obs.slot_b_present, "Records should be present");
+    return ESP_OK;
+}
 
 
 esp_err_t argus_tests_4a_run_all(void)
@@ -3029,8 +3094,24 @@ esp_err_t argus_tests_4a_run_all(void)
     int failed_executions = 0;
 
     static argus_prod_snapshot_t snap_before, snap_after;
-    if (capture_prod_snapshot(&snap_before) != ESP_OK) {
-        printf("Failed to capture initial snapshot\n");
+    esp_err_t snap_err = capture_prod_snapshot(&snap_before);
+    if (snap_err != ESP_OK) {
+        printf("Failed to capture initial snapshot: err=%d (%s)\n", snap_err, esp_err_to_name(snap_err));
+        if (snap_before.wifi_mode_status != ESP_OK && snap_before.wifi_mode_status != ESP_ERR_WIFI_NOT_INIT) {
+            printf("  -> WIFI mode error: %d (%s)\n", snap_before.wifi_mode_status, esp_err_to_name(snap_before.wifi_mode_status));
+        }
+        if (snap_before.nvs_obs.selector_status != ESP_OK && snap_before.nvs_obs.selector_status != ESP_ERR_NOT_FOUND && snap_before.nvs_obs.selector_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Selector error: %d (%s)\n", snap_before.nvs_obs.selector_status, esp_err_to_name(snap_before.nvs_obs.selector_status));
+        }
+        if (snap_before.nvs_obs.slot_a_status != ESP_OK && snap_before.nvs_obs.slot_a_status != ESP_ERR_NOT_FOUND && snap_before.nvs_obs.slot_a_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Slot A error: %d (%s)\n", snap_before.nvs_obs.slot_a_status, esp_err_to_name(snap_before.nvs_obs.slot_a_status));
+        }
+        if (snap_before.nvs_obs.slot_b_status != ESP_OK && snap_before.nvs_obs.slot_b_status != ESP_ERR_NOT_FOUND && snap_before.nvs_obs.slot_b_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Slot B error: %d (%s)\n", snap_before.nvs_obs.slot_b_status, esp_err_to_name(snap_before.nvs_obs.slot_b_status));
+        }
+        if (snap_before.broker_obs_status != ESP_OK) {
+            printf("  -> Broker error: %d (%s)\n", snap_before.broker_obs_status, esp_err_to_name(snap_before.broker_obs_status));
+        }
         return ESP_FAIL;
     }
 
@@ -3067,6 +3148,12 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_network_truthfulness_and_broker_ordering);
         RUN_TEST(test_console_input_validation);
         RUN_TEST(test_two_stage_service_entry_and_fail_closed_abort);
+        RUN_TEST(test_nvs_observation_generic_not_found);
+        RUN_TEST(test_nvs_observation_nvs_not_found);
+        RUN_TEST(test_nvs_observation_mixed_missing);
+        RUN_TEST(test_nvs_observation_unexpected_selector_err);
+        RUN_TEST(test_nvs_observation_unexpected_slot_err);
+        RUN_TEST(test_nvs_observation_successful);
         /* Phase 4B.1 pure test */
         RUN_TEST(test_http_json_escape_safety);
         /* Phase 4B.2 pure tests */
@@ -3139,8 +3226,24 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_exit_rejected);
     }
 
-    if (capture_prod_snapshot(&snap_after) != ESP_OK) {
-        printf("Failed to capture final snapshot\n");
+    esp_err_t post_err = capture_prod_snapshot(&snap_after);
+    if (post_err != ESP_OK) {
+        printf("Failed to capture final snapshot: err=%d (%s)\n", post_err, esp_err_to_name(post_err));
+        if (snap_after.wifi_mode_status != ESP_OK && snap_after.wifi_mode_status != ESP_ERR_WIFI_NOT_INIT) {
+            printf("  -> WIFI mode error: %d (%s)\n", snap_after.wifi_mode_status, esp_err_to_name(snap_after.wifi_mode_status));
+        }
+        if (snap_after.nvs_obs.selector_status != ESP_OK && snap_after.nvs_obs.selector_status != ESP_ERR_NOT_FOUND && snap_after.nvs_obs.selector_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Selector error: %d (%s)\n", snap_after.nvs_obs.selector_status, esp_err_to_name(snap_after.nvs_obs.selector_status));
+        }
+        if (snap_after.nvs_obs.slot_a_status != ESP_OK && snap_after.nvs_obs.slot_a_status != ESP_ERR_NOT_FOUND && snap_after.nvs_obs.slot_a_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Slot A error: %d (%s)\n", snap_after.nvs_obs.slot_a_status, esp_err_to_name(snap_after.nvs_obs.slot_a_status));
+        }
+        if (snap_after.nvs_obs.slot_b_status != ESP_OK && snap_after.nvs_obs.slot_b_status != ESP_ERR_NOT_FOUND && snap_after.nvs_obs.slot_b_status != ESP_ERR_NVS_NOT_FOUND) {
+            printf("  -> NVS Slot B error: %d (%s)\n", snap_after.nvs_obs.slot_b_status, esp_err_to_name(snap_after.nvs_obs.slot_b_status));
+        }
+        if (snap_after.broker_obs_status != ESP_OK) {
+            printf("  -> Broker error: %d (%s)\n", snap_after.broker_obs_status, esp_err_to_name(snap_after.broker_obs_status));
+        }
         return ESP_FAIL;
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
