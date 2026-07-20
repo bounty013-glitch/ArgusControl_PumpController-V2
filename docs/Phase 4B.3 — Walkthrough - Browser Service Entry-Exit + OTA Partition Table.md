@@ -1,8 +1,8 @@
 # Phase 4B.3 — Browser Service Entry/Exit + OTA Partition Table
 
-**Commit:** `ea285b6` on `phase4b-config-portal`  
+**Source-correction baseline:** `f0f3b0e` on `phase4b-config-portal`  
 **Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)  
-**Build:** ESP-IDF 5.5.1 full-clean — 992,149 bytes (68% free on 3MB partition)
+**Build:** ESP-IDF 5.5.1 incremental build — 992,149 bytes (68% free on 3MB partition)
 
 ---
 
@@ -30,7 +30,7 @@ Migrated from the default 1MB single-app partition (6% free, dangerously tight) 
 
 ### 2. Service Entry/Exit HTTP Handlers
 
-Two new POST endpoints wire the browser portal to the existing service orchestration.
+Two new POST endpoints wire the browser portal to the existing service orchestration. The pure policy seam is exercised by stack-local tests covering eligible entry pairings, authority mismatches, idempotency, transition-in-progress, exit eligibility, exit rejection, and event construction. 
 
 #### `POST /api/service/enter`
 
@@ -59,11 +59,15 @@ The implementation plan initially proposed direct synchronous calls (Option A). 
 1. **`request_service()`** calls `argus_http_server_stop()` internally. `httpd_stop()` waits for active handlers to complete. Calling it from within a handler → deadlock.
 2. **`request_service_exit()`** calls `esp_restart()` directly. The reboot happens before the handler returns → HTTP response never reaches the browser.
 
-Both are solved by the event queue pattern:
-- Handler validates preconditions, sends response
-- Posts event to net_mgr queue
-- Net_mgr task executes the transition from its own context
-- A2 guarantees the transition runs to completion regardless of browser state
+Both handlers use an event-driven architecture to avoid deadlocks:
+
+1. Capture snapshots and evaluate the pure policy.
+2. Construct the browser-owned network event.
+3. Attempt to enqueue the event.
+4. Return `503 Service Unavailable` if enqueueing fails.
+5. Return `202 Accepted` after successful enqueue.
+6. The network-manager task executes the transition from its own context.
+7. Physical completion remains unverified until the operator reconnects and checks controller state.
 
 ---
 
@@ -91,7 +95,7 @@ Both are solved by the event queue pattern:
 
 | # | Item | Result |
 |---|------|--------|
-| 1 | Full clean build | 1090 objects, zero errors, 3 warnings |
+| 1 | Incremental build | 1090 objects, zero errors, zero warnings (previous warning count was a false positive) |
 | 2 | Binary size | 992,149 bytes (0xf2395) |
 | 3 | Partition free | 68% (2,153,579 bytes on 3MB) |
 | 4 | Test count | 83 distinct, 83 RUN_TEST |

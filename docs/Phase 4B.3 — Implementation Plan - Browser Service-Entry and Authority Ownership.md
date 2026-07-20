@@ -49,7 +49,7 @@ The entry/exit decision logic is isolated in a pure policy seam (`argus_service_
 - **`UNCOMMISSIONED_AP`** requires `NONE` mode / `NONE` owner.
 - **`SERVICE_AP_ONLY`** idempotent entry / eligible exit requires `LOCAL_SERVICE` mode / `BROWSER` owner.
 
-This pure seam allows 100% test coverage using stack-local unit tests in `argus_tests_4a.c`.
+The pure policy seam is exercised by stack-local tests covering eligible entry pairings, authority mismatches, idempotency, transition-in-progress, exit eligibility, exit rejection, and event construction.
 
 ---
 
