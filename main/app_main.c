@@ -357,7 +357,7 @@ static void argus_phase4a_acceptance_menu(void)
         argus_network_mode_t net_mode = argus_net_mgr_get_mode();
 
         printf("\n===================================================\n");
-        printf("=== Phase 4A Network & Authority Acceptance ===\n");
+        printf("=== Network & Authority Acceptance ===\n");
         printf("===================================================\n");
         printf("Network Mode        : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
         printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
@@ -688,8 +688,8 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[e] Software E-STOP (requests pulse halt and latches E-stop; non-safety-rated)\n");
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
-            printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
-            printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
+            printf("[t] Run ALL PURE unit tests (Mock backends)\n");
+            printf("[N] Network & Authority Acceptance Submenu\n");
             printf("[H] Request LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
         print_menu = false;
         }
@@ -825,9 +825,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 break;
             }
             case 't':
-                printf("Running Phase 3B PURE unit tests...\n");
+                printf("Running legacy PURE unit tests...\n");
                 argus_tests_run_all();
-                printf("Running Phase 4A PURE unit tests...\n");
+                printf("Running PURE unit tests...\n");
                 argus_tests_4a_run_all();
                 break;
             case 'N':
