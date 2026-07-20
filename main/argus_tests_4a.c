@@ -2935,14 +2935,19 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
 static esp_err_t test_service_policy_entry_eligible(void)
 {
     argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_AP_DISCOVERABLE };
-    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE };
-    argus_net_event_t evt;
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT };
+    argus_net_event_t evt = {0};
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "AP_DISCOVERABLE rejected");
     TEST_ASSERT(evt.type == ARGUS_NET_EVT_SERVICE_REQUEST, "Wrong event type");
     TEST_ASSERT(evt.requested_owner == ARGUS_AUTH_OWNER_BROWSER, "Wrong event owner");
 
     net.mode = ARGUS_NET_MODE_UNCOMMISSIONED_AP;
-    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "UNCOMMISSIONED_AP rejected");
+    auth.mode = ARGUS_AUTHORITY_NONE;
+    auth.owner = ARGUS_AUTH_OWNER_NONE;
+    argus_net_event_t evt2 = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt2) == ARGUS_SVC_POLICY_OK, "UNCOMMISSIONED_AP rejected");
+    TEST_ASSERT(evt2.type == ARGUS_NET_EVT_SERVICE_REQUEST, "Wrong event type");
+    TEST_ASSERT(evt2.requested_owner == ARGUS_AUTH_OWNER_BROWSER, "Wrong event owner");
     return ESP_OK;
 }
 
@@ -2963,12 +2968,25 @@ static esp_err_t test_service_policy_entry_idempotent(void)
 static esp_err_t test_service_policy_entry_rejected(void)
 {
     argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_COMMISSIONED_STA };
-    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE };
-    argus_net_event_t evt;
+    argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_NONE };
+    argus_net_event_t evt = {0};
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from STA allowed");
+    TEST_ASSERT(evt.type == 0, "Event generated despite rejection");
 
-    net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY; // But auth is not local service
+    net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY; // But auth is not local service/browser
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from SERVICE_AP_ONLY without BROWSER auth allowed");
+
+    // Invalid authority for AP_DISCOVERABLE
+    net.mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+    auth.mode = ARGUS_AUTHORITY_NONE;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_AUTHORITY, "AP_DISCOVERABLE with NONE auth allowed");
+
+    // Invalid authority for UNCOMMISSIONED_AP
+    net.mode = ARGUS_NET_MODE_UNCOMMISSIONED_AP;
+    auth.mode = ARGUS_AUTHORITY_SUPERVISORY;
+    auth.owner = ARGUS_AUTH_OWNER_MQTT;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_AUTHORITY, "UNCOMMISSIONED_AP with SUPERVISORY auth allowed");
+
     return ESP_OK;
 }
 
@@ -3004,7 +3022,7 @@ static esp_err_t test_service_policy_exit_rejected(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2 Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3 Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -3127,7 +3145,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2 Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3 Pure Tests:\n");
     printf("  Distinct Test Cases : 83\n");
     printf("  Repeat Passes       : 3\n");
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -3154,7 +3172,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4A+4B.1+4B.2 PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
+    printf("PHASE 4A+4B.1+4B.2+4B.3 PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
     return overall_pass ? ESP_OK : ESP_FAIL;

@@ -21,9 +21,16 @@ argus_svc_policy_result_t argus_service_policy_evaluate_entry(
         return ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS;
     }
 
-    /* Mode gate: must be AP_DISCOVERABLE or UNCOMMISSIONED_AP */
-    if (net->mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
-        net->mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
+    /* Mode gate and Authority combinations */
+    if (net->mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
+        if (auth->mode != ARGUS_AUTHORITY_SUPERVISORY || auth->owner != ARGUS_AUTH_OWNER_MQTT) {
+            return ARGUS_SVC_POLICY_REJECT_AUTHORITY;
+        }
+    } else if (net->mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
+        if (auth->mode != ARGUS_AUTHORITY_NONE || auth->owner != ARGUS_AUTH_OWNER_NONE) {
+            return ARGUS_SVC_POLICY_REJECT_AUTHORITY;
+        }
+    } else {
         return ARGUS_SVC_POLICY_REJECT_MODE;
     }
 

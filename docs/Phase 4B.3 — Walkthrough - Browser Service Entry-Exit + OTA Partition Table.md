@@ -1,8 +1,8 @@
 # Phase 4B.3 — Browser Service Entry/Exit + OTA Partition Table
 
-**Commit:** `299fa77` on `phase4b-config-portal`  
+**Commit:** `ea285b6` on `phase4b-config-portal`  
 **Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)  
-**Build:** ESP-IDF 5.5.1 full-clean — 987,632 bytes (69% free on 3MB partition)
+**Build:** ESP-IDF 5.5.1 full-clean — 992,149 bytes (68% free on 3MB partition)
 
 ---
 
@@ -91,10 +91,10 @@ Both are solved by the event queue pattern:
 
 | # | Item | Result |
 |---|------|--------|
-| 1 | Full clean build | 1090 objects, zero errors, zero warnings |
-| 2 | Binary size | 987,632 bytes (0xf11f0) |
-| 3 | Partition free | 69% (2,158,096 bytes on 3MB) |
-| 4 | Test count | 78 distinct, 78 RUN_TEST (unchanged) |
+| 1 | Full clean build | 1090 objects, zero errors, 3 warnings |
+| 2 | Binary size | 992,149 bytes (0xf2395) |
+| 3 | Partition free | 68% (2,153,579 bytes on 3MB) |
+| 4 | Test count | 83 distinct, 83 RUN_TEST |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |
