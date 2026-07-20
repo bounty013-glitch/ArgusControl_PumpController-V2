@@ -103,19 +103,48 @@ The production NVS driver returns `ESP_ERR_NVS_NOT_FOUND` when the configuration
 
 ---
 
+## Phase 4B.3 — Uncommissioned Browser Service-Entry Correction
+
+### Physical Failure Evidence
+During physical testing, the browser requested service entry from the `UNCOMMISSIONED_AP` baseline but failed during the transition:
+```text
+argus_auth_mgr: authority: NONE/NONE -> SERVICE_TRANSITION/NONE
+argus_net_mgr: network: UNCOMMISSIONED_AP -> SERVICE_TRANSITION
+argus_http: HTTP server stopped
+argus_net_mgr: Service entry failed during transition: ESP_FAIL
+argus_auth_mgr: Aborting service transition -> setting authority NONE/NONE
+```
+The HTTP server did not spontaneously crash; it was intentionally stopped, but upon transition failure, the abort path failed to restore HTTP service, leaving the browser stranded.
+
+### Root Cause
+1. **Non-idempotent operations**: The uncommissioned state already satisfies several target conditions (machine unlocked, broker stopped, STA disconnected, AP-only). The state-convergence operations blindly requested actions and treated "already in target state" as hard failures.
+2. **Missing HTTP restoration**: The `abort_transition` block did not restore the HTTP server.
+3. **Generic error reporting**: The abort block logged the generic error but did not identify the exact step that failed.
+
+### Correction Architecture
+1. **Idempotent Convergence**:
+   - `prod_request_normal_stop`, `prod_stop_broker`, `prod_disconnect_sta`, and `prod_set_wifi_ap_only` were updated to perform state checks prior to acting and return `ESP_OK` if the target state is already met.
+2. **HTTP Restoration**:
+   - The `abort_transition` sequence conditionally restores the HTTP service if it was successfully stopped during the transition attempt.
+3. **Stage-Specific Error Identification**:
+   - A `fail_stage` tracking string was introduced to uniquely identify which of the 10 blocking steps failed.
+4. **Pure Orchestration Refactoring**:
+   - The `argus_service_transition_ops_t` and `argus_net_mgr_orchestrate_service_entry` seams were expanded to cover the complete transition sequence, including network locks, dispatch revalidation, and HTTP lifecycle.
+   - `argus_net_mgr_request_service` was refactored to wrap and delegate to this 100% pure orchestrator, allowing complete stack-local verification without singleton pollution.
+
 ## Verification
 
 | # | Item | Result |
 |---|------|--------|
-| 1 | Full build | 1096 objects, zero errors, zero warnings |
-| 2 | Binary size | 968,736 bytes (0xec820) |
+| 1 | Full build | Pending operator |
+| 2 | Binary size | Pending operator |
 | 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
-| 4 | Test count | 89 distinct cases (267 total executions) |
+| 4 | Test count | 90 distinct cases (270 total executions) |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |
 | 8 | Flash command | Includes `ota_data_initial.bin` at 0xF000 |
-| 9 | **Physical test execution** | **Confirmed by operator** (267/267 passed, 0 failed, 3 repeat passes) |
+| 9 | **Physical test execution** | **Confirmed by operator (89/89)**, 1 added (Pending) |
 | 10 | **Production isolation** | **Confirmed by operator** (Authority generation=2, Network=UNCOMMISSIONED_AP, Broker=STOPPED, Machine=UNLOCKED, Task count=14) |
 | 11 | **Service entry/exit** | **Pending operator browser test** |
 

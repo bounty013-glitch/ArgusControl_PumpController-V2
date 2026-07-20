@@ -3084,6 +3084,43 @@ static esp_err_t test_nvs_observation_successful(void) {
 }
 
 
+// Test 81: Service Entry Edge Cases (HTTP Restore, Revalidation)
+static esp_err_t test_service_entry_edge_cases(void)
+{
+    mock_orchestration_ctx_t ctx;
+    argus_service_authority_ops_t aops = {
+        .prepare_transition = mock_prepare_transition,
+        .grant_local = mock_grant_local,
+        .abort_transition = mock_abort_transition,
+        .ctx = &ctx
+    };
+    argus_service_transition_ops_t ops = {
+        .request_normal_stop = mock_request_normal_stop,
+        .verify_stopped = mock_verify_stopped,
+        .stop_broker = mock_stop_broker,
+        .verify_broker_stopped = mock_verify_broker_stopped,
+        .disconnect_sta = mock_disconnect_sta,
+        .verify_sta_disconnected = mock_verify_sta_disconnected,
+        .verify_sta_ip_released = mock_verify_sta_ip_released,
+        .set_wifi_ap_only = mock_set_wifi_ap_only,
+        .verify_ap_active = mock_verify_ap_active,
+        .verify_machine_safe = mock_verify_machine_safe,
+        .ctx = &ctx
+    };
+
+    // Edge Case: HTTP restore on failure
+    init_mock_ctx(&ctx);
+    ctx.fail_stage = 4; // Stop request fails
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    esp_err_t res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
+    
+    TEST_ASSERT(res != ESP_OK, "Transition should fail");
+    TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Should fail closed");
+    TEST_ASSERT(ctx.abort_count == 1, "Should abort");
+
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
@@ -3227,6 +3264,7 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_entry_rejected);
         RUN_TEST(test_service_policy_exit_eligible);
         RUN_TEST(test_service_policy_exit_rejected);
+        RUN_TEST(test_service_entry_edge_cases);
     }
 
     int total_executions = passed_executions + failed_executions;

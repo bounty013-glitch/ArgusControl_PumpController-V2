@@ -103,6 +103,16 @@ typedef struct {
     esp_err_t (*set_wifi_ap_only)(void *ctx);
     esp_err_t (*verify_ap_active)(void *ctx);
     esp_err_t (*verify_machine_safe)(void *ctx);  /**< Final pre-grant machine-state/E-stop check */
+    
+    // Hooks for structural orchestration without singleton pollution
+    esp_err_t (*stop_http)(void *ctx);
+    esp_err_t (*start_http)(void *ctx);
+    esp_err_t (*unlock_net)(void *ctx);
+    esp_err_t (*lock_net)(void *ctx);
+    esp_err_t (*lock_dispatch)(void *ctx);
+    esp_err_t (*unlock_dispatch)(void *ctx);
+    esp_err_t (*revalidate_network)(void *ctx); // verify AP active, STA dead
+
     void *ctx;
 } argus_service_transition_ops_t;
 
