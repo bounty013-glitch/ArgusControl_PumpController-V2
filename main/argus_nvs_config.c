@@ -298,6 +298,7 @@ static const argus_nvs_driver_t s_prod_driver = {
 esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *driver)
 {
     if (!core || !driver) return ESP_ERR_INVALID_ARG;
+    if (!driver->read_slot || !driver->read_selector) return ESP_ERR_INVALID_ARG;
     memset(core, 0, sizeof(argus_nvs_core_t));
     core->driver = driver;
 
@@ -433,6 +434,7 @@ esp_err_t argus_nvs_core_get(const argus_nvs_core_t *core, argus_config_payload_
 esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_payload_t *in_cfg)
 {
     if (!core || !in_cfg || !core->driver) return ESP_ERR_INVALID_ARG;
+    if (!core->driver->read_selector || !core->driver->write_slot || !core->driver->read_slot || !core->driver->write_selector) return ESP_ERR_INVALID_ARG;
 
     if (strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -530,6 +532,9 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
  */
 esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv)
 {
+    if (!drv) return ESP_ERR_INVALID_ARG;
+    if (!drv->read_reset_pending || !drv->erase_all || !drv->write_reset_pending) return ESP_ERR_INVALID_ARG;
+
     bool reset_pending = false;
     esp_err_t pend_err = drv->read_reset_pending(drv->ctx, &reset_pending);
     if (pend_err != ESP_OK) {
@@ -577,6 +582,9 @@ esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv)
  */
 esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_driver_t *drv)
 {
+    if (!core || !drv) return ESP_ERR_INVALID_ARG;
+    if (!drv->write_reset_pending || !drv->erase_all) return ESP_ERR_INVALID_ARG;
+
     /* Step 1: Mark pending before destructive operations */
     esp_err_t pend_err = drv->write_reset_pending(drv->ctx, true);
     if (pend_err != ESP_OK) {

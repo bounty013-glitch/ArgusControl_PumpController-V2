@@ -14,3 +14,4 @@ sdkconfig.old
 *.log
 Thumbs.db
 Desktop.ini
+build_old/

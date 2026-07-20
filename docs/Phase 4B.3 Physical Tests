@@ -20,7 +20,7 @@ A failed test remains recorded after correction. Its successful retest is added 
 
 ## Acceptance status
 
-**Overall Phase 4B.3 status:** `PASSED`
+**Overall Phase 4B.3 status:** `ACCEPTANCE BLOCKED — FINAL PURE-SUITE RETEST PENDING OPERATOR`
 
 Allowed status values:
 
@@ -816,15 +816,15 @@ I (1509) argus_net_mgr: STA IP acquired & MQTT broker running. Granted SUPERVISO
 
 # 8. Regression observations
 
-**Status:** `COMPLETED`
+**Status:** `IN PROGRESS`
 
 Record any behavior noticed during testing even if it does not block the current acceptance scope.
 
 | ID | Observation | Severity | Disposition | Reference |
 |---|---|---:|---|---|
 | OBS-001 | Initial Phase 4B.3 snapshot capture failed before the extended pure suite could run. | Medium | Corrected and retested successfully | `[COMMIT]` |
-| OBS-002 | Uncommissioned browser service entry stopped HTTP, then aborted on an already-satisfied transition condition without restoring HTTP. | High | Correction in progress; retest pending | `[COMMIT]` |
-| OBS-003 | `[ENTER ADDITIONAL OBSERVATION]` | `[LOW/MEDIUM/HIGH]` | `[OPEN/DEFERRED/CORRECTED]` | `[REFERENCE]` |
+| OBS-002 | Uncommissioned browser service entry stopped HTTP, then aborted on an already-satisfied transition condition without restoring HTTP. | High | Corrected and retested successfully | `459d4fc` |
+| OBS-003 | Final pure-suite rerun (t) failed during Phase 4B.3 closure. `test_nvs_bootstrap_identity_overlay_commit` failed on a stale overlay assertion, and `test_nvs_bootstrap_error_handling` caused an `InstrFetchProhibited` panic (PC: 0x00000000) due to an unguarded NULL NVS-driver callback. | High | Correction implemented; retest pending | `PENDING` |
 
 ---
 
@@ -901,9 +901,9 @@ Record any behavior noticed during testing even if it does not block the current
 
 ## Acceptance decision
 
-**Phase 4B.3 physical acceptance:** `ACCEPTED`
+**Phase 4B.3 physical acceptance:** `ACCEPTANCE BLOCKED — FINAL PURE-SUITE RETEST PENDING OPERATOR`
 
-**Accepted firmware commit:** `459d4fc`
+**Accepted firmware commit:** `PENDING`
 
 **Operator statement:**
 

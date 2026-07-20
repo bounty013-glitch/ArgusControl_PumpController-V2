@@ -1,6 +1,0 @@
-source "C:/Users/bount/esp/v5.5.1/esp-idf/components/bootloader/Kconfig.projbuild"
-source "C:/Users/bount/esp/v5.5.1/esp-idf/components/esp_app_format/Kconfig.projbuild"
-source "C:/Users/bount/esp/v5.5.1/esp-idf/components/esp_rom/Kconfig.projbuild"
-source "C:/Users/bount/esp/v5.5.1/esp-idf/components/esptool_py/Kconfig.projbuild"
-source "C:/Users/bount/esp/v5.5.1/esp-idf/components/partition_table/Kconfig.projbuild"
-source "C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/Kconfig.projbuild"

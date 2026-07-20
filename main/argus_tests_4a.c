@@ -3113,7 +3113,7 @@ static esp_err_t test_service_entry_edge_cases(void)
     ctx.fail_stage = 4; // Stop request fails
     argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
     esp_err_t res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
-    
+
     TEST_ASSERT(res != ESP_OK, "Transition should fail");
     TEST_ASSERT(net_mode == ARGUS_NET_MODE_NETWORK_FAULT, "Should fail closed");
     TEST_ASSERT(ctx.abort_count == 1, "Should abort");
@@ -3207,11 +3207,15 @@ static esp_err_t test_nvs_bootstrap_identity_overlay_commit(void)
     argus_config_fields_t invalid_fields = {0};
     strlcpy(invalid_fields.client_id, "invalid client!", sizeof(invalid_fields.client_id)); // Invalid characters
     invalid_fields.has_client_id = true;
-    argus_config_payload_t out_cfg_invalid;
+    strlcpy(invalid_fields.unit_id, "pump_001", sizeof(invalid_fields.unit_id));
+    invalid_fields.has_unit_id = true;
+    strlcpy(invalid_fields.device_name, "Testing Pump", sizeof(invalid_fields.device_name));
+    invalid_fields.has_device_name = true;
+
+    argus_config_payload_t out_cfg_invalid = {0};
     argus_config_overlay_result_t overlay_res = argus_config_overlay_apply(&core.active_config, ARGUS_CONFIG_SCOPE_IDENTITY, &invalid_fields, &out_cfg_invalid);
-    TEST_ASSERT(overlay_res.success, "Overlay apply should succeed for syntactic checks");
-    // But validation fails:
-    TEST_ASSERT(argus_nvs_config_validate(&out_cfg_invalid) != ESP_OK, "Validation should fail on invalid identity");
+    TEST_ASSERT(!overlay_res.success, "Overlay apply should fail on invalid identity syntax");
+    TEST_ASSERT(overlay_res.error_code && strcmp(overlay_res.error_code, "invalid_client_id") == 0, "Overlay apply should return invalid_client_id");
 
     // First Identity overlay
     argus_config_fields_t fields = {0};
@@ -3263,16 +3267,62 @@ static esp_err_t test_nvs_bootstrap_identity_overlay_commit(void)
 // Test 43: Genuine initialization or backend read failure handling
 static esp_err_t test_nvs_bootstrap_error_handling(void)
 {
-    corruptible_mock_nvs_t cstore = {0};
+    mock_nvs_store_t store = {0};
     argus_nvs_driver_t driver;
-    make_mock_driver(&driver, &cstore.store);
-
-    // Provide a driver that fails init or read
-    driver.read_slot = NULL; // Simulate missing read function, will fail core_init
+    make_mock_driver(&driver, &store);
 
     argus_nvs_core_t core;
-    esp_err_t err = argus_nvs_core_init(&core, &driver);
-    TEST_ASSERT(err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND, "Core init should fail completely on missing backend");
+
+    // NULL core or driver
+    TEST_ASSERT(argus_nvs_core_init(NULL, &driver) == ESP_ERR_INVALID_ARG, "NULL core should fail");
+    TEST_ASSERT(argus_nvs_core_init(&core, NULL) == ESP_ERR_INVALID_ARG, "NULL driver should fail");
+
+    // Missing required callbacks for init
+    argus_nvs_driver_t bad_driver = driver;
+    bad_driver.read_slot = NULL;
+    TEST_ASSERT(argus_nvs_core_init(&core, &bad_driver) == ESP_ERR_INVALID_ARG, "Missing read_slot should fail init");
+    bad_driver = driver;
+    bad_driver.read_selector = NULL;
+    TEST_ASSERT(argus_nvs_core_init(&core, &bad_driver) == ESP_ERR_INVALID_ARG, "Missing read_selector should fail init");
+
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Init should succeed");
+
+    argus_config_payload_t payload = {0};
+
+    // NULL core or payload in commit
+    TEST_ASSERT(argus_nvs_core_commit(NULL, &payload) == ESP_ERR_INVALID_ARG, "NULL core should fail commit");
+    TEST_ASSERT(argus_nvs_core_commit(&core, NULL) == ESP_ERR_INVALID_ARG, "NULL payload should fail commit");
+
+    bad_driver = driver;
+    core.driver = &bad_driver;
+    bad_driver.write_slot = NULL;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &payload) == ESP_ERR_INVALID_ARG, "Missing write_slot should fail commit");
+    bad_driver.write_slot = driver.write_slot;
+    bad_driver.write_selector = NULL;
+    TEST_ASSERT(argus_nvs_core_commit(&core, &payload) == ESP_ERR_INVALID_ARG, "Missing write_selector should fail commit");
+    core.driver = &driver; // restore
+
+    // Missing required callbacks for recovery check
+    TEST_ASSERT(argus_nvs_core_recovery_check(NULL) == ESP_ERR_INVALID_ARG, "NULL driver should fail recovery check");
+    bad_driver = driver;
+    bad_driver.read_reset_pending = NULL;
+    TEST_ASSERT(argus_nvs_core_recovery_check(&bad_driver) == ESP_ERR_INVALID_ARG, "Missing read_reset_pending should fail recovery check");
+    bad_driver = driver;
+    bad_driver.erase_all = NULL;
+    TEST_ASSERT(argus_nvs_core_recovery_check(&bad_driver) == ESP_ERR_INVALID_ARG, "Missing erase_all should fail recovery check");
+    bad_driver = driver;
+    bad_driver.write_reset_pending = NULL;
+    TEST_ASSERT(argus_nvs_core_recovery_check(&bad_driver) == ESP_ERR_INVALID_ARG, "Missing write_reset_pending should fail recovery check");
+
+    // Missing required callbacks for factory reset
+    TEST_ASSERT(argus_nvs_core_factory_reset(NULL, &driver) == ESP_ERR_INVALID_ARG, "NULL core should fail factory reset");
+    TEST_ASSERT(argus_nvs_core_factory_reset(&core, NULL) == ESP_ERR_INVALID_ARG, "NULL driver should fail factory reset");
+    bad_driver = driver;
+    bad_driver.write_reset_pending = NULL;
+    TEST_ASSERT(argus_nvs_core_factory_reset(&core, &bad_driver) == ESP_ERR_INVALID_ARG, "Missing write_reset_pending should fail factory reset");
+    bad_driver = driver;
+    bad_driver.erase_all = NULL;
+    TEST_ASSERT(argus_nvs_core_factory_reset(&core, &bad_driver) == ESP_ERR_INVALID_ARG, "Missing erase_all should fail factory reset");
 
     return ESP_OK;
 }
@@ -3506,32 +3556,32 @@ static esp_err_t test_4b3_classify_reasons(void)
 {
     const char *name;
     argus_disconnect_category_t cat;
-    
+
     cat = argus_net_classify_disconnect(WIFI_REASON_AUTH_EXPIRE, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "AUTH_EXPIRE should be AUTHENTICATION");
-    
+
     cat = argus_net_classify_disconnect(WIFI_REASON_NO_AP_FOUND, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "NO_AP_FOUND should be AP_UNAVAILABLE");
-    
+
     cat = argus_net_classify_disconnect(99, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_UNKNOWN, "99 should be UNKNOWN");
-    
+
     return ESP_OK;
 }
 
 static esp_err_t test_4b3_evaluate_retry(void)
 {
     argus_sta_state_t state;
-    
+
     state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 1);
     TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "1 auth fail -> RETRY_WAIT");
-    
+
     state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 3);
     TEST_ASSERT(state == ARGUS_STA_ACTION_REQUIRED, "3 auth fails -> ACTION_REQUIRED");
-    
+
     state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, 5);
     TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "5 AP fails -> RETRY_WAIT");
-    
+
     return ESP_OK;
 }
 
@@ -3539,12 +3589,12 @@ static esp_err_t test_4b3_can_manual_reconnect(void)
 {
     TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_AP_ONLY, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_AP_ONLY");
     TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_TRANSITION, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_TRANSITION");
-    
+
     TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_ACTION_REQUIRED) == true, "Can reconnect in COMMISSIONED_STA if ACTION_REQUIRED");
     TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_RETRY_WAIT) == true, "Can reconnect in AP_DISCOVERABLE if RETRY_WAIT");
-    
+
     TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_CONNECTED) == false, "Cannot reconnect if CONNECTED");
-    
+
     return ESP_OK;
 }
 
@@ -3553,18 +3603,18 @@ static esp_err_t test_4b3_identity_composition(void)
     argus_identity_t hw = {0};
     strlcpy(hw.mac_uid, "ESP32S3-123", sizeof(hw.mac_uid));
     strlcpy(hw.fw_version, "v2-dev", sizeof(hw.fw_version));
-    
+
     argus_config_payload_t cfg = {0};
     strlcpy(cfg.client_id, "test_client", sizeof(cfg.client_id));
     strlcpy(cfg.unit_id, "test_unit", sizeof(cfg.unit_id));
     strlcpy(cfg.device_name, "Test Name", sizeof(cfg.device_name));
-    
+
     argus_identity_t composed = {0};
     argus_identity_compose_effective(&composed, &hw, &cfg, true);
-    
+
     TEST_ASSERT(strcmp(composed.mac_uid, "ESP32S3-123") == 0, "Immutable metadata preserved");
     TEST_ASSERT(strcmp(composed.client_id, "test_client") == 0, "Mutable NVS data applied");
-    
+
     return ESP_OK;
 }
 
