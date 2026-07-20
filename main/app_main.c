@@ -357,7 +357,7 @@ static void argus_phase4a_acceptance_menu(void)
         argus_network_mode_t net_mode = argus_net_mgr_get_mode();
 
         printf("\n===================================================\n");
-        printf("=== Phase 4A Network & Authority Acceptance ===\n");
+        printf("=== Network & Authority Acceptance ===\n");
         printf("===================================================\n");
         printf("Network Mode        : %s (%d)\n", argus_net_mgr_get_mode_name(net_mode), (int)net_mode);
         printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
@@ -388,7 +388,8 @@ static void argus_phase4a_acceptance_menu(void)
                 argus_identity_t id;
                 argus_identity_get(&id);
                 argus_config_payload_t cfg;
-                bool has_cfg = (argus_nvs_config_get(&cfg) == ESP_OK);
+                bool has_cfg = false;
+                argus_nvs_config_get_effective(&cfg, &has_cfg);
 
                 printf("\n--- Sanitized Device Identity & Configuration ---\n");
                 printf("Hardware UID : %s\n", id.mac_uid);
@@ -423,9 +424,10 @@ static void argus_phase4a_acceptance_menu(void)
             }
             case '3': {
                 argus_config_payload_t cfg;
-                esp_err_t err = argus_nvs_config_get(&cfg);
+                bool has_cfg = false;
+                esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
                 printf("\n--- NVS Slot Validity & Generation ---\n");
-                if (err == ESP_OK) {
+                if (err == ESP_OK && has_cfg) {
                     uint32_t crc = argus_nvs_config_calc_crc32(&cfg);
                     printf("Commissioned : YES\n");
                     printf("Client ID    : %s\n", cfg.client_id);
@@ -688,8 +690,8 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[e] Software E-STOP (requests pulse halt and latches E-stop; non-safety-rated)\n");
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
-            printf("[t] Run ALL PURE unit tests (Phase 3B + Phase 4A mock backends)\n");
-            printf("[N] Phase 4A Network & Authority Acceptance Submenu\n");
+            printf("[t] Run ALL PURE unit tests (Mock backends)\n");
+            printf("[N] Network & Authority Acceptance Submenu\n");
             printf("[H] Request LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
         print_menu = false;
         }
@@ -825,9 +827,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 break;
             }
             case 't':
-                printf("Running Phase 3B PURE unit tests...\n");
+                printf("Running legacy PURE unit tests...\n");
                 argus_tests_run_all();
-                printf("Running Phase 4A PURE unit tests...\n");
+                printf("Running PURE unit tests...\n");
                 argus_tests_4a_run_all();
                 break;
             case 'N':
@@ -857,7 +859,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4A)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4B.3)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -915,5 +917,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4B startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4B.3 startup completed successfully.");
 }

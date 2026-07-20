@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "argus_authority_mgr.h"
+#include "esp_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,11 +48,14 @@ typedef enum {
 typedef enum {
     ARGUS_NET_EVT_SERVICE_REQUEST = 0,
     ARGUS_NET_EVT_SERVICE_EXIT,
+    ARGUS_NET_EVT_STA_ASSOCIATED,
     ARGUS_NET_EVT_STA_CONNECTED,
     ARGUS_NET_EVT_STA_DISCONNECTED,
     ARGUS_NET_EVT_AP_CLIENT_CONNECTED,
-    ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED
+    ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED,
+    ARGUS_NET_EVT_RESTART_REQUEST          /**< Coordinated restart (deferred to net_mgr task) */
 } argus_net_event_type_t;
+
 
 typedef struct {
     argus_net_event_type_t type;
@@ -102,6 +106,16 @@ typedef struct {
     esp_err_t (*set_wifi_ap_only)(void *ctx);
     esp_err_t (*verify_ap_active)(void *ctx);
     esp_err_t (*verify_machine_safe)(void *ctx);  /**< Final pre-grant machine-state/E-stop check */
+    
+    // Hooks for structural orchestration without singleton pollution
+    esp_err_t (*stop_http)(void *ctx);
+    esp_err_t (*start_http)(void *ctx);
+    esp_err_t (*unlock_net)(void *ctx);
+    esp_err_t (*lock_net)(void *ctx);
+    esp_err_t (*lock_dispatch)(void *ctx);
+    esp_err_t (*unlock_dispatch)(void *ctx);
+    esp_err_t (*revalidate_network)(void *ctx); // verify AP active, STA dead
+
     void *ctx;
 } argus_service_transition_ops_t;
 
@@ -127,6 +141,21 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
  */
 esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner);
 
+/**
+ * @brief Request a coordinated restart via the net_mgr event queue.
+ *
+ * Checks machine state before accepting. Rejects if motion is active
+ * (machine not in HOLDING/UNLOCKED) or E-stop is latched.
+ *
+ * The actual restart is deferred to the net_mgr task so that the calling
+ * context (e.g. HTTP handler) can transmit its response before shutdown.
+ *
+ * @return ESP_OK if restart accepted and queued,
+ *         ESP_ERR_INVALID_STATE if motion active or machine unsafe,
+ *         ESP_ERR_NO_MEM if event queue is full.
+ */
+esp_err_t argus_net_mgr_request_restart(void);
+
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
 
@@ -150,6 +179,11 @@ bool argus_net_mgr_is_sta_connected(void);
 bool argus_net_mgr_is_sta_ip_acquired(void);
 bool argus_net_mgr_is_ap_started(void);
 const char *argus_net_mgr_get_wifi_driver_mode_name(void);
+
+/**
+ * @brief Pure testable helper to evaluate if a STA disconnect driver call is required.
+ */
+esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed);
 
 #ifdef __cplusplus
 }

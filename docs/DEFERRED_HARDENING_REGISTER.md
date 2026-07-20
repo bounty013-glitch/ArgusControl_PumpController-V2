@@ -131,6 +131,8 @@
 | **Status** | OPEN |
 | **Closure Evidence** | Not yet applicable |
 
+
+**Update:** Acknowledging the existing service-entry/service-exit POST endpoints introduced in Phase 4B.3, while retaining Phase 4D hardening.
 ---
 
 ## DHR-008 — Credential Recovery and Factory Reset Not Unified
@@ -148,6 +150,8 @@
 | **Status** | OPEN |
 | **Closure Evidence** | Not yet applicable |
 
+
+**Update:** Field personnel will not have serial-console access.
 ---
 
 ## DHR-009 — Comprehensive Security Audit Deferred
@@ -183,6 +187,105 @@
 | **Closure Evidence** | Not yet applicable |
 
 ---
+
+## DHR-011 — Always-Available Service AP and HTTP Portal on Commissioned Devices
+
+| Field | Value |
+|-------|-------|
+| **System Area** | Network Lifecycle / Portal |
+| **Phase Introduced** | Phase 4B.2 Corrections |
+| **Status** | OPEN |
+| **Target Phase** | Post-field-evaluation |
+| **Operator Decision** | 2026-07-18 |
+
+**Limitation:** Commissioned devices boot with the service AP and HTTP portal active by default in APSTA mode (`AP_DISCOVERABLE`). The portal is credential-protected but always advertised. No persistent enable/disable toggle exists.
+
+**Rationale:** The operator has determined that field-accessible configuration requires the portal to be reachable without CLI service entry. This is an accepted temporary lifecycle policy for bench and field evaluation. AP visibility does not grant motor authority — the portal is read/config only. Motor commands require MQTT supervisory authority from the STA network path.
+
+**Security posture:** Portal credential protection (DHR-002, DHR-003, DHR-004) applies. The AP is WPA2-PSK protected with build-time credentials. All endpoints require HTTP Basic Auth.
+
+**Deferred items:**
+- Persistent AP enable/disable toggle per-device
+- Final production default (AP on/off for commissioned devices)
+- Decision on whether production deployments should default to AP-off
+
+**Decision criteria:** Extended bench and field-use evaluation will determine whether the always-on AP is the correct production default or whether a toggle and/or default-off policy is needed.
+
+---
+
+## DHR-012 — App Partition Size Constraint
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-19 |
+| **System Area** | Flash Partition Layout |
+| **Phase Introduced** | Phase 4B.2 Final Corrections |
+| **Status** | CLOSED |
+| **Target Phase** | Phase 4B.3 (before significant UI additions) |
+| **Operator Decision** | 2026-07-19 |
+
+**Limitation:** The default ESP-IDF single-app partition table allocates a ~1 MB app partition. With the Phase 4B.2 binary, headroom is approximately 9%. Future UI HTML/CSS/JS additions and feature modules will consume remaining space.
+
+**Impact:** Binary size must be monitored at each phase. If the app exceeds the partition, a custom partition table with a larger app partition must be created. The ESP32-S3 with 16 MB flash has ample total capacity — only the partition table allocation needs adjustment.
+
+**Action Required:**
+- Custom `partitions.csv` with increased app partition (recommend 2 MB minimum)
+- Monitor `idf.py size` output at each commit
+- Adjust NVS and factory partitions as needed to reclaim space
+
+**Decision criteria:** Implement custom partition table before any phase that adds significant embedded HTML/CSS/JS or new feature modules.
+
+**Closure:** The app-partition constraint is resolved by the dual 3 MB OTA layout introduced in Phase 4B.3.
+
+---
+
+## DHR-013 — Deferred Privileged Identity Modification
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-19 |
+| **System Area** | Identity Provisioning / Portal |
+| **Phase Introduced** | Phase 4B.2 |
+| **Status** | OPEN |
+| **Target Phase** | Post-field-evaluation |
+| **Operator Decision** | 2026-07-19 |
+
+**Limitation:** Identity fields (client_id, unit_id, device_name) are locked after initial provisioning via the portal. There is currently no mechanism for password-protected identity modification or factory reset through the portal. Identity can only be changed via serial console NVS erase.
+
+**Rationale:** The operator deferred factory reset and privileged identity modification to gain field experience with the provisioning flow. The monotonic high-water marker (NVS `prov_hwm` key) ensures identity lock survives LKG rollback and slot corruption.
+
+**Deferred items:**
+- Factory reset mechanism (portal button, physical button hold, or CLI command)
+- Password-protected identity modification fields
+- Decision on whether factory reset should clear the portal password
+- Unified reset across all NVS namespaces (config, portal, system)
+
+**Decision criteria:** Extended field evaluation will determine the appropriate identity modification and reset user experience.
+
+---
+
+## DHR-014 — Deferred Wi-Fi Connection Observability and Manual Reconnection
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-20 |
+| **System Area** | Network Manager / API |
+| **Phase Introduced** | Phase 4B.3a (Reverted) |
+| **Status** | OPEN |
+| **Target Phase** | Phase 4B.4 (or later standalone micro-phase) |
+| **Operator Decision** | 2026-07-20 |
+
+**Limitation:** The device currently connects to Wi-Fi automatically. If the connection drops or fails due to an authentication error, there is no operator visibility into the failure reason (e.g., bad password, AP out of range), no classification of error types, no bounded retry logic preventing infinite loops on authentication failure, and no HTTP API for the operator to manually request a connection retry without a system restart.
+
+**Rationale:** The Phase 4B.3a implementation introduced `argus_sta_state_t` classification, bounded retries with timer-based backoffs, and a `/api/network/reconnect` endpoint. This feature was deferred (reverted) to maintain the purity and focus of the Phase 4B.3 acceptance sequence, which primarily targeted Identity Provisioning and NVS Driver Seam corrections.
+
+**Deferred items:**
+- Network failure classification and translation (`wifi_event_sta_disconnected_t` reasons to operator-friendly strings)
+- Bounded connection retry logic with backoff timers
+- Status portal telemetry indicating the exact Wi-Fi state and operator guidance
+- `POST /api/network/reconnect` API endpoint to force a manual connection attempt
+
+**Decision criteria:** This feature should be re-introduced as a distinct, focused micro-phase (e.g., Phase 4B.4) to finalize the robustness and operator experience of the Wi-Fi connection lifecycle.
 
 ## Register Maintenance
 

@@ -15,7 +15,9 @@
 extern "C" {
 #endif
 
-#define ARGUS_CONFIG_SCHEMA_VERSION     1
+#define ARGUS_CONFIG_SCHEMA_VERSION     2
+#define ARGUS_CONFIG_SCHEMA_V1          1
+#define ARGUS_CONFIG_PAYLOAD_V1_SIZE    228  /* packed size without provisioned_flags */
 #define ARGUS_CONFIG_VALID_MARKER       0xA5A55A5AU
 #define ARGUS_CONFIG_MASK_STRING        "********"
 
@@ -26,12 +28,15 @@ extern "C" {
 #define ARGUS_CFG_STA_PASS_MIN          8
 #define ARGUS_CFG_STA_PASS_MAX          63
 
+#define ARGUS_CFG_PROVISIONED_IDENTITY  0x01  /**< Bit 0: identity is locked after initial provisioning */
+
 typedef struct __attribute__((packed)) {
     char client_id[ARGUS_CFG_CLIENT_ID_MAX + 1];   /**< 32 chars + null */
     char unit_id[ARGUS_CFG_UNIT_ID_MAX + 1];       /**< 32 chars + null */
     char device_name[ARGUS_CFG_DEV_NAME_MAX + 1];  /**< 64 chars + null */
     char sta_ssid[ARGUS_CFG_STA_SSID_MAX + 1];     /**< 32 bytes + null */
     char sta_pass[ARGUS_CFG_STA_PASS_MAX + 1];     /**< 63 chars + null */
+    uint8_t provisioned_flags;                     /**< Bitfield: ARGUS_CFG_PROVISIONED_IDENTITY */
 } argus_config_payload_t;
 
 typedef struct __attribute__((packed)) {
@@ -53,6 +58,8 @@ typedef struct {
     esp_err_t (*write_selector)(void *ctx, uint8_t selector);
     esp_err_t (*read_reset_pending)(void *ctx, bool *out_pending);
     esp_err_t (*write_reset_pending)(void *ctx, bool pending);
+    esp_err_t (*read_provisioned_hwm)(void *ctx, uint8_t *out_flags);   /**< Monotonic provisioning marker */
+    esp_err_t (*write_provisioned_hwm)(void *ctx, uint8_t flags);       /**< Write-once per provisioning event */
     esp_err_t (*erase_all)(void *ctx);
     void *ctx;
 } argus_nvs_driver_t;
@@ -74,6 +81,25 @@ esp_err_t argus_nvs_core_get(const argus_nvs_core_t *core, argus_config_payload_
 esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_payload_t *in_cfg);
 
 /**
+ * @brief Pure boot-recovery transaction: check pending marker, re-erase if set, clear marker.
+ * @param drv  Injected storage driver.
+ * @return ESP_OK if no recovery needed or recovery completed successfully.
+ */
+esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv);
+
+/**
+ * @brief Pure factory-reset transaction: mark pending, erase, clear, reinit core.
+ *
+ * Production policy: if clearing the pending marker fails after a successful
+ * erase, the core is still reinitialized to match the erased storage.
+ *
+ * @param core  Caller-owned core state to reinitialize.
+ * @param drv   Injected storage driver.
+ * @return ESP_OK on full success; exact originating error otherwise.
+ */
+esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_driver_t *drv);
+
+/**
  * @brief Initialize NVS configuration manager using production or injected driver.
  * @param driver Optional mock driver for unit testing; pass NULL for production ESP-IDF NVS.
  * @return ESP_OK on success.
@@ -81,11 +107,12 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
 esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver);
 
 /**
- * @brief Load current active LKG configuration.
- * @param[out] out_cfg Destination payload struct.
- * @return ESP_OK if valid configuration loaded; ESP_ERR_NOT_FOUND if uncommissioned/empty.
+ * @brief Load current effective configuration payload (persisted or defaults).
+ * @param[out] out_cfg Destination payload struct (populated with defaults if uncommissioned).
+ * @param[out] out_has_persisted_config Set to true if a valid LKG slot exists in NVS.
+ * @return ESP_OK if effective configuration is available; error if initialization or core access genuinely failed.
  */
-esp_err_t argus_nvs_config_get(argus_config_payload_t *out_cfg);
+esp_err_t argus_nvs_config_get_effective(argus_config_payload_t *out_cfg, bool *out_has_persisted_config);
 
 /**
  * @brief Stage and commit a new configuration payload via power-loss-safe dual-slot sequence.
@@ -171,6 +198,11 @@ typedef struct {
  *         Returns the first unexpected error otherwise.
  */
 esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs);
+
+/**
+ * @brief Pure helper for read-only observation.
+ */
+esp_err_t argus_nvs_core_get_observation_snapshot(const argus_nvs_driver_t *drv, argus_nvs_observation_t *out_obs);
 
 #ifdef __cplusplus
 }

@@ -2,8 +2,8 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1: Status, identity, and credential-management API with embedded
- * mobile portal.
+ * Phase 4B.1+4B.2: Status, identity, configuration, credential-management
+ * API with embedded mobile portal.
  *
  * Lifecycle:
  *   argus_http_server_init() — One-time creation of lifecycle objects.
@@ -16,11 +16,23 @@
  * The HTTP server does NOT run in:
  *   BOOTSTRAP, COMMISSIONED_STA, SERVICE_TRANSITION, NETWORK_FAULT.
  *
- * Current scope (Phase 4B.1):
+ * Current scope:
+ *   Phase 4B.1:
  *   - GET endpoints for machine status, identity, and the portal dashboard.
  *   - POST endpoint for portal password change (NVS mutation).
  *   - GET endpoint for logout (clears browser auth cache).
- *   - Motion-control and commissioning POST endpoints are not yet implemented.
+ *
+ *   Phase 4B.2:
+ *   - GET /api/config: Current configuration (passwords masked, lock state).
+ *   - POST /api/config/save: Scoped config update (identity or WiFi).
+ *     Identity is one-time-provisioned and locked. WiFi is always editable.
+ *   - GET /config/identity: Identity provisioning page.
+ *   - GET /config/wifi: WiFi configuration page.
+ *   - POST /api/restart: Coordinated restart (motion safety checked).
+ *
+ *   Not yet implemented:
+ *   - Motion-control POST endpoints (Phase 4B.3).
+ *   - Service entry via HTTP (Phase 4B.3).
  *
  * Access control:
  *   The portal is reachable through all interfaces on which the HTTP server
@@ -28,16 +40,24 @@
  *   Basic authentication with forced password change on first use. See
  *   docs/DEFERRED_HARDENING_REGISTER.md for accepted security limitations.
  *
+ * Configuration write gates:
+ *   Config writes (POST /api/config/save) are only allowed in:
+ *     UNCOMMISSIONED_AP, SERVICE_AP_ONLY.
+ *   Config reads (GET /api/config) are allowed in all HTTP-active modes.
+ *   Restart is allowed in all HTTP-active modes (motion safety checked).
+ *
  * Security:
  *   - HTTP Basic Auth on all endpoints (except /api/logout).
  *   - Bootstrap credential disabled after successful password replacement.
  *   - Credential-storage errors fail closed.
- *   - No secrets returned (passwords, AP credentials).
+ *   - No secrets returned (passwords, AP credentials, WiFi passwords).
+ *   - sta_pass_set boolean replaces actual password in config responses.
  *   - No permissive CORS headers.
  *   - Cache-Control: no-store on all API responses.
  *   - Method validation on all handlers.
- *   - Content-Type: application/json required on POST /api/portal-password.
+ *   - Content-Type validation on POST endpoints.
  *   - HTML escaping on all device-supplied values in the portal DOM.
+ *   - Password buffers zeroed after use.
  */
 
 #pragma once

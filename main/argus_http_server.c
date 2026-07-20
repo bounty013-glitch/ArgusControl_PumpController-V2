@@ -1,6 +1,6 @@
 /**
  * @file argus_http_server.c
- * @brief Controller-Hosted HTTP Server — Phase 4B.1 Service Portal
+ * @brief Controller-Hosted HTTP Server — Phase 4B.1/4B.2/4B.3 Service Portal
  *
  * Architectural decisions:
  *
@@ -61,6 +61,9 @@
 #include "argus_net_mgr.h"
 #include "argus_mqtt_broker.h"
 #include "argus_nvs_config.h"
+#include "argus_config_overlay.h"
+#include "argus_json.h"
+#include "argus_service_policy.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -186,6 +189,10 @@ static esp_err_t portal_set_password(const char *new_pw)
     nvs_close(nvs);
     return err;
 }
+
+
+
+/* ── JSON helpers now in argus_json.h/c ─────────────────────── */
 
 /* ── HTTP Basic Auth ───────────────────────────────────────── */
 
@@ -390,8 +397,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     /* NVS commissioned status — no secrets */
     argus_config_payload_t cfg;
-    bool commissioned = (argus_nvs_config_get(&cfg) == ESP_OK) &&
-                        argus_nvs_config_is_commissioned(&cfg);
+    bool has_cfg = false;
+    bool commissioned = (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK) &&
+                        has_cfg && argus_nvs_config_is_commissioned(&cfg);
     /* Zero the config to prevent accidental secret leakage */
     memset(&cfg, 0, sizeof(cfg));
 
@@ -582,10 +590,16 @@ static const char PORTAL_HTML[] =
     "<h2>Identity</h2>"
     "<div id=\"identity-rows\">Loading...</div>"
     "</div>"
+    "<div id=\"service-controls\"></div>"
     "<button class=\"refresh-btn\" onclick=\"refresh()\">Refresh Status</button>"
     "<div style=\"display:flex;gap:8px;margin-top:8px\">"
     "<button class=\"refresh-btn\" style=\"background:#3f3f46\" onclick=\"window.location='/change-password'\">Change Password</button>"
     "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
+    "</div>"
+    "<div style=\"display:flex;gap:8px;margin-top:16px;flex-wrap:wrap\">"
+    "<a href='/config/identity' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Identity</a>"
+    "<a href='/config/wifi' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>WiFi Config</a>"
+    "<button onclick='doRestart()' style='flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Restart</button>"
     "</div>"
     "<div class=\"note\">Service portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
@@ -623,6 +637,12 @@ static const char PORTAL_HTML[] =
     "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+"
     "row('Broker',d.broker.running?'Running':'Stopped',d.broker.running?'badge-ok':'badge-off')+"
     "row('Commissioned',d.commissioned?'Yes':'No',d.commissioned?'badge-ok':'badge-warn');"
+    "var sc=document.getElementById('service-controls');sc.innerHTML='';"
+    "if(n.mode==='AP_DISCOVERABLE'||n.mode==='UNCOMMISSIONED_AP'){"
+    "sc.innerHTML='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';"
+    "}else if(n.mode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){"
+    "sc.innerHTML='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';"
+    "}"
     "}).catch(e=>{document.getElementById('machine-rows').innerHTML="
     "row('Error','Failed to load status','badge-err')});"
     "fetch('/api/identity').then(r=>r.json()).then(d=>{"
@@ -634,6 +654,35 @@ static const char PORTAL_HTML[] =
     "row('Device Name',d.device_name||'(not set)')+"
     "row('Model',d.device_model);"
     "}).catch(e=>{})}"
+    "function doRestart(){"
+    "if(!confirm('Restart the controller? Active connections will be lost.'))return;"
+    "fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='restart_initiated'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';"
+    "}else{alert(d.message||d.error||'Restart failed')}"
+    "}).catch(()=>alert('Connection lost'))}"
+    "function doSvcEnter(){"
+    "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;"
+    "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}"
+    "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='accepted'||d.status==='ok'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Service entry requested. You may temporarily lose connection. Please reconnect to the Service AP if necessary and wait for the dashboard to refresh.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Enter Local Service';}}"
+    "}).catch(()=>{"
+    "alert('Network error. The request status is unknown. Please reconnect to the Service AP and reload to verify /api/status.');"
+    "if(b){b.disabled=false;b.textContent='Enter Local Service';}"
+    "})}"
+    "function doSvcExit(){"
+    "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;"
+    "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}"
+    "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{"
+    "if(d.status==='accepted'){"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device reboot requested. Connection will be lost.</p></div>';"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Exit Local Service';}}"
+    "}).catch(()=>{"
+    "alert('Network error. Exit status unknown. Reconnect to the network and verify controller state.');"
+    "if(b){b.disabled=false;b.textContent='Exit Local Service';}"
+    "})}"
     "refresh();"
     "</script>"
     "</body>"
@@ -764,7 +813,701 @@ static esp_err_t portal_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Phase 4B.2: Bounded HTTP body receiver ──────────────────────── */
+
+/**
+ * @brief Read complete HTTP request body with bounds checking.
+ *
+ * Uses content_len from the request, loops until all bytes are received,
+ * rejects oversized bodies, and always NUL-terminates on success.
+ *
+ * @param req      HTTP request handle.
+ * @param buf      Destination buffer (must have room for buf_size bytes including NUL).
+ * @param buf_size Size of destination buffer.
+ * @return Number of body bytes read on success (>= 0), or -1 on error.
+ *         On error, an appropriate HTTP error response has already been sent.
+ */
+static int recv_full_body(httpd_req_t *req, char *buf, size_t buf_size)
+{
+    size_t content_len = req->content_len;
+    if (content_len == 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"empty_body\"}");
+        return -1;
+    }
+    if (content_len >= buf_size) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_sendstr(req, "{\"error\":\"body_too_large\"}");
+        /* Drain the socket to prevent connection reuse issues */
+        char drain[64];
+        while (httpd_req_recv(req, drain, sizeof(drain)) > 0) {}
+        return -1;
+    }
+    size_t received = 0;
+    while (received < content_len) {
+        int ret = httpd_req_recv(req, buf + received, content_len - received);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                httpd_resp_set_status(req, "408 Request Timeout");
+                httpd_resp_sendstr(req, "{\"error\":\"recv_timeout\"}");
+            } else {
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_sendstr(req, "{\"error\":\"recv_failed\"}");
+            }
+            return -1;
+        }
+        received += (size_t)ret;
+    }
+    buf[received] = '\0';
+    return (int)received;
+}
+
+/* ── Phase 4B.2: Identity Config Page HTML ───────────────────────── */
+
+static const char IDENTITY_PAGE_HTML[] =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Argus Identity</title>"
+    "<style>"
+    ":root{--bg:#0f1117;--card:#1a1b23;--border:#27272a;--text:#e4e4e7;--muted:#a1a1aa;"
+    "--accent:#7c3aed;--accent-light:#a78bfa;--accent-dark:#6d28d9;"
+    "--success:#22c55e;--warn:#f59e0b;--error:#ef4444;--input-bg:#27272a}"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"
+    "'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;"
+    "justify-content:center;padding:16px}"
+    ".card{background:var(--card);border:1px solid var(--border);border-radius:12px;"
+    "padding:24px;max-width:420px;width:100%}"
+    "h1{color:var(--accent-light);font-size:1.1rem;margin-bottom:16px}"
+    "h1::before{content:'\\25C6 ';color:var(--accent)}"
+    "label{display:block;color:var(--muted);font-size:0.8rem;margin:12px 0 4px;"
+    "text-transform:uppercase;letter-spacing:0.05em}"
+    "input{width:100%;padding:10px 12px;background:var(--input-bg);"
+    "border:1px solid var(--border);border-radius:8px;color:var(--text);"
+    "font-size:0.9rem;outline:none;transition:border 0.2s}"
+    "input:focus{border-color:var(--accent)}"
+    "input[readonly]{opacity:0.6;cursor:not-allowed}"
+    ".btn{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+    "font-size:0.9rem;font-weight:600;cursor:pointer;transition:opacity 0.2s;margin-top:16px}"
+    ".btn-primary{background:var(--accent);color:#fff}"
+    ".btn-primary:hover{opacity:0.9}"
+    ".btn-back{background:var(--border);color:var(--text);margin-top:8px;"
+    "text-align:center;text-decoration:none;display:block;padding:10px;border-radius:8px;"
+    "font-size:0.85rem}"
+    ".alert{padding:10px 12px;border-radius:8px;font-size:0.85rem;margin-top:12px;display:none}"
+    ".alert-ok{background:#052e16;border:1px solid #166534;color:#4ade80;display:block}"
+    ".alert-err{background:#350a0a;border:1px solid #991b1b;color:#fca5a5;display:block}"
+    ".alert-warn{background:#351f05;border:1px solid #92400e;color:#fcd34d;display:block}"
+    ".locked{color:var(--warn);font-size:0.8rem;margin-bottom:12px}"
+    "</style></head><body>"
+    "<div class='card'><h1>Identity Configuration</h1>"
+    "<div id='lock' class='locked' style='display:none'>"
+    "Identity is locked. Contact Argus support to modify.</div>"
+    "<form id='frm'>"
+    "<label>Client ID</label>"
+    "<input id='cid' type='text' maxlength='32' placeholder='e.g. acme_corp'>"
+    "<label>Unit ID</label>"
+    "<input id='uid' type='text' maxlength='32' placeholder='e.g. pump_001'>"
+    "<label>Device Name</label>"
+    "<input id='dname' type='text' maxlength='64' placeholder='e.g. Main Process Pump'>"
+    "<button type='submit' class='btn btn-primary' id='btn'>Save Identity</button>"
+    "</form>"
+    "<div id='msg' class='alert'></div>"
+    "<a href='/' class='btn-back'>Back to Dashboard</a>"
+    "</div>"
+    "<script>"
+    "function h(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}"
+    "var locked=false,origCfg={};"
+    "fetch('/api/config').then(r=>r.json()).then(d=>{"
+    "origCfg=d;"
+    "document.getElementById('cid').value=d.client_id||'';"
+    "document.getElementById('uid').value=d.unit_id||'';"
+    "document.getElementById('dname').value=d.device_name||'';"
+    "if(d.identity_provisioned){"
+    "locked=true;"
+    "document.getElementById('lock').style.display='block';"
+    "document.getElementById('cid').readOnly=true;"
+    "document.getElementById('uid').readOnly=true;"
+    "document.getElementById('dname').readOnly=true;"
+    "document.getElementById('btn').style.display='none';"
+    "}"
+    "}).catch(()=>{});"
+    "document.getElementById('frm').onsubmit=function(e){"
+    "e.preventDefault();"
+    "if(locked)return;"
+    "var msg=document.getElementById('msg'),btn=document.getElementById('btn');"
+    "btn.disabled=true;btn.textContent='Saving...';"
+    "msg.className='alert';msg.style.display='none';"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({scope:'identity',"
+    "client_id:document.getElementById('cid').value,"
+    "unit_id:document.getElementById('uid').value,"
+    "device_name:document.getElementById('dname').value})})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='Identity saved and locked. Restart required for changes to take effect.';"
+    "msg.style.display='block';"
+    "document.getElementById('cid').readOnly=true;"
+    "document.getElementById('uid').readOnly=true;"
+    "document.getElementById('dname').readOnly=true;"
+    "btn.style.display='none';"
+    "document.getElementById('lock').style.display='block';"
+    "}else{"
+    "msg.className='alert alert-err';"
+    "var t=d.error||'Save failed';"
+    "if(d.fields){var f=d.fields;for(var k in f)t+='\\n'+k+': '+f[k]}"
+    "msg.textContent=t;msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save Identity'}"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save Identity'})};"
+    "</script></body></html>";
+
+/* ── Phase 4B.2: WiFi Config Page HTML ───────────────────────────── */
+
+static const char WIFI_PAGE_HTML[] =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Argus WiFi</title>"
+    "<style>"
+    ":root{--bg:#0f1117;--card:#1a1b23;--border:#27272a;--text:#e4e4e7;--muted:#a1a1aa;"
+    "--accent:#7c3aed;--accent-light:#a78bfa;--accent-dark:#6d28d9;"
+    "--success:#22c55e;--warn:#f59e0b;--error:#ef4444;--input-bg:#27272a}"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"
+    "'Segoe UI',sans-serif;min-height:100vh;display:flex;align-items:center;"
+    "justify-content:center;padding:16px}"
+    ".card{background:var(--card);border:1px solid var(--border);border-radius:12px;"
+    "padding:24px;max-width:420px;width:100%}"
+    "h1{color:var(--accent-light);font-size:1.1rem;margin-bottom:16px}"
+    "h1::before{content:'\\25C6 ';color:var(--accent)}"
+    "label{display:block;color:var(--muted);font-size:0.8rem;margin:12px 0 4px;"
+    "text-transform:uppercase;letter-spacing:0.05em}"
+    "input{width:100%;padding:10px 12px;background:var(--input-bg);"
+    "border:1px solid var(--border);border-radius:8px;color:var(--text);"
+    "font-size:0.9rem;outline:none;transition:border 0.2s}"
+    "input:focus{border-color:var(--accent)}"
+    ".btn{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+    "font-size:0.9rem;font-weight:600;cursor:pointer;transition:opacity 0.2s;margin-top:16px}"
+    ".btn-primary{background:var(--accent);color:#fff}"
+    ".btn-primary:hover{opacity:0.9}"
+    ".btn-danger{background:var(--error);color:#fff;margin-top:8px}"
+    ".btn-back{background:var(--border);color:var(--text);margin-top:8px;"
+    "text-align:center;text-decoration:none;display:block;padding:10px;border-radius:8px;"
+    "font-size:0.85rem}"
+    ".alert{padding:10px 12px;border-radius:8px;font-size:0.85rem;margin-top:12px;display:none}"
+    ".alert-ok{background:#052e16;border:1px solid #166534;color:#4ade80;display:block}"
+    ".alert-err{background:#350a0a;border:1px solid #991b1b;color:#fca5a5;display:block}"
+    ".alert-warn{background:#351f05;border:1px solid #92400e;color:#fcd34d;display:block}"
+    ".note{color:var(--muted);font-size:0.75rem;margin-top:8px}"
+    "</style></head><body>"
+    "<div class='card'><h1>WiFi Configuration</h1>"
+    "<form id='frm'>"
+    "<label>WiFi SSID</label>"
+    "<input id='ssid' type='text' maxlength='32' placeholder='Network name'>"
+    "<label>WiFi Password</label>"
+    "<input id='pass' type='password' maxlength='63' placeholder='Enter WiFi password'>"
+    "<p class='note' id='passnote'></p>"
+    "<button type='submit' class='btn btn-primary' id='btn'>Save WiFi</button>"
+    "</form>"
+    "<button class='btn btn-danger' id='clrbtn' onclick='clearWifi()'>Clear WiFi</button>"
+    "<div id='msg' class='alert'></div>"
+    "<a href='/' class='btn-back'>Back to Dashboard</a>"
+    "</div>"
+    "<script>"
+    "var origSsid='';"
+    "fetch('/api/config').then(r=>r.json()).then(d=>{"
+    "document.getElementById('ssid').value=d.sta_ssid||'';"
+    "origSsid=d.sta_ssid||'';"
+    "if(d.sta_pass_set){"
+    "document.getElementById('pass').placeholder='Password configured (leave blank to keep)';"
+    "document.getElementById('passnote').textContent='Leave password blank to keep the existing one.'}"
+    "}).catch(()=>{});"
+    "document.getElementById('frm').onsubmit=function(e){"
+    "e.preventDefault();"
+    "var msg=document.getElementById('msg'),btn=document.getElementById('btn');"
+    "var ssid=document.getElementById('ssid').value;"
+    "var pass=document.getElementById('pass').value;"
+    "btn.disabled=true;btn.textContent='Saving...';"
+    "msg.className='alert';msg.style.display='none';"
+    "var body={scope:'wifi',sta_ssid:ssid};"
+    "if(pass.length>0)body.sta_pass=pass;"
+    "else if(ssid!==origSsid){"
+    "msg.className='alert alert-err';"
+    "msg.textContent='Password required when changing SSID';"
+    "msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save WiFi';return}"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify(body)})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='WiFi saved. Restart required for changes to take effect.';"
+    "msg.style.display='block';origSsid=ssid;"
+    "}else{"
+    "msg.className='alert alert-err';"
+    "var t=d.error||'Save failed';"
+    "if(d.fields){var f=d.fields;for(var k in f)t+='\\n'+k+': '+f[k]}"
+    "msg.textContent=t;msg.style.display='block'}"
+    "btn.disabled=false;btn.textContent='Save WiFi';"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block';"
+    "btn.disabled=false;btn.textContent='Save WiFi'})};"
+    "function clearWifi(){"
+    "if(!confirm('Clear WiFi credentials? The controller will not connect to any network after restart.'))return;"
+    "var msg=document.getElementById('msg');"
+    "fetch('/api/config/save',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({scope:'wifi',sta_ssid:'',sta_pass:''})})"
+    ".then(r=>r.json()).then(d=>{"
+    "if(d.status==='saved'){"
+    "msg.className='alert alert-ok';"
+    "msg.textContent='WiFi cleared. Restart required.';"
+    "msg.style.display='block';"
+    "document.getElementById('ssid').value='';"
+    "document.getElementById('pass').value='';origSsid='';"
+    "}else{msg.className='alert alert-err';"
+    "msg.textContent=d.error||'Failed';msg.style.display='block'}"
+    "}).catch(()=>{msg.className='alert alert-err';"
+    "msg.textContent='Network error';msg.style.display='block'})}"
+    "</script></body></html>";
+
+/* ── Phase 4B.2: GET /api/config handler ─────────────────────────── */
+
+static esp_err_t config_get_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    argus_config_payload_t cfg;
+    bool has_cfg = false;
+    esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
+        return ESP_OK;
+    }
+
+    bool id_prov = (cfg.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0;
+    bool pass_set = (strlen(cfg.sta_pass) > 0);
+
+    char esc_client[ARGUS_CFG_CLIENT_ID_MAX * 2 + 1];
+    char esc_unit[ARGUS_CFG_UNIT_ID_MAX * 2 + 1];
+    char esc_name[ARGUS_CFG_DEV_NAME_MAX * 2 + 1];
+    char esc_ssid[ARGUS_CFG_STA_SSID_MAX * 2 + 1];
+    json_escape(cfg.client_id, esc_client, sizeof(esc_client));
+    json_escape(cfg.unit_id, esc_unit, sizeof(esc_unit));
+    json_escape(cfg.device_name, esc_name, sizeof(esc_name));
+    json_escape(cfg.sta_ssid, esc_ssid, sizeof(esc_ssid));
+
+    /* Zero password immediately after determining if it was set */
+    memset(cfg.sta_pass, 0, sizeof(cfg.sta_pass));
+
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"client_id\":\"%s\",\"unit_id\":\"%s\",\"device_name\":\"%s\","
+        "\"sta_ssid\":\"%s\",\"sta_pass_set\":%s,\"identity_provisioned\":%s}",
+        esc_client, esc_unit, esc_name, esc_ssid,
+        pass_set ? "true" : "false",
+        id_prov ? "true" : "false");
+
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"response_overflow\"}");
+        return ESP_OK;
+    }
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: POST /api/config/save handler ───────────────────── */
+
+static esp_err_t config_save_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_POST) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    /* Mode gate: config writes only in provisioning/service/discoverable modes */
+    argus_network_mode_t mode = argus_net_mgr_get_mode();
+    if (mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP &&
+        mode != ARGUS_NET_MODE_SERVICE_AP_ONLY &&
+        mode != ARGUS_NET_MODE_AP_DISCOVERABLE) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"error\":\"config_write_not_allowed_in_current_mode\"}");
+        return ESP_OK;
+    }
+
+    /* Read request body */
+    char body[512];
+    int body_len = recv_full_body(req, body, sizeof(body));
+    if (body_len < 0) return ESP_OK;  /* error response already sent */
+
+    /* Parse scope */
+    char scope_str[16] = {0};
+    argus_json_result_t jr = argus_json_extract_string(body, "scope", scope_str, sizeof(scope_str));
+    if (jr != ARGUS_JSON_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        const char *reason = (jr == ARGUS_JSON_KEY_ABSENT) ? "missing_scope" :
+                             (jr == ARGUS_JSON_OVERFLOW) ? "scope_too_long" :
+                             (jr == ARGUS_JSON_UNTERMINATED) ? "malformed_scope" :
+                             "invalid_scope_type";
+        char err_body[128];
+        snprintf(err_body, sizeof(err_body),
+                 "{\"error\":\"%s\",\"message\":\"scope must be identity or wifi\"}", reason);
+        httpd_resp_sendstr(req, err_body);
+        return ESP_OK;
+    }
+    argus_config_scope_t scope = argus_config_overlay_parse_scope(scope_str);
+    if (scope == ARGUS_CONFIG_SCOPE_INVALID) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"invalid_scope\","
+            "\"message\":\"scope must be identity or wifi\"}");
+        return ESP_OK;
+    }
+
+    /* Parse fields from JSON body */
+    argus_config_fields_t fields;
+    memset(&fields, 0, sizeof(fields));
+
+    if (scope == ARGUS_CONFIG_SCOPE_IDENTITY) {
+        /* Identity fields: all three must be valid strings if present.
+         * KEY_ABSENT is acceptable (overlay decides if all-three are required).
+         * OVERFLOW/UNTERMINATED/TYPE_MISMATCH are malformed input → 400. */
+        argus_json_result_t jr_cid = argus_json_extract_string(body, "client_id",
+            fields.client_id, sizeof(fields.client_id));
+        argus_json_result_t jr_uid = argus_json_extract_string(body, "unit_id",
+            fields.unit_id, sizeof(fields.unit_id));
+        argus_json_result_t jr_dn = argus_json_extract_string(body, "device_name",
+            fields.device_name, sizeof(fields.device_name));
+
+        if (jr_cid != ARGUS_JSON_OK && jr_cid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_client_id\"}");
+            return ESP_OK;
+        }
+        if (jr_uid != ARGUS_JSON_OK && jr_uid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_unit_id\"}");
+            return ESP_OK;
+        }
+        if (jr_dn != ARGUS_JSON_OK && jr_dn != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_device_name\"}");
+            return ESP_OK;
+        }
+        fields.has_client_id = (jr_cid == ARGUS_JSON_OK);
+        fields.has_unit_id = (jr_uid == ARGUS_JSON_OK);
+        fields.has_device_name = (jr_dn == ARGUS_JSON_OK);
+    } else {
+        /* WiFi fields: SSID required, password optional.
+         * KEY_ABSENT for password → has_sta_pass = false (preserve existing).
+         * Any malformed result for a present field → 400. */
+        argus_json_result_t jr_ssid = argus_json_extract_string(body, "sta_ssid",
+            fields.sta_ssid, sizeof(fields.sta_ssid));
+        if (jr_ssid != ARGUS_JSON_OK && jr_ssid != ARGUS_JSON_KEY_ABSENT) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_sta_ssid\"}");
+            return ESP_OK;
+        }
+        fields.has_sta_ssid = (jr_ssid == ARGUS_JSON_OK);
+
+        argus_json_result_t jr_pass = argus_json_extract_string(body, "sta_pass",
+            fields.sta_pass, sizeof(fields.sta_pass));
+        if (jr_pass != ARGUS_JSON_OK && jr_pass != ARGUS_JSON_KEY_ABSENT) {
+            /* Malformed password must NOT trigger the "preserve existing" path */
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, "{\"error\":\"malformed_sta_pass\"}");
+            return ESP_OK;
+        }
+        fields.has_sta_pass = (jr_pass == ARGUS_JSON_OK);
+    }
+
+    /* Load current effective config as base for overlay */
+    argus_config_payload_t cfg;
+    bool has_cfg = false;
+    esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
+        return ESP_OK;
+    }
+
+    /* Apply overlay via production seam */
+    argus_config_payload_t out_cfg;
+    argus_config_overlay_result_t overlay = argus_config_overlay_apply(&cfg, scope, &fields, &out_cfg);
+
+    /* Zero sensitive fields from the parsed input */
+    memset(fields.sta_pass, 0, sizeof(fields.sta_pass));
+
+    if (!overlay.success) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        char errmsg[256];
+        snprintf(errmsg, sizeof(errmsg),
+            "{\"error\":\"%s\",\"message\":\"%s\"}",
+            overlay.error_code ? overlay.error_code : "overlay_failed",
+            overlay.error_message ? overlay.error_message : "Configuration overlay failed");
+        /* Identity lock is 403, not 400 */
+        if (overlay.error_code && strcmp(overlay.error_code, "identity_locked") == 0) {
+            httpd_resp_set_status(req, "403 Forbidden");
+        }
+        httpd_resp_sendstr(req, errmsg);
+        return ESP_OK;
+    }
+
+    /* Validate the combined payload */
+    err = argus_nvs_config_validate(&out_cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"validation_failed\","
+            "\"message\":\"Combined configuration failed validation\"}");
+        memset(out_cfg.sta_pass, 0, sizeof(out_cfg.sta_pass));
+        return ESP_OK;
+    }
+
+    /* Commit to NVS */
+    err = argus_nvs_config_commit(&out_cfg);
+    memset(out_cfg.sta_pass, 0, sizeof(out_cfg.sta_pass));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Config commit failed: %s (%d)", esp_err_to_name(err), err);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"commit_failed\"}");
+        return ESP_OK;
+    }
+
+    httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: Config page handlers ────────────────────────────── */
+
+static esp_err_t identity_page_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_send(req, IDENTITY_PAGE_HTML, sizeof(IDENTITY_PAGE_HTML) - 1);
+    return ESP_OK;
+}
+
+static esp_err_t wifi_page_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+    httpd_resp_send(req, WIFI_PAGE_HTML, sizeof(WIFI_PAGE_HTML) - 1);
+    return ESP_OK;
+}
+
+/* ── Phase 4B.2: POST /api/restart handler ───────────────────────── */
+
+static esp_err_t restart_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_POST) return send_method_not_allowed(req);
+    set_api_headers(req);
+
+    esp_err_t err = argus_net_mgr_request_restart();
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"motion_active\","
+            "\"message\":\"Cannot restart while motion is active or machine is in fault state\"}");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        char errmsg[128];
+        snprintf(errmsg, sizeof(errmsg),
+            "{\"error\":\"restart_failed\",\"detail\":\"%s\"}", esp_err_to_name(err));
+        httpd_resp_sendstr(req, errmsg);
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"restart_initiated\"}");
+    return ESP_OK;
+}
+
+/* ── Phase 4B.3: Service Entry/Exit Handlers ─────────────────────── */
+
+/**
+ * @brief POST /api/service/enter — Request transition to LOCAL_SERVICE/BROWSER
+ *
+ * Mode gate: AP_DISCOVERABLE or UNCOMMISSIONED_AP (or already SERVICE_AP_ONLY
+ * for idempotency).
+ *
+ * A1 DEADLOCK AVOIDANCE: argus_net_mgr_request_service() calls
+ * argus_http_server_stop() internally. Calling it from within an httpd
+ * handler would deadlock (httpd_stop waits for active handlers, but
+ * this handler IS the active handler). Instead, we validate preconditions,
+ * send the HTTP response, then post a SERVICE_REQUEST event to the net_mgr
+ * task queue. The net_mgr task executes the transition from its own context.
+ *
+ * Per A2, once the event is posted the transition runs to completion
+ * regardless of browser disconnect. The browser can poll /api/status
+ * after reconnecting to the AP to verify the transition completed.
+ */
+static esp_err_t service_enter_handler(httpd_req_t *req)
+{
+    if (req->method != HTTP_POST) {
+        httpd_resp_set_status(req, "405 Method Not Allowed");
+        httpd_resp_sendstr(req, "{\"error\":\"method_not_allowed\"}");
+        return ESP_OK;
+    }
+
+    if (!check_auth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    /* Check current state for idempotency and policy */
+    argus_net_snapshot_t net_snap;
+    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
+        return ESP_OK;
+    }
+
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
+
+    argus_net_event_t evt;
+    argus_svc_policy_result_t pol = argus_service_policy_evaluate_entry(&net_snap, &auth_snap, &evt);
+
+    if (pol == ARGUS_SVC_POLICY_IDEMPOTENT) {
+        httpd_resp_sendstr(req,
+            "{\"status\":\"ok\",\"mode\":\"SERVICE_AP_ONLY\","
+            "\"owner\":\"BROWSER\",\"note\":\"already_in_service\"}");
+        return ESP_OK;
+    } else if (pol == ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"code\":409,\"reason\":\"transition_in_progress\"}");
+        return ESP_OK;
+    } else if (pol == ARGUS_SVC_POLICY_REJECT_MODE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":409,\"reason\":\"mode_not_eligible\","
+            "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    } else if (pol != ARGUS_SVC_POLICY_OK) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"policy_rejected\"}");
+        return ESP_OK;
+    }
+
+    /* Post the event — net_mgr task will execute the transition.
+     * The HTTP server is stopped during the transition. The design is safe
+     * from deadlock because the transition work occurs in a different task
+     * context (net_mgr) and the HTTP server lifecycle is not stopped
+     * recursively by its own handler. */
+    esp_err_t post_err = argus_net_mgr_post_event(&evt);
+    if (post_err != ESP_OK) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":503,\"reason\":\"queue_full\","
+            "\"detail\":\"%s\"}", esp_err_to_name(post_err));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* 202 Accepted — transition is in progress, browser should poll /api/status */
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"accepted\",\"action\":\"service_entry_requested\","
+        "\"note\":\"Poll /api/status after reconnecting to verify transition\"}");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief POST /api/service/exit — Revoke browser authority, reboot
+ *
+ * Mode gate: SERVICE_AP_ONLY with LOCAL_SERVICE/BROWSER authority.
+ *
+ * A1 DEADLOCK AVOIDANCE: Same pattern as service_enter. The handler
+ * validates preconditions, sends the response, then posts a SERVICE_EXIT
+ * event. The net_mgr task executes the controlled stop + reboot.
+ *
+ * The browser will lose connection after the response is sent because
+ * the device reboots — this is expected and documented behavior.
+ */
+static esp_err_t service_exit_handler(httpd_req_t *req)
+{
+    if (req->method != HTTP_POST) {
+        httpd_resp_set_status(req, "405 Method Not Allowed");
+        httpd_resp_sendstr(req, "{\"error\":\"method_not_allowed\"}");
+        return ESP_OK;
+    }
+
+    if (!check_auth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
+    /* Check current state for policy */
+    argus_net_snapshot_t net_snap;
+    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
+        return ESP_OK;
+    }
+
+    argus_authority_snapshot_t auth_snap;
+    argus_authority_mgr_get_snapshot(&auth_snap);
+
+    argus_net_event_t evt;
+    argus_svc_policy_result_t pol = argus_service_policy_evaluate_exit(&net_snap, &auth_snap, &evt);
+
+    if (pol == ARGUS_SVC_POLICY_REJECT_MODE) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        char resp[160];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":403,\"reason\":\"not_in_service_mode\","
+            "\"current_mode\":\"%s\"}", argus_net_mgr_get_mode_name(net_snap.mode));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    } else if (pol == ARGUS_SVC_POLICY_REJECT_AUTHORITY) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"code\":403,\"reason\":\"not_browser_owner\"}");
+        return ESP_OK;
+    } else if (pol != ARGUS_SVC_POLICY_OK) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"policy_rejected\"}");
+        return ESP_OK;
+    }
+
+    /* Post the event — net_mgr task will execute the exit + reboot */
+    esp_err_t post_err = argus_net_mgr_post_event(&evt);
+    if (post_err != ESP_OK) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        char resp[128];
+        snprintf(resp, sizeof(resp),
+            "{\"status\":\"error\",\"code\":503,\"reason\":\"queue_full\","
+            "\"detail\":\"%s\"}", esp_err_to_name(post_err));
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+    }
+
+    /* 202 Accepted — device will reboot shortly after this response */
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"accepted\",\"action\":\"service_exit_requested\","
+        "\"note\":\"Device will reboot. Reconnect to verify.\"}");
+
+    return ESP_OK;
+}
+
 /* ── URI handler registrations ───────────────────────────────────── */
+
 
 static const httpd_uri_t uri_status = {
     .uri       = "/api/status",
@@ -807,13 +1550,8 @@ static esp_err_t password_post_handler(httpd_req_t *req)
 
     /* Read body */
     char body[128];
-    int len = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (len <= 0) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"empty body\"}");
-        return ESP_OK;
-    }
-    body[len] = '\0';
+    int len = recv_full_body(req, body, sizeof(body));
+    if (len < 0) return ESP_OK;  /* error response already sent */
 
     /* Simple JSON parse — find "new_password":"..." */
     const char *key = "\"new_password\"";
@@ -900,6 +1638,57 @@ static const httpd_uri_t uri_logout = {
     .user_ctx  = NULL
 };
 
+/* Phase 4B.2 URI handler registrations */
+
+static const httpd_uri_t uri_config_get = {
+    .uri       = "/api/config",
+    .method    = HTTP_GET,
+    .handler   = config_get_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_config_save = {
+    .uri       = "/api/config/save",
+    .method    = HTTP_POST,
+    .handler   = config_save_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_identity_page = {
+    .uri       = "/config/identity",
+    .method    = HTTP_GET,
+    .handler   = identity_page_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_wifi_page = {
+    .uri       = "/config/wifi",
+    .method    = HTTP_GET,
+    .handler   = wifi_page_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_restart = {
+    .uri       = "/api/restart",
+    .method    = HTTP_POST,
+    .handler   = restart_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_service_enter = {
+    .uri       = "/api/service/enter",
+    .method    = HTTP_POST,
+    .handler   = service_enter_handler,
+    .user_ctx  = NULL
+};
+
+static const httpd_uri_t uri_service_exit = {
+    .uri       = "/api/service/exit",
+    .method    = HTTP_POST,
+    .handler   = service_exit_handler,
+    .user_ctx  = NULL
+};
+
 /* ── Lifecycle implementation ────────────────────────────────────── */
 
 esp_err_t argus_http_server_init(void)
@@ -964,7 +1753,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 10;
+    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + 2 (4B.3) + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -996,6 +1785,22 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_change_password);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_logout);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.2 endpoints */
+    reg_err = httpd_register_uri_handler(s_server, &uri_config_get);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_config_save);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_identity_page);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_wifi_page);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_restart);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.3 endpoints */
+    reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);

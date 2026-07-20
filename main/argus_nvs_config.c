@@ -16,38 +16,26 @@ static const char *TAG = "argus_nvs_cfg";
 
 #define ARGUS_NVS_NS_CFG        "argus_cfg"
 #define ARGUS_NVS_NS_SYS        "argus_sys"
+#define ARGUS_NVS_NS_RST        "argus_rst"  /* Dedicated namespace for reset-pending marker.
+                                              * Factory reset erases CFG and SYS but never RST,
+                                              * ensuring the marker survives power-loss during
+                                              * reset and can trigger recovery on next boot. */
 #define ARGUS_NVS_KEY_SLOT_0    "slot_a"
 #define ARGUS_NVS_KEY_SLOT_1    "slot_b"
 #define ARGUS_NVS_KEY_SELECTOR  "active_slot"
 #define ARGUS_NVS_KEY_RESET_PEND "rst_pend"
+#define ARGUS_NVS_KEY_PROV_HWM   "prov_hwm"   /* Monotonic provisioning high-water marker */
 
-static argus_config_payload_t s_active_config;
-static uint32_t s_active_generation = 0;
-static uint8_t s_active_slot_index = 0;
-static bool s_has_valid_config = false;
+static argus_nvs_core_t s_prod_core;
 static bool s_initialized = false;
 
 static const argus_nvs_driver_t *s_custom_driver = NULL;
 
-// Standard IEEE 802.3 CRC32 pure C implementation for cross-platform portability
-uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload)
-{
-    if (!payload) return 0;
-    const uint8_t *data = (const uint8_t *)payload;
-    size_t len = sizeof(argus_config_payload_t);
-    uint32_t crc = 0xFFFFFFFFU;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320U;
-            } else {
-                crc = (crc >> 1);
-            }
-        }
-    }
-    return ~crc;
-}
+// Standard IEEE 802.3 CRC32 — delegates to internal raw helper after it's defined.
+// Forward declaration of calc_crc32_raw is not needed because argus_nvs_config_calc_crc32
+// is called externally and calc_crc32_raw is static. The public function is defined after
+// calc_crc32_raw below. We keep this position as a stub for the declaration order.
+// (Actual implementation moved below calc_crc32_raw.)
 
 bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b)
 {
@@ -56,16 +44,73 @@ bool argus_nvs_config_gen_is_newer(uint32_t gen_a, uint32_t gen_b)
     return ((int32_t)(gen_a - gen_b)) > 0;
 }
 
-static bool is_slot_valid(const argus_cfg_slot_t *slot)
+/**
+ * @brief Compute CRC32 over raw bytes (used for V1 migration and V2 payloads).
+ */
+static uint32_t calc_crc32_raw(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320U;
+            else         crc = (crc >> 1);
+        }
+    }
+    return ~crc;
+}
+
+uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload)
+{
+    if (!payload) return 0;
+    return calc_crc32_raw((const uint8_t *)payload, sizeof(argus_config_payload_t));
+}
+
+/**
+ * @brief Validate a dual-slot record. Supports V1→V2 transparent migration.
+ *
+ * V1 slots have schema_version=1, payload_length=228 (no provisioned_flags).
+ * On valid V1 read, provisioned_flags is set to 0 (unprovisioned, eligible
+ * for one portal provisioning). This is a documented development migration
+ * rule, not an inferred universal production policy.
+ *
+ * V2 slots have schema_version=2, payload_length=229 (with provisioned_flags).
+ */
+static bool is_slot_valid(argus_cfg_slot_t *slot)
 {
     if (!slot) return false;
-    if (slot->schema_version != ARGUS_CONFIG_SCHEMA_VERSION) return false;
     if (slot->valid_marker != ARGUS_CONFIG_VALID_MARKER) return false;
     if (slot->config_generation == 0) return false;
-    if (slot->payload_length != sizeof(argus_config_payload_t)) return false;
-    uint32_t computed_crc = argus_nvs_config_calc_crc32(&slot->payload);
-    if (computed_crc != slot->crc32) return false;
-    return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+
+    if (slot->schema_version == ARGUS_CONFIG_SCHEMA_VERSION &&
+        slot->payload_length == sizeof(argus_config_payload_t)) {
+        /* Current schema — verify CRC over full payload */
+        uint32_t computed = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                           sizeof(argus_config_payload_t));
+        if (computed != slot->crc32) return false;
+        return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+    }
+
+    if (slot->schema_version == ARGUS_CONFIG_SCHEMA_V1 &&
+        slot->payload_length == ARGUS_CONFIG_PAYLOAD_V1_SIZE) {
+        /* V1 migration: CRC was over the old 228-byte payload (no flags field) */
+        uint32_t computed = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                           ARGUS_CONFIG_PAYLOAD_V1_SIZE);
+        if (computed != slot->crc32) return false;
+
+        /* Migrate in-place: set provisioned_flags to 0 (identity editable) */
+        slot->payload.provisioned_flags = 0;
+
+        /* Upgrade slot metadata so commit writes V2 */
+        slot->schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
+        slot->payload_length = sizeof(argus_config_payload_t);
+        slot->crc32 = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                      sizeof(argus_config_payload_t));
+
+        return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+    }
+
+    return false;  /* Unknown schema — reject */
 }
 
 // Default production NVS storage driver implementations
@@ -131,16 +176,30 @@ static esp_err_t prod_read_reset_pending(void *ctx, bool *out_pending)
 {
     (void)ctx;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READONLY, &handle);
-    if (err != ESP_OK) {
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_RST, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Namespace doesn't exist → fresh device, no reset pending */
         *out_pending = false;
         return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        /* Real storage error → propagate, do not hide */
+        return err;
     }
 
     uint8_t val = 0;
     err = nvs_get_u8(handle, ARGUS_NVS_KEY_RESET_PEND, &val);
     nvs_close(handle);
-    *out_pending = (err == ESP_OK && val == 1);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Key doesn't exist → not pending */
+        *out_pending = false;
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        /* Real read error → propagate */
+        return err;
+    }
+    *out_pending = (val == 1);
     return ESP_OK;
 }
 
@@ -148,7 +207,7 @@ static esp_err_t prod_write_reset_pending(void *ctx, bool pending)
 {
     (void)ctx;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_RST, NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
 
     err = nvs_set_u8(handle, ARGUS_NVS_KEY_RESET_PEND, pending ? 1 : 0);
@@ -159,21 +218,68 @@ static esp_err_t prod_write_reset_pending(void *ctx, bool pending)
     return err;
 }
 
-static esp_err_t prod_erase_all(void *ctx)
+static esp_err_t prod_read_provisioned_hwm(void *ctx, uint8_t *out_flags)
 {
     (void)ctx;
     nvs_handle_t handle;
-    if (nvs_open(ARGUS_NVS_NS_CFG, NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_erase_all(handle);
-        nvs_commit(handle);
-        nvs_close(handle);
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READONLY, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Namespace doesn't exist → fresh device, no HWM yet */
+        *out_flags = 0;
+        return ESP_ERR_NVS_NOT_FOUND;
     }
-    if (nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_erase_all(handle);
-        nvs_commit(handle);
-        nvs_close(handle);
+    if (err != ESP_OK) return err;  /* Real error → propagate */
+    err = nvs_get_u8(handle, ARGUS_NVS_KEY_PROV_HWM, out_flags);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *out_flags = 0;
     }
-    return ESP_OK;
+    return err;
+}
+
+static esp_err_t prod_write_provisioned_hwm(void *ctx, uint8_t flags)
+{
+    (void)ctx;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, ARGUS_NVS_KEY_PROV_HWM, flags);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err;
+}
+
+static esp_err_t prod_erase_all(void *ctx)
+{
+    (void)ctx;
+    esp_err_t first_err = ESP_OK;
+    nvs_handle_t handle;
+
+    esp_err_t open_err = nvs_open(ARGUS_NVS_NS_CFG, NVS_READWRITE, &handle);
+    if (open_err == ESP_OK) {
+        esp_err_t erase_err = nvs_erase_all(handle);
+        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
+        esp_err_t commit_err = nvs_commit(handle);
+        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
+        nvs_close(handle);
+    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
+        first_err = open_err;
+    }
+
+    open_err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
+    if (open_err == ESP_OK) {
+        esp_err_t erase_err = nvs_erase_all(handle);
+        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
+        esp_err_t commit_err = nvs_commit(handle);
+        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
+        nvs_close(handle);
+    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
+        first_err = open_err;
+    }
+
+    return first_err;
 }
 
 static const argus_nvs_driver_t s_prod_driver = {
@@ -183,6 +289,8 @@ static const argus_nvs_driver_t s_prod_driver = {
     .write_selector = prod_write_selector,
     .read_reset_pending = prod_read_reset_pending,
     .write_reset_pending = prod_write_reset_pending,
+    .read_provisioned_hwm = prod_read_provisioned_hwm,
+    .write_provisioned_hwm = prod_write_provisioned_hwm,
     .erase_all = prod_erase_all,
     .ctx = NULL
 };
@@ -190,6 +298,7 @@ static const argus_nvs_driver_t s_prod_driver = {
 esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *driver)
 {
     if (!core || !driver) return ESP_ERR_INVALID_ARG;
+    if (!driver->read_slot || !driver->read_selector) return ESP_ERR_INVALID_ARG;
     memset(core, 0, sizeof(argus_nvs_core_t));
     core->driver = driver;
 
@@ -203,6 +312,7 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
     uint8_t selector = 0xFF;
     driver->read_selector(driver->ctx, &selector);
 
+    /* ── Phase 1: Selector-based slot selection ─────────────────────── */
     if (valid_a && valid_b) {
         if (selector == 0) {
             core->active_slot_index = 0;
@@ -242,6 +352,73 @@ esp_err_t argus_nvs_core_init(argus_nvs_core_t *core, const argus_nvs_driver_t *
         core->has_valid_config = false;
     }
 
+    /* ── Phase 2: Monotonic provisioning enforcement ────────────────── */
+    /* Read durable high-water marker.
+     * ESP_ERR_NVS_NOT_FOUND → fresh device, hwm_flags = 0.
+     * Any other error → fail closed: treat as all bits locked (0xFF).
+     * This prevents a transient NVS read failure from reopening provisioning. */
+    uint8_t hwm_flags = 0;
+    if (driver->read_provisioned_hwm) {
+        esp_err_t hwm_err = driver->read_provisioned_hwm(driver->ctx, &hwm_flags);
+        if (hwm_err != ESP_OK && hwm_err != ESP_ERR_NVS_NOT_FOUND) {
+            hwm_flags = 0xFF;  /* Fail closed: lock all provisioning bits */
+        }
+    }
+
+    if (core->has_valid_config) {
+        /* Merge slot-level flags with durable HWM */
+        uint8_t monotonic_flags = hwm_flags;
+        if (valid_a) monotonic_flags |= slot_a.payload.provisioned_flags;
+        if (valid_b) monotonic_flags |= slot_b.payload.provisioned_flags;
+
+        core->active_config.provisioned_flags |= monotonic_flags;
+    }
+
+    /* ── Phase 3: Selector-failure recovery ─────────────────────────── *
+     * If HWM proves provisioning occurred but the selected config is NOT
+     * provisioned, the selector was likely not activated after a successful
+     * HWM write (power loss between HWM write and selector activation).
+     *
+     * Recovery: find the valid provisioned candidate among the two slots,
+     * switch to it, and attempt a best-effort selector repair.
+     *
+     * Selector repair is best-effort: if write_selector fails, the
+     * in-memory configuration is still correct for this boot. The next
+     * successful commit will establish a new durable selector.
+     *
+     * If neither slot is provisioned but HWM says it should be, the
+     * provisioning data is unrecoverable (both slots corrupted). The
+     * fail-closed monotonic enforcement above already locked provisioning
+     * via the HWM flags merge, preventing identity reopening.            */
+    if (core->has_valid_config && valid_a && valid_b &&
+        (hwm_flags & ARGUS_CFG_PROVISIONED_IDENTITY)) {
+        bool sel_a_prov = (slot_a.payload.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY);
+        bool sel_b_prov = (slot_b.payload.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY);
+
+        /* If the active slot is unprovisioned but the other is provisioned,
+         * this is a selector-failure: switch to the provisioned slot. */
+        if (core->active_slot_index == 0 && !sel_a_prov && sel_b_prov) {
+            core->active_slot_index = 1;
+            memcpy(&core->active_config, &slot_b.payload, sizeof(argus_config_payload_t));
+            core->active_generation = slot_b.config_generation;
+            core->active_config.provisioned_flags |= hwm_flags;
+            /* Best-effort selector repair: failure is non-fatal.
+             * In-memory state is correct; next commit repairs durably. */
+            if (driver->write_selector) {
+                (void)driver->write_selector(driver->ctx, 1);
+            }
+        } else if (core->active_slot_index == 1 && !sel_b_prov && sel_a_prov) {
+            core->active_slot_index = 0;
+            memcpy(&core->active_config, &slot_a.payload, sizeof(argus_config_payload_t));
+            core->active_generation = slot_a.config_generation;
+            core->active_config.provisioned_flags |= hwm_flags;
+            /* Best-effort selector repair */
+            if (driver->write_selector) {
+                (void)driver->write_selector(driver->ctx, 0);
+            }
+        }
+    }
+
     core->initialized = true;
     return ESP_OK;
 }
@@ -257,6 +434,7 @@ esp_err_t argus_nvs_core_get(const argus_nvs_core_t *core, argus_config_payload_
 esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_payload_t *in_cfg)
 {
     if (!core || !in_cfg || !core->driver) return ESP_ERR_INVALID_ARG;
+    if (!core->driver->read_selector || !core->driver->write_slot || !core->driver->read_slot || !core->driver->write_selector) return ESP_ERR_INVALID_ARG;
 
     if (strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -302,6 +480,25 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* Write monotonic provisioning high-water marker BEFORE selector activation.
+     * If this fails, the selector is NOT updated — the old slot remains active.
+     * The new slot is written but orphaned; it will be overwritten on the next
+     * successful commit. This guarantees commit does not return ESP_OK unless
+     * the durable provisioning invariant is established.
+     *
+     * Power-loss recovery:
+     * - After slot write, before HWM: Old selector active. Orphaned new slot.
+     * - After HWM, before selector: Old slot active. HWM set → identity locked.
+     * - After selector: New slot active. HWM set. Fully committed. */
+    if ((in_cfg->provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) &&
+        core->driver->write_provisioned_hwm) {
+        esp_err_t hwm_err = core->driver->write_provisioned_hwm(
+            core->driver->ctx, in_cfg->provisioned_flags);
+        if (hwm_err != ESP_OK) {
+            return hwm_err;  /* Do NOT activate selector */
+        }
+    }
+
     esp_err_t sel_err = core->driver->write_selector(core->driver->ctx, inactive_slot);
     if (sel_err != ESP_OK) return sel_err;
 
@@ -315,7 +512,109 @@ esp_err_t argus_nvs_core_commit(argus_nvs_core_t *core, const argus_config_paylo
     core->active_generation = next_gen;
     memcpy(&core->active_config, &final_slot.payload, sizeof(argus_config_payload_t));
     core->has_valid_config = true;
+
     return ESP_OK;
+}
+
+/**
+ * @brief Pure boot-recovery transaction operating on injected driver.
+ *
+ * Checks for a pending factory-reset marker. If pending is true,
+ * erases reset-scope data and clears the marker. Returns the exact
+ * originating error on failure without translating it.
+ *
+ * Missing marker/namespace is normal and treated as not pending.
+ * Real storage errors are propagated.
+ *
+ * @param drv  Injected storage driver (production or mock).
+ * @return ESP_OK if no recovery needed or recovery completed.
+ *         Exact error if marker read, erase, or clear failed.
+ */
+esp_err_t argus_nvs_core_recovery_check(const argus_nvs_driver_t *drv)
+{
+    if (!drv) return ESP_ERR_INVALID_ARG;
+    if (!drv->read_reset_pending || !drv->erase_all || !drv->write_reset_pending) return ESP_ERR_INVALID_ARG;
+
+    bool reset_pending = false;
+    esp_err_t pend_err = drv->read_reset_pending(drv->ctx, &reset_pending);
+    if (pend_err != ESP_OK) {
+        return pend_err;
+    }
+    if (!reset_pending) {
+        return ESP_OK;
+    }
+
+    /* Pending is true — erase reset-scope data */
+    esp_err_t erase_err = drv->erase_all(drv->ctx);
+    if (erase_err != ESP_OK) {
+        /* Do not clear the marker — recovery will retry on next boot */
+        return erase_err;
+    }
+
+    /* Erase succeeded — clear the marker */
+    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+    if (clear_err != ESP_OK) {
+        /* Marker remains true — next boot will re-erase (idempotent) */
+        return clear_err;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Pure factory-reset transaction operating on caller-owned core and injected driver.
+ *
+ * Orchestrates the durable reset transaction:
+ *   1. Write pending=true (fail-closed: returns immediately on failure)
+ *   2. Erase reset-scope data (returns immediately on failure; marker preserved)
+ *   3. Clear pending (non-fatal: erase succeeded, so core reinit proceeds)
+ *   4. Reinitialize caller-owned core to match the erased state
+ *
+ * Production policy: if clearing the pending marker fails after a successful
+ * erase, the core is still reinitialized to match the erased storage. The
+ * marker remains true and will trigger an idempotent recovery erase on next
+ * boot. The clear error is returned to the caller.
+ *
+ * @param core  Caller-owned core state to reinitialize.
+ * @param drv   Injected storage driver (production or mock).
+ * @return ESP_OK on full success.
+ *         Exact error from the first failing operation.
+ */
+esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_driver_t *drv)
+{
+    if (!core || !drv) return ESP_ERR_INVALID_ARG;
+    if (!drv->write_reset_pending || !drv->erase_all) return ESP_ERR_INVALID_ARG;
+
+    /* Step 1: Mark pending before destructive operations */
+    esp_err_t pend_err = drv->write_reset_pending(drv->ctx, true);
+    if (pend_err != ESP_OK) {
+        return pend_err;
+    }
+
+    /* Step 2: Erase reset-scope data (CFG + SYS namespaces) */
+    esp_err_t erase_err = drv->erase_all(drv->ctx);
+    if (erase_err != ESP_OK) {
+        /* Do NOT clear pending — recovery will re-erase on next boot */
+        return erase_err;
+    }
+
+    /* Step 3: Clear pending marker */
+    esp_err_t clear_err = drv->write_reset_pending(drv->ctx, false);
+    if (clear_err != ESP_OK) {
+        /* Erase succeeded but marker stuck — next boot will re-erase
+         * (idempotent). Continue to reinit core to match erased state.
+         * This is the documented production policy. */
+    }
+
+    /* Step 4: Reinitialize core to match erased/uncommissioned state */
+    esp_err_t core_err = argus_nvs_core_init(core, drv);
+    if (core_err != ESP_OK) {
+        return core_err;
+    }
+
+    /* Return clear_err if the pending-clear failed but erase and core
+     * succeeded — caller knows the marker is stuck. */
+    return clear_err;
 }
 
 static const argus_nvs_driver_t *get_driver(void)
@@ -326,107 +625,80 @@ static const argus_nvs_driver_t *get_driver(void)
 esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
 {
     s_custom_driver = driver;
+    s_initialized = false;
 
     esp_err_t flash_err = ESP_OK;
     if (!s_custom_driver) {
         flash_err = nvs_flash_init();
         if (flash_err == ESP_ERR_NVS_NO_FREE_PAGES || flash_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            nvs_flash_erase();
+            esp_err_t erase_err = nvs_flash_erase();
+            if (erase_err != ESP_OK) {
+                ESP_LOGE(TAG, "nvs_flash_erase() failed: %s", esp_err_to_name(erase_err));
+                return erase_err;
+            }
             flash_err = nvs_flash_init();
+        }
+        if (flash_err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_flash_init() failed: %s", esp_err_to_name(flash_err));
+            return flash_err;
         }
         ESP_LOGI(TAG, "nvs_flash_init() result: %s (%d)", esp_err_to_name(flash_err), flash_err);
     }
 
     const argus_nvs_driver_t *drv = get_driver();
 
-    // Check for power-interrupted factory reset recovery
-    bool reset_pending = false;
-    drv->read_reset_pending(drv->ctx, &reset_pending);
-    if (reset_pending) {
-        ESP_LOGW(TAG, "Factory reset pending marker detected. Recovering...");
-        drv->erase_all(drv->ctx);
-        drv->write_reset_pending(drv->ctx, false);
+    /* Delegate boot-recovery to the same pure helper exercised by tests.
+     * The reset-pending marker lives in ARGUS_NVS_NS_RST, which
+     * factory-reset erasure does not touch, ensuring durability. */
+    esp_err_t recovery_err = argus_nvs_core_recovery_check(drv);
+    if (recovery_err != ESP_OK) {
+        ESP_LOGE(TAG, "Boot recovery failed: %s", esp_err_to_name(recovery_err));
+        return recovery_err;
     }
 
-    // Load dual slots
-    argus_cfg_slot_t slot_a = {0}, slot_b = {0};
-    esp_err_t err_a = drv->read_slot(drv->ctx, 0, &slot_a);
-    bool valid_a = (err_a == ESP_OK) && is_slot_valid(&slot_a);
-
-    esp_err_t err_b = drv->read_slot(drv->ctx, 1, &slot_b);
-    bool valid_b = (err_b == ESP_OK) && is_slot_valid(&slot_b);
-
-    uint8_t selector = 0xFF;
-    esp_err_t err_sel = drv->read_selector(drv->ctx, &selector);
-
-    ESP_LOGI(TAG, "Slot A (0): read=%s len=%u schema=%u gen=%lu marker=0x%08X valid=%s",
-             esp_err_to_name(err_a), (unsigned)slot_a.payload_length, (unsigned)slot_a.schema_version,
-             (unsigned long)slot_a.config_generation, (unsigned)slot_a.valid_marker, valid_a ? "YES" : "NO");
-    ESP_LOGI(TAG, "Slot B (1): read=%s len=%u schema=%u gen=%lu marker=0x%08X valid=%s",
-             esp_err_to_name(err_b), (unsigned)slot_b.payload_length, (unsigned)slot_b.schema_version,
-             (unsigned long)slot_b.config_generation, (unsigned)slot_b.valid_marker, valid_b ? "YES" : "NO");
-    ESP_LOGI(TAG, "Stored Selector: read=%s active_slot=0x%02X", esp_err_to_name(err_sel), selector);
-
-    if (valid_a && valid_b) {
-        if (selector == 0) {
-            s_active_slot_index = 0;
-            memcpy(&s_active_config, &slot_a.payload, sizeof(argus_config_payload_t));
-            s_active_generation = slot_a.config_generation;
-            s_has_valid_config = true;
-        } else if (selector == 1) {
-            s_active_slot_index = 1;
-            memcpy(&s_active_config, &slot_b.payload, sizeof(argus_config_payload_t));
-            s_active_generation = slot_b.config_generation;
-            s_has_valid_config = true;
-        } else {
-            // Corrupt selector: fall back to generation comparison
-            if (argus_nvs_config_gen_is_newer(slot_b.config_generation, slot_a.config_generation)) {
-                s_active_slot_index = 1;
-                memcpy(&s_active_config, &slot_b.payload, sizeof(argus_config_payload_t));
-                s_active_generation = slot_b.config_generation;
-            } else {
-                s_active_slot_index = 0;
-                memcpy(&s_active_config, &slot_a.payload, sizeof(argus_config_payload_t));
-                s_active_generation = slot_a.config_generation;
-            }
-            s_has_valid_config = true;
-            drv->write_selector(drv->ctx, s_active_slot_index);
-        }
-    } else if (valid_a) {
-        s_active_slot_index = 0;
-        memcpy(&s_active_config, &slot_a.payload, sizeof(argus_config_payload_t));
-        s_active_generation = slot_a.config_generation;
-        s_has_valid_config = true;
-    } else if (valid_b) {
-        s_active_slot_index = 1;
-        memcpy(&s_active_config, &slot_b.payload, sizeof(argus_config_payload_t));
-        s_active_generation = slot_b.config_generation;
-        s_has_valid_config = true;
-    } else {
-        // Uncommissioned defaults
-        memset(&s_active_config, 0, sizeof(argus_config_payload_t));
-        snprintf(s_active_config.client_id, sizeof(s_active_config.client_id), "default_client");
-        snprintf(s_active_config.unit_id, sizeof(s_active_config.unit_id), "unit_01");
-        snprintf(s_active_config.device_name, sizeof(s_active_config.device_name), "Argus Peristaltic Pump V2");
-        s_active_generation = 0;
-        s_has_valid_config = false;
+    /* Delegate to the single core algorithm for slot selection,
+     * HWM enforcement, monotonic provisioning, and selector recovery. */
+    esp_err_t core_err = argus_nvs_core_init(&s_prod_core, drv);
+    if (core_err != ESP_OK) {
+        ESP_LOGE(TAG, "Core init failed: %s", esp_err_to_name(core_err));
+        return core_err;
     }
 
-    bool is_comm = argus_nvs_config_is_commissioned(&s_active_config);
+    /* If no valid config, set uncommissioned defaults */
+    if (!s_prod_core.has_valid_config) {
+        snprintf(s_prod_core.active_config.client_id,
+                 sizeof(s_prod_core.active_config.client_id), "default_client");
+        snprintf(s_prod_core.active_config.unit_id,
+                 sizeof(s_prod_core.active_config.unit_id), "unit_01");
+        snprintf(s_prod_core.active_config.device_name,
+                 sizeof(s_prod_core.active_config.device_name), "Argus Peristaltic Pump V2");
+    }
+
+    bool is_comm = argus_nvs_config_is_commissioned(&s_prod_core.active_config);
     ESP_LOGI(TAG, "Selected LKG Slot: %u (gen %lu), Commissioned: %s (%s)",
-             s_active_slot_index, (unsigned long)s_active_generation,
-             is_comm ? "YES" : "NO", argus_nvs_config_get_uncommissioned_reason(&s_active_config));
+             s_prod_core.active_slot_index, (unsigned long)s_prod_core.active_generation,
+             is_comm ? "YES" : "NO",
+             argus_nvs_config_get_uncommissioned_reason(&s_prod_core.active_config));
 
     s_initialized = true;
     return ESP_OK;
 }
 
-esp_err_t argus_nvs_config_get(argus_config_payload_t *out_cfg)
+esp_err_t argus_nvs_config_get_effective(argus_config_payload_t *out_cfg, bool *out_has_persisted_config)
 {
-    if (!out_cfg) return ESP_ERR_INVALID_ARG;
-    if (!s_initialized) argus_nvs_config_init(NULL);
-    memcpy(out_cfg, &s_active_config, sizeof(argus_config_payload_t));
-    return s_has_valid_config ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (!out_cfg || !out_has_persisted_config) return ESP_ERR_INVALID_ARG;
+    
+    if (!s_initialized) {
+        esp_err_t err = argus_nvs_config_init(NULL);
+        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            return err;
+        }
+    }
+    
+    memcpy(out_cfg, &s_prod_core.active_config, sizeof(argus_config_payload_t));
+    *out_has_persisted_config = s_prod_core.has_valid_config;
+    
+    return ESP_OK;
 }
 
 esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg)
@@ -475,102 +747,61 @@ esp_err_t argus_nvs_config_commit(const argus_config_payload_t *in_cfg)
 {
     if (!in_cfg) return ESP_ERR_INVALID_ARG;
 
-    if (strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
+    if (strlen(in_cfg->sta_pass) > 0 && strcmp(in_cfg->sta_pass, ARGUS_CONFIG_MASK_STRING) == 0) {
         ESP_LOGE(TAG, "Commit rejected: Mask string submitted as password");
         return ESP_ERR_INVALID_ARG;
     }
 
     esp_err_t err = argus_nvs_config_validate(in_cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Commit rejected: Staged payload failed Schema V1 validation (%s)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Commit rejected: Staged payload failed validation (%s)", esp_err_to_name(err));
         return err;
     }
 
-    const argus_nvs_driver_t *drv = get_driver();
-    uint8_t inactive_slot_index = (s_active_slot_index == 0) ? 1 : 0;
-
-    argus_cfg_slot_t slot;
-    memset(&slot, 0, sizeof(argus_cfg_slot_t));
-    slot.schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
-    slot.config_generation = (s_active_generation == 0xFFFFFFFFU) ? 1 : s_active_generation + 1;
-    slot.payload_length = sizeof(argus_config_payload_t);
-    memcpy(&slot.payload, in_cfg, sizeof(argus_config_payload_t));
-    slot.crc32 = argus_nvs_config_calc_crc32(&slot.payload);
-    slot.valid_marker = ARGUS_CONFIG_VALID_MARKER;
-
-    // Step 1: Write inactive slot
-    ESP_LOGI(TAG, "Commit Step 1-3/12: Writing inactive slot %u (gen %lu)...", inactive_slot_index, (unsigned long)slot.config_generation);
-    err = drv->write_slot(drv->ctx, inactive_slot_index, &slot);
+    /* Delegate to the single core commit algorithm.
+     * This handles slot write, readback verify, HWM write (before selector),
+     * selector activation, and final verify — the same path tests exercise. */
+    err = argus_nvs_core_commit(&s_prod_core, in_cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 1 (slot write error): %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Core commit failed: %s", esp_err_to_name(err));
         return err;
     }
 
-    // Step 4-6: Production readback verification
-    ESP_LOGI(TAG, "Commit Step 4-6/12: Reopening namespace & verifying production readback...");
-    argus_cfg_slot_t readback;
-    memset(&readback, 0, sizeof(argus_cfg_slot_t));
-    err = drv->read_slot(drv->ctx, inactive_slot_index, &readback);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 5 (readback read error): %s", esp_err_to_name(err));
-        return err;
-    }
-    if (!is_slot_valid(&readback)) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 6 (readback slot validation failed)");
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (memcmp(&readback.payload, in_cfg, sizeof(argus_config_payload_t)) != 0) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 6 (readback payload byte mismatch)");
-        return ESP_ERR_INVALID_STATE;
+    /* Log commissioning status for diagnostics */
+    if (argus_nvs_config_is_commissioned(in_cfg)) {
+        ESP_LOGI(TAG, "Commit complete: Payload is fully commissioned (STA credentials present)");
+    } else {
+        ESP_LOGW(TAG, "Commit complete: Payload is identity-only (no STA credentials). "
+                 "Reason: %s", argus_nvs_config_get_uncommissioned_reason(in_cfg));
     }
 
-    // Step 7-8: Commit active selector
-    ESP_LOGI(TAG, "Commit Step 7-8/12: Committing active selector to %u...", inactive_slot_index);
-    err = drv->write_selector(drv->ctx, inactive_slot_index);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 7 (selector write error): %s", esp_err_to_name(err));
-        return err;
-    }
-
-    // Step 9-11: Production LKG loader verification
-    ESP_LOGI(TAG, "Commit Step 9-11/12: Verifying LKG loader selection...");
-    uint8_t read_sel = 0xFF;
-    err = drv->read_selector(drv->ctx, &read_sel);
-    if (err != ESP_OK || read_sel != inactive_slot_index) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 10 (selector readback verification failed)");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (!argus_nvs_config_is_commissioned(in_cfg)) {
-        ESP_LOGE(TAG, "NVS commit failed at Step 11 (is_commissioned evaluated false)");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // Update in-memory active state only after 100% verification
-    s_active_slot_index = inactive_slot_index;
-    s_active_generation = slot.config_generation;
-    memcpy(&s_active_config, in_cfg, sizeof(argus_config_payload_t));
-    s_has_valid_config = true;
-
-    ESP_LOGI(TAG, "Commit Step 12/12: NVS commit & production readback verification PASSED cleanly.");
+    ESP_LOGI(TAG, "NVS commit & core verification PASSED cleanly.");
     return ESP_OK;
 }
 
 esp_err_t argus_nvs_config_factory_reset(void)
 {
     const argus_nvs_driver_t *drv = get_driver();
-    drv->write_reset_pending(drv->ctx, true);
-    drv->erase_all(drv->ctx);
-    drv->write_reset_pending(drv->ctx, false);
 
-    memset(&s_active_config, 0, sizeof(argus_config_payload_t));
-    snprintf(s_active_config.client_id, sizeof(s_active_config.client_id), "default_client");
-    snprintf(s_active_config.unit_id, sizeof(s_active_config.unit_id), "unit_01");
-    snprintf(s_active_config.device_name, sizeof(s_active_config.device_name), "Argus Peristaltic Pump V2");
-    s_active_generation = 0;
-    s_has_valid_config = false;
+    /* Delegate to the same pure helper exercised by tests */
+    esp_err_t err = argus_nvs_core_factory_reset(&s_prod_core, drv);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "Factory reset transaction failed: %s", esp_err_to_name(err));
+        /* On pending-clear failure (erase succeeded), the core has already
+         * been reinitialized by the helper. Set defaults regardless. */
+    }
 
-    return ESP_OK;
+    /* Set uncommissioned defaults if core was reinitialized */
+    if (!s_prod_core.has_valid_config) {
+        snprintf(s_prod_core.active_config.client_id,
+                 sizeof(s_prod_core.active_config.client_id), "default_client");
+        snprintf(s_prod_core.active_config.unit_id,
+                 sizeof(s_prod_core.active_config.unit_id), "unit_01");
+        snprintf(s_prod_core.active_config.device_name,
+                 sizeof(s_prod_core.active_config.device_name), "Argus Peristaltic Pump V2");
+    }
+
+    return err;
 }
 
 void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_payload_t *out_masked)
@@ -582,19 +813,18 @@ void argus_nvs_config_mask(const argus_config_payload_t *in_cfg, argus_config_pa
     }
 }
 
-esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
+esp_err_t argus_nvs_core_get_observation_snapshot(const argus_nvs_driver_t *drv, argus_nvs_observation_t *out_obs)
 {
-    if (!out_obs) return ESP_ERR_INVALID_ARG;
+    if (!drv || !out_obs) return ESP_ERR_INVALID_ARG;
 
-    const argus_nvs_driver_t *drv = get_driver();
     esp_err_t first_unexpected = ESP_OK;
+    memset(out_obs, 0, sizeof(*out_obs));
 
     // Read selector
-    memset(out_obs, 0, sizeof(*out_obs));
     out_obs->selector_status = drv->read_selector(drv->ctx, &out_obs->selector);
     if (out_obs->selector_status == ESP_OK) {
         out_obs->selector_present = true;
-    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->selector_status == ESP_ERR_NOT_FOUND || out_obs->selector_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->selector_present = false;
     } else {
         out_obs->selector_present = false;
@@ -606,7 +836,7 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     if (out_obs->slot_a_status == ESP_OK) {
         out_obs->slot_a_present = true;
         out_obs->slot_a_valid = is_slot_valid(&out_obs->slot_a);
-    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->slot_a_status == ESP_ERR_NOT_FOUND || out_obs->slot_a_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->slot_a_present = false;
         out_obs->slot_a_valid = false;
     } else {
@@ -620,7 +850,7 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     if (out_obs->slot_b_status == ESP_OK) {
         out_obs->slot_b_present = true;
         out_obs->slot_b_valid = is_slot_valid(&out_obs->slot_b);
-    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND) {
+    } else if (out_obs->slot_b_status == ESP_ERR_NOT_FOUND || out_obs->slot_b_status == ESP_ERR_NVS_NOT_FOUND) {
         out_obs->slot_b_present = false;
         out_obs->slot_b_valid = false;
     } else {
@@ -630,4 +860,10 @@ esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out
     }
 
     return first_unexpected;
+}
+
+esp_err_t argus_nvs_config_get_observation_snapshot(argus_nvs_observation_t *out_obs)
+{
+    if (!out_obs) return ESP_ERR_INVALID_ARG;
+    return argus_nvs_core_get_observation_snapshot(get_driver(), out_obs);
 }
