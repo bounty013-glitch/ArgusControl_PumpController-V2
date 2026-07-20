@@ -145,14 +145,18 @@ bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode, argus_sta_sta
 static void auto_retry_timer_cb(TimerHandle_t xTimer)
 {
     argus_net_event_t evt = { .type = ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP, .timer_generation = s_timer_generation };
-    argus_net_mgr_post_event(&evt);
+    if (argus_net_mgr_post_event(&evt) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to post auto-retry event to queue");
+    }
 }
 
 static void ip_timeout_timer_cb(TimerHandle_t xTimer)
 {
     /* Fake a disconnect reason 0 for IP timeout */
     argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED, .disconnect_reason = 0, .timer_generation = s_timer_generation };
-    argus_net_mgr_post_event(&evt);
+    if (argus_net_mgr_post_event(&evt) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to post IP timeout event to queue");
+    }
 }
 static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
 
@@ -238,28 +242,40 @@ static void net_mgr_task(void *pvParameters)
                     break;
 
                 case ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST:
-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        if (argus_net_can_manual_reconnect(s_net_mode, s_sta_state)) {
-                            ESP_LOGI(TAG, "Manual reconnect requested");
-                            xTimerStop(s_auto_retry_timer, 0);
+                xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+                if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
+                    if (argus_net_can_manual_reconnect(s_net_mode, s_sta_state)) {
+                        ESP_LOGI(TAG, "Manual reconnect requested");
+                        s_timer_generation++;
+                        xTimerStop(s_auto_retry_timer, 0);
+                        xTimerStop(s_ip_timeout_timer, 0);
+                        s_consecutive_failures = 0;
+                        s_auth_failures = 0;
+                        esp_wifi_disconnect();
+
+                        if (esp_wifi_connect() == ESP_OK) {
                             s_sta_state = ARGUS_STA_CONNECTING;
-                            if (esp_wifi_connect() != ESP_OK) {
-                                ESP_LOGE(TAG, "esp_wifi_connect() failed");
-                            }
+                        } else {
+                            ESP_LOGE(TAG, "esp_wifi_connect() failed");
+                            s_sta_state = ARGUS_STA_IDLE;
                         }
                     }
-                    xSemaphoreGive(s_net_mutex);
-                    break;
+                }
+                xSemaphoreGive(s_net_mutex);
+                break;
 
                 case ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    if (s_sta_state == ARGUS_STA_RETRY_WAIT) {
+                    if (evt.timer_generation != s_timer_generation) {
+                        ESP_LOGW(TAG, "Stale auto-reconnect timer event ignored");
+                    } else if (s_sta_state == ARGUS_STA_RETRY_WAIT) {
                         ESP_LOGI(TAG, "Auto-reconnect timer fired. Retrying connection...");
-                        s_sta_state = ARGUS_STA_CONNECTING;
-                        if (esp_wifi_connect() != ESP_OK) {
-                                ESP_LOGE(TAG, "esp_wifi_connect() failed");
-                            }
+                        if (esp_wifi_connect() == ESP_OK) {
+                            s_sta_state = ARGUS_STA_CONNECTING;
+                        } else {
+                            ESP_LOGE(TAG, "esp_wifi_connect() failed");
+                            s_sta_state = ARGUS_STA_IDLE;
+                        }
                     }
                     xSemaphoreGive(s_net_mutex);
                     break;
@@ -318,6 +334,11 @@ static void net_mgr_task(void *pvParameters)
                         const char *reason_name;
 
                         if (evt.disconnect_reason == 0) {
+                            if (evt.timer_generation != s_timer_generation) {
+                                ESP_LOGW(TAG, "Stale IP timeout event ignored");
+                                xSemaphoreGive(s_net_mutex);
+                                break;
+                            }
                             reason_name = "IP_ACQUISITION_TIMEOUT";
                             s_last_disconnect_category = ARGUS_DISCONNECT_CAT_IP_TIMEOUT;
                         } else {
@@ -488,9 +509,11 @@ esp_err_t argus_net_mgr_init(void)
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         esp_wifi_start();
+        s_sta_state = ARGUS_STA_CONNECTING;
         if (esp_wifi_connect() != ESP_OK) {
-                                ESP_LOGE(TAG, "esp_wifi_connect() failed");
-                            }
+            ESP_LOGE(TAG, "esp_wifi_connect() failed");
+            s_sta_state = ARGUS_STA_IDLE;
+        }
 
         /* Start HTTP portal — non-fatal if it fails */
         esp_err_t http_err = argus_http_server_start();
@@ -629,6 +652,9 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
     }
 
     *net_mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    s_timer_generation++;
+    xTimerStop(s_auto_retry_timer, 0);
+    xTimerStop(s_ip_timeout_timer, 0);
 
     // Drop dispatch lock
     if (ops->unlock_dispatch) ops->unlock_dispatch(ops->ctx);
@@ -967,13 +993,13 @@ esp_err_t argus_net_mgr_orchestrate_wifi_apply(
     const argus_wifi_apply_ops_t *ops)
 {
     if (ops == NULL || net_mode == NULL || sta_state == NULL) return ESP_ERR_INVALID_ARG;
-    if (ops->stop_timers == NULL || ops->revoke_supervisory == NULL || ops->stop_broker == NULL || 
-        ops->load_config == NULL || ops->disconnect_sta == NULL || ops->apply_sta_config == NULL || 
+    if (ops->stop_timers == NULL || ops->revoke_supervisory == NULL || ops->stop_broker == NULL ||
+        ops->load_config == NULL || ops->disconnect_sta == NULL || ops->apply_sta_config == NULL ||
         ops->connect_sta == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (*net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE && 
-        *net_mode != ARGUS_NET_MODE_COMMISSIONED_STA && 
+    if (*net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
+        *net_mode != ARGUS_NET_MODE_COMMISSIONED_STA &&
         *net_mode != ARGUS_NET_MODE_NETWORK_FAULT) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -982,7 +1008,7 @@ esp_err_t argus_net_mgr_orchestrate_wifi_apply(
 
     err = ops->stop_timers(ops->ctx);
     if (err != ESP_OK) return err;
-    
+
     s_timer_generation++; // Invalidate pending retry events
 
     err = ops->revoke_supervisory(ops->ctx);
@@ -1435,9 +1461,12 @@ uint32_t argus_net_mgr_get_consecutive_failures(void) { return s_consecutive_fai
 
 uint32_t argus_net_mgr_get_retry_seconds(void)
 {
-    if (s_sta_state == ARGUS_STA_RETRY_WAIT && s_auto_retry_timer) {
-        TickType_t remaining = xTimerGetExpiryTime(s_auto_retry_timer) - xTaskGetTickCount();
-        return (remaining * portTICK_PERIOD_MS) / 1000;
+    if (s_sta_state == ARGUS_STA_RETRY_WAIT && s_auto_retry_timer && xTimerIsTimerActive(s_auto_retry_timer)) {
+        TickType_t expiry = xTimerGetExpiryTime(s_auto_retry_timer);
+        TickType_t now = xTaskGetTickCount();
+        if (expiry > now) {
+            return ((expiry - now) * portTICK_PERIOD_MS) / 1000;
+        }
     }
     return 0;
 }
