@@ -273,8 +273,8 @@
 | **Date Recorded** | 2026-07-20 |
 | **System Area** | Network Manager / API |
 | **Phase Introduced** | Phase 4B.3a (Reverted) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Target Phase | Phase 4B.3a |
+| **Status** | IN PROGRESS |
+| **Target Phase** | Phase 4B.3a |
 | **Operator Decision** | 2026-07-20 |
 
 **Limitation:** The device currently connects to Wi-Fi automatically. If the connection drops or fails due to an authentication error, there is no operator visibility into the failure reason (e.g., bad password, AP out of range), no classification of error types, no bounded retry logic preventing infinite loops on authentication failure, and no HTTP API for the operator to manually request a connection retry without a system restart.
