@@ -77,24 +77,40 @@ argus_disconnect_category_t argus_net_classify_disconnect(uint8_t reason, const 
 
     switch(reason) {
         /* Authentication / Credential Failures */
-        case WIFI_REASON_AUTH_EXPIRE:             name = "AUTH_EXPIRE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_AUTH_LEAVE:              name = "AUTH_LEAVE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_MIC_FAILURE:             name = "MIC_FAILURE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:  name = "4WAY_HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_802_1X_AUTH_FAILED:      name = "802_1X_AUTH_FAILED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_AUTH_FAIL:               name = "AUTH_FAIL"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:       name = "HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_AUTH_EXPIRE:                       name = "AUTH_EXPIRE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_AUTH_LEAVE:                        name = "AUTH_LEAVE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_NOT_AUTHED:                        name = "NOT_AUTHED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_ASSOC_NOT_AUTHED:                  name = "ASSOC_NOT_AUTHED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_MIC_FAILURE:                       name = "MIC_FAILURE"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:            name = "4WAY_HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:          name = "GROUP_KEY_UPDATE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_IE_IN_4WAY_DIFFERS:                name = "IE_IN_4WAY_DIFFERS"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_GROUP_CIPHER_INVALID:              name = "GROUP_CIPHER_INVALID"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_PAIRWISE_CIPHER_INVALID:           name = "PAIRWISE_CIPHER_INVALID"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_AKMP_INVALID:                      name = "AKMP_INVALID"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_UNSUPP_RSN_IE_VERSION:             name = "UNSUPP_RSN_IE_VERSION"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_INVALID_RSN_IE_CAP:                name = "INVALID_RSN_IE_CAP"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_802_1X_AUTH_FAILED:                name = "802_1X_AUTH_FAILED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_CIPHER_SUITE_REJECTED:             name = "CIPHER_SUITE_REJECTED"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_INVALID_PMKID:                     name = "INVALID_PMKID"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_AUTH_FAIL:                         name = "AUTH_FAIL"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:                 name = "HANDSHAKE_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY: name = "NO_AP_FOUND_W_COMPATIBLE_SECURITY"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD: name = "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD"; cat = ARGUS_DISCONNECT_CAT_AUTHENTICATION; break;
 
         /* AP / Environment Failures */
-        case WIFI_REASON_NO_AP_FOUND:             name = "NO_AP_FOUND"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_ASSOC_FAIL:              name = "ASSOC_FAIL"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_CONNECTION_FAIL:         name = "CONNECTION_FAIL"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_BEACON_TIMEOUT:          name = "BEACON_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_ASSOC_EXPIRE:            name = "ASSOC_EXPIRE"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_ASSOC_TOOMANY:           name = "ASSOC_TOOMANY"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
-        case WIFI_REASON_BSS_TRANSITION_DISASSOC: name = "BSS_TRANSITION_DISASSOC"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_ASSOC_EXPIRE:                      name = "ASSOC_EXPIRE"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_ASSOC_TOOMANY:                     name = "ASSOC_TOOMANY"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_NOT_ASSOCED:                       name = "NOT_ASSOCED"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_ASSOC_LEAVE:                       name = "ASSOC_LEAVE"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_BSS_TRANSITION_DISASSOC:           name = "BSS_TRANSITION_DISASSOC"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_BEACON_TIMEOUT:                    name = "BEACON_TIMEOUT"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_NO_AP_FOUND:                       name = "NO_AP_FOUND"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_ASSOC_FAIL:                        name = "ASSOC_FAIL"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_CONNECTION_FAIL:                   name = "CONNECTION_FAIL"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:     name = "NO_AP_FOUND_IN_RSSI_THRESHOLD"; cat = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE; break;
 
-        default:                                  name = "UNKNOWN"; cat = ARGUS_DISCONNECT_CAT_UNKNOWN; break;
+        default:                                            name = "UNKNOWN"; cat = ARGUS_DISCONNECT_CAT_UNKNOWN; break;
     }
 
     if (out_name) {
@@ -202,6 +218,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
+static void argus_wifi_apply_get_production_ops(argus_wifi_apply_ops_t *ops);
+
 static void net_mgr_task(void *pvParameters)
 {
     argus_net_event_t evt;
@@ -256,10 +274,13 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_STA_CONNECTED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
                     xTimerStop(s_ip_timeout_timer, 0);
+                    xTimerStop(s_auto_retry_timer, 0);
                     s_sta_state = ARGUS_STA_CONNECTED;
                     s_consecutive_failures = 0;
                     s_auth_failures = 0;
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
+                    s_last_disconnect_category = ARGUS_DISCONNECT_CAT_NONE;
+                    s_last_disconnect_reason = 0;
+                                        if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
                         s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA ||
                         s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
                         /* Commissioned boot lands in AP_DISCOVERABLE (APSTA).
@@ -303,6 +324,8 @@ static void net_mgr_task(void *pvParameters)
                         s_consecutive_failures++;
                         if (s_last_disconnect_category == ARGUS_DISCONNECT_CAT_AUTHENTICATION) {
                             s_auth_failures++;
+                        } else {
+                            s_auth_failures = 0;
                         }
 
                         ESP_LOGW(TAG, "STA disconnected: reason=%d (%s), category=%d", evt.disconnect_reason, reason_name, s_last_disconnect_category);
@@ -331,29 +354,15 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_APPLY_WIFI_CONFIG: {
                     ESP_LOGI(TAG, "Applying new Wi-Fi credentials dynamically...");
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-                    xTimerStop(s_auto_retry_timer, 0);
-                    s_consecutive_failures = 0;
-                    s_auth_failures = 0;
 
-                    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE || s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA || s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        argus_config_payload_t cfg;
-                        bool has_cfg = false;
-                        if (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK && has_cfg) {
-                            wifi_config_t wifi_cfg = {0};
-                            strlcpy((char *)wifi_cfg.sta.ssid, cfg.sta_ssid, sizeof(wifi_cfg.sta.ssid));
-                            strlcpy((char *)wifi_cfg.sta.password, cfg.sta_pass, sizeof(wifi_cfg.sta.password));
-                            wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-                            esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
-                            memset(&wifi_cfg, 0, sizeof(wifi_cfg));
-                            memset(&cfg, 0, sizeof(cfg));
-                        }
+                    argus_wifi_apply_ops_t apply_ops;
+                    argus_wifi_apply_get_production_ops(&apply_ops);
 
-                        esp_wifi_disconnect();
-                        s_sta_state = ARGUS_STA_CONNECTING;
-                        if (esp_wifi_connect() != ESP_OK) {
-                                ESP_LOGE(TAG, "esp_wifi_connect() failed");
-                            }
+                    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&s_net_mode, &s_sta_state, s_sta_connected, &apply_ops);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "Wi-Fi config apply failed: %d", err);
                     }
+
                     xSemaphoreGive(s_net_mutex);
                     break;
                 }
@@ -939,11 +948,135 @@ static esp_err_t prod_revalidate_network(void *ctx) {
 }
 
 
+
+esp_err_t argus_net_mgr_orchestrate_wifi_apply(
+    argus_network_mode_t *net_mode,
+    argus_sta_state_t *sta_state,
+    bool sta_connected,
+    const argus_wifi_apply_ops_t *ops)
+{
+    if (ops == NULL || net_mode == NULL || sta_state == NULL) return ESP_ERR_INVALID_ARG;
+    if (*net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
+        *net_mode != ARGUS_NET_MODE_COMMISSIONED_STA &&
+        *net_mode != ARGUS_NET_MODE_NETWORK_FAULT) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err;
+
+    if (ops->stop_timers) {
+        ops->stop_timers(ops->ctx);
+    }
+    if (ops->revoke_supervisory) {
+        ops->revoke_supervisory(ops->ctx);
+    }
+    if (ops->stop_broker) {
+        ops->stop_broker(ops->ctx);
+    }
+
+    wifi_config_t cfg = {0};
+    bool has_cfg = false;
+    if (ops->load_config) {
+        err = ops->load_config(ops->ctx, &cfg, &has_cfg);
+        if (err != ESP_OK || !has_cfg) {
+            return ESP_ERR_NOT_FOUND;
+        }
+    }
+
+    if (sta_connected) {
+        if (ops->disconnect_sta) {
+            err = ops->disconnect_sta(ops->ctx);
+            if (err != ESP_OK) {
+                return err;
+            }
+        }
+    }
+
+    if (ops->apply_sta_config) {
+        err = ops->apply_sta_config(ops->ctx, &cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    if (ops->connect_sta) {
+        err = ops->connect_sta(ops->ctx);
+        if (err == ESP_OK) {
+            *sta_state = ARGUS_STA_CONNECTING;
+        } else {
+            *sta_state = ARGUS_STA_IDLE;
+            return err;
+        }
+    }
+
+    return ESP_OK;
+}
+
+// Prod ops implementation
+static esp_err_t wifi_apply_stop_timers(void *ctx) {
+    xTimerStop(s_auto_retry_timer, 0);
+    xTimerStop(s_ip_timeout_timer, 0);
+    s_consecutive_failures = 0;
+    s_auth_failures = 0;
+    return ESP_OK;
+}
+
+static esp_err_t wifi_apply_revoke_supervisory(void *ctx) {
+    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_NONE);
+    return ESP_OK;
+}
+
+static esp_err_t wifi_apply_stop_broker(void *ctx) {
+    if (argus_mqtt_broker_is_running()) {
+        argus_mqtt_broker_stop();
+    }
+    return ESP_OK;
+}
+
+static esp_err_t wifi_apply_load_config(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) {
+    argus_config_payload_t cfg;
+    esp_err_t err = argus_nvs_config_get_effective(&cfg, has_cfg);
+    if (err == ESP_OK && *has_cfg) {
+        memset(out_cfg, 0, sizeof(wifi_config_t));
+        strlcpy((char *)out_cfg->sta.ssid, cfg.sta_ssid, sizeof(out_cfg->sta.ssid));
+        strlcpy((char *)out_cfg->sta.password, cfg.sta_pass, sizeof(out_cfg->sta.password));
+        out_cfg->sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    return err;
+}
+
+static esp_err_t wifi_apply_disconnect_sta(void *ctx) {
+    return esp_wifi_disconnect();
+}
+
+static esp_err_t wifi_apply_apply_sta_config(void *ctx, const wifi_config_t *cfg) {
+    return esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t*)cfg);
+}
+
+static esp_err_t wifi_apply_connect_sta(void *ctx) {
+    return esp_wifi_connect();
+}
+
+static void argus_wifi_apply_get_production_ops(argus_wifi_apply_ops_t *ops) {
+    ops->stop_timers = wifi_apply_stop_timers;
+    ops->revoke_supervisory = wifi_apply_revoke_supervisory;
+    ops->stop_broker = wifi_apply_stop_broker;
+    ops->load_config = wifi_apply_load_config;
+    ops->disconnect_sta = wifi_apply_disconnect_sta;
+    ops->apply_sta_config = wifi_apply_apply_sta_config;
+    ops->connect_sta = wifi_apply_connect_sta;
+    ops->ctx = NULL;
+}
+
 esp_err_t argus_net_mgr_request_manual_reconnect(void)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    if (s_net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP ) {
+        xSemaphoreGive(s_net_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!argus_net_can_manual_reconnect(s_net_mode, s_sta_state)) {
         xSemaphoreGive(s_net_mutex);
         return ESP_ERR_NOT_SUPPORTED;
@@ -1263,7 +1396,6 @@ const char *argus_net_mgr_get_last_disconnect_reason_name(void)
         return "IP_ACQUISITION_TIMEOUT";
     }
     const char *name;
-    argus_disconnect_category_t cat;
     argus_net_classify_disconnect(s_last_disconnect_reason, &name);
     return name;
 }

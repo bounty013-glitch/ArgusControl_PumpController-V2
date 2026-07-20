@@ -126,6 +126,6 @@ This document outlines the required operator verification sequence for the Phase
     1. Reboot the controller (physically or via portal).
     2. Observe the boot sequence serial output.
 *   **Expected Dashboard/Serial Observations:**
-    *   `Pure suite: 97 distinct × 3 passes = 291/291`
+    *   `Pure suite: 98 distinct × 3 passes = 294/294`
     *   `Production isolation: VERIFIED`
 *   **Actual Result:** `[PENDING]`

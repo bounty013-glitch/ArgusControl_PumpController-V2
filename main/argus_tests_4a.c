@@ -3339,8 +3339,14 @@ static esp_err_t test_4b3a_classify_reasons(void)
     cat = argus_net_classify_disconnect(WIFI_REASON_AUTH_EXPIRE, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "AUTH_EXPIRE should be AUTHENTICATION");
 
+    cat = argus_net_classify_disconnect(WIFI_REASON_NOT_AUTHED, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "NOT_AUTHED should be AUTHENTICATION");
+
     cat = argus_net_classify_disconnect(WIFI_REASON_NO_AP_FOUND, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "NO_AP_FOUND should be AP_UNAVAILABLE");
+
+    cat = argus_net_classify_disconnect(WIFI_REASON_BEACON_TIMEOUT, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "BEACON_TIMEOUT should be AP_UNAVAILABLE");
 
     cat = argus_net_classify_disconnect(99, &name);
     TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_UNKNOWN, "99 should be UNKNOWN");
@@ -3378,6 +3384,53 @@ static esp_err_t test_4b3a_can_manual_reconnect(void)
 }
 
 
+
+static esp_err_t mock_apply_stop_timers(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_revoke_supervisory(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_stop_broker(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_load_config(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) {
+    *has_cfg = true;
+    return ESP_OK;
+}
+static esp_err_t mock_apply_disconnect_sta(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_apply_sta_config(void *ctx, const wifi_config_t *cfg) { return ESP_OK; }
+static esp_err_t mock_apply_connect_sta(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_connect_sta_fail(void *ctx) { return ESP_FAIL; }
+
+static esp_err_t test_4b3a_orchestrate_wifi_apply(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_CONNECTED;
+
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .load_config = mock_apply_load_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+
+    // Test success
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_OK, "Orchestrate apply should succeed");
+    TEST_ASSERT(sta_state == ARGUS_STA_CONNECTING, "State should be CONNECTING after successful connect call");
+
+    // Test fail
+    ops.connect_sta = mock_apply_connect_sta_fail;
+    err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Orchestrate apply should propagate fail");
+    TEST_ASSERT(sta_state == ARGUS_STA_IDLE, "State should be IDLE after failed connect call");
+
+    // Test invalid mode
+    net_mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_ERR_INVALID_STATE, "Should reject invalid mode");
+
+    return ESP_OK;
+}
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
@@ -3529,6 +3582,7 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_4b3a_classify_reasons);
         RUN_TEST(test_4b3a_evaluate_retry);
         RUN_TEST(test_4b3a_can_manual_reconnect);
+        RUN_TEST(test_4b3a_orchestrate_wifi_apply);
     }
 
     int total_executions = passed_executions + failed_executions;

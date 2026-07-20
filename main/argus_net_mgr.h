@@ -167,6 +167,24 @@ bool argus_net_mgr_is_action_required(void);
  */
 const char *argus_net_mgr_get_operator_guidance(void);
 
+
+typedef struct {
+    esp_err_t (*stop_timers)(void *ctx);
+    esp_err_t (*revoke_supervisory)(void *ctx);
+    esp_err_t (*stop_broker)(void *ctx);
+    esp_err_t (*load_config)(void *ctx, wifi_config_t *out_cfg, bool *has_cfg);
+    esp_err_t (*disconnect_sta)(void *ctx);
+    esp_err_t (*apply_sta_config)(void *ctx, const wifi_config_t *cfg);
+    esp_err_t (*connect_sta)(void *ctx);
+    void *ctx;
+} argus_wifi_apply_ops_t;
+
+esp_err_t argus_net_mgr_orchestrate_wifi_apply(
+    argus_network_mode_t *net_mode,
+    argus_sta_state_t *sta_state,
+    bool sta_connected,
+    const argus_wifi_apply_ops_t *ops);
+
 typedef struct {
     esp_err_t (*request_normal_stop)(void *ctx);
     esp_err_t (*verify_stopped)(void *ctx);

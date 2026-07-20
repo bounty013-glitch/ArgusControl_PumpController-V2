@@ -718,7 +718,7 @@ static const char PORTAL_HTML[] =
     "}else{alert(d.message||d.error||'Restart failed')}\n"
     "}).catch(()=>alert('Connection lost'))}\n"
     "function doSvcEnter(){\n"
-    "if(!confirm('Enter Local Service?\n\n- MQTT authority will be relinquished\n- STA connectivity will be disabled\n- Portal may disconnect briefly\n- The pump will enter browser-owned local service after transition completes.'))return;\n"
+    "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;\n"
     "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
     "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
     "if(d.status==='accepted'||d.status==='ok'){\n"
@@ -729,7 +729,7 @@ static const char PORTAL_HTML[] =
     "if(b){b.disabled=false;b.textContent='Enter Local Service';}\n"
     "})}\n"
     "function doSvcExit(){\n"
-    "if(!confirm('Exit Local Service?\n\nThe controller will safely exit local service and reboot. You will lose connection.'))return;\n"
+    "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;\n"
     "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
     "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
     "if(d.status==='accepted'){\n"
@@ -1108,7 +1108,7 @@ static const char WIFI_PAGE_HTML[] =
     ".then(r=>r.json()).then(d=>{"
     "if(d.status==='saved'){"
     "msg.className='alert alert-ok';"
-    "msg.textContent='WiFi saved. Restart required for changes to take effect.';"
+    "msg.textContent='Wi-Fi configuration saved. Reconnection has started. Remain connected to the Service AP and refresh the dashboard to observe progress.';"
     "msg.style.display='block';origSsid=ssid;"
     "}else{"
     "msg.className='alert alert-err';"
@@ -1344,8 +1344,12 @@ static esp_err_t config_save_handler(httpd_req_t *req)
 
     if (scope == ARGUS_CONFIG_SCOPE_WIFI) {
         argus_net_event_t evt = { .type = ARGUS_NET_EVT_APPLY_WIFI_CONFIG };
-        argus_net_mgr_post_event(&evt);
-        httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":false}");
+        esp_err_t post_err = argus_net_mgr_post_event(&evt);
+        if (post_err == ESP_OK) {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":false,\"message\":\"Wi-Fi configuration saved. Reconnection has started. Remain connected to the Service AP and refresh the dashboard to observe progress.\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"message\":\"Configuration saved but runtime apply failed (queue full). Restart required.\"}");
+        }
     } else {
         httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
     }
@@ -1392,9 +1396,15 @@ static esp_err_t reconnect_post_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         httpd_resp_set_status(req, "202 Accepted");
         httpd_resp_sendstr(req, "{\"status\":\"accepted\"}");
-    } else if (err == ESP_ERR_NOT_SUPPORTED) {
+    } else if (err == ESP_ERR_INVALID_STATE) {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"error\":\"manual reconnect not permitted in current state\"}");
+        httpd_resp_sendstr(req, "{\"error\":\"manual reconnect not permitted when uncommissioned\"}");
+    } else if (err == ESP_ERR_NOT_SUPPORTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"manual reconnect conflict in current state\"}");
+    } else if (err == ESP_ERR_NO_MEM) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "{\"error\":\"queue full\"}");
     } else {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"internal error requesting reconnect\"}");
@@ -1905,7 +1915,7 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
-        if (reg_err != ESP_OK) ESP_LOGE(TAG, "Failed to register /api/service/exit handler!");
+        if (reg_err != ESP_OK) goto rollback;
 
         reg_err = httpd_register_uri_handler(s_server, &uri_reconnect);
     if (reg_err != ESP_OK) goto rollback;
