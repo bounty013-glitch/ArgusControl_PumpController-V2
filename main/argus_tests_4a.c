@@ -3526,6 +3526,9 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_exit_rejected);
         RUN_TEST(test_service_entry_edge_cases);
         RUN_TEST(test_sta_disconnect_eval);
+        RUN_TEST(test_4b3a_classify_reasons);
+        RUN_TEST(test_4b3a_evaluate_retry);
+        RUN_TEST(test_4b3a_can_manual_reconnect);
     }
 
     int total_executions = passed_executions + failed_executions;

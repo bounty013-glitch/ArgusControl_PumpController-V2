@@ -10,14 +10,14 @@ The goal of this micro-phase is to add detailed Wi-Fi failure classification, bo
 
 ### Network Manager
 
-#### [MODIFY] [argus_net_mgr.h](file:///C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.h)
+#### [MODIFY] [argus_net_mgr.h](../main/argus_net_mgr.h)
 - Introduce `argus_sta_state_t` enum (`DISABLED`, `IDLE`, `CONNECTING`, `ASSOCIATED`, `CONNECTED`, `WAIT_RETRY`, `ACTION_REQUIRED`).
 - Introduce `argus_wifi_failure_t` enum (`NONE`, `AUTH_FAILED`, `AP_NOT_FOUND`, `IP_TIMEOUT`, `UNKNOWN`).
 - Add `sta_state`, `last_wifi_failure`, `consecutive_failures`, `retry_countdown_s`, and `operator_action_required` to `argus_net_snapshot_t`.
 - Expose a new API `argus_net_mgr_request_reconnect()` to queue a manual reconnect event.
 - Add `ARGUS_NET_EVT_WIFI_RETRY` and `ARGUS_NET_EVT_MANUAL_RECONNECT` to the event queue.
 
-#### [MODIFY] [argus_net_mgr.c](file:///C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c)
+#### [MODIFY] [argus_net_mgr.c](../main/argus_net_mgr.c)
 - Modify Wi-Fi event handlers to classify disconnect reasons (e.g., `WIFI_REASON_AUTH_EXPIRE`, `WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT`, `WIFI_REASON_NO_AP_FOUND`).
 - Create an internal bounded timer (`s_wifi_retry_timer`) triggered by disconnects or IP timeouts.
 - Implement the retry logic: 15s retry for transient/unknown/not-found. Max 3 attempts for Auth failures, then transition to `ACTION_REQUIRED` and suppress the timer.
@@ -27,14 +27,14 @@ The goal of this micro-phase is to add detailed Wi-Fi failure classification, bo
 
 ### HTTP Server & Dashboard
 
-#### [MODIFY] [argus_http_server.c](file:///C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.c)
+#### [MODIFY] [argus_http_server.c](../main/argus_http_server.c)
 - **API `GET /api/status`**: Append `sta_state`, `sta_failure_reason`, `retry_in_s`, `action_req`, and consecutive failure count to the JSON response.
 - **API `POST /api/network/reconnect`**: Add a new authenticated endpoint returning `202 Accepted` if a reconnect event is successfully queued, `409 Conflict` if already connected or in local service, and `503 Service Unavailable` if the queue is full.
 - **`PORTAL_HTML`**: Expand the Network rows to show human-readable connection status, failure reasons, countdowns, and an actionable "Reconnect Wi-Fi" button that calls the new POST endpoint.
 
 ### Pure Testing
 
-#### [MODIFY] [argus_tests_4a.c](file:///C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+#### [MODIFY] [argus_tests_4a.c](../main/argus_tests_4a.c)
 - Add new test cases to explicitly verify:
   - Disconnect reason classification sets the correct internal failure enum.
   - 15-second retry timer is initialized and triggers correctly.

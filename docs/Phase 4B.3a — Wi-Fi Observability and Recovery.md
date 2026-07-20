@@ -37,6 +37,6 @@ The firmware was successfully compiled from scratch using `ESP-IDF v5.5.3`.
 
 ## Next Steps
 
-1.  Please review the generated [Phase 4B.3a Physical Tests.md](file:///C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/Phase%204B.3a%20Physical%20Tests.md) checklist.
+1.  Please review the generated [Phase 4B.3a Physical Tests.md](./Phase%204B.3a%20Physical%20Tests.md) checklist.
 2.  Flash the controller and execute the test sequence to physically verify the new dashboard UI and failure recovery transitions.
 3.  Report back with the serial logs of the boot sequence indicating that the 97 tests passed successfully.

@@ -73,7 +73,8 @@ typedef enum {
     ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED,
     ARGUS_NET_EVT_RESTART_REQUEST,         /**< Coordinated restart (deferred to net_mgr task) */
     ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
-    ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP    /**< Timer wakeup for auto-reconnect */
+    ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP,   /**< Timer wakeup for auto-reconnect */
+    ARGUS_NET_EVT_APPLY_WIFI_CONFIG        /**< Apply new Wi-Fi credentials without restart */
 } argus_net_event_type_t;
 
 /* Pure helpers for classification and retry decisions */
@@ -203,6 +204,8 @@ esp_err_t argus_net_mgr_orchestrate_service_entry(argus_network_mode_t *net_mode
  * @param requested_owner Target local owner (ARGUS_AUTH_OWNER_BROWSER or ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI).
  * @return ESP_OK on verified success, error code on failure.
  */
+esp_err_t argus_net_mgr_request_manual_reconnect(void);
+
 esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner);
 
 /**
@@ -241,6 +244,14 @@ typedef struct {
     bool sta_ip_acquired;
     bool ap_started;
     bool mqtt_broker_running;
+    argus_sta_state_t sta_state;
+    argus_disconnect_category_t last_disconnect_category;
+    uint8_t last_disconnect_reason;
+    uint32_t consecutive_failures;
+    uint32_t seconds_until_retry;
+    bool action_required;
+    bool manual_reconnect_permitted;
+    char sta_ip_address[16];
 } argus_net_snapshot_t;
 
 esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);
