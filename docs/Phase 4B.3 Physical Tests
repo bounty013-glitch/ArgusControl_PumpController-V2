@@ -18,8 +18,15 @@ A pasted log is ideal; a screenshot is sufficient if it contains those facts.
 -No panic or unexpected reboot.
 I do not need all 249 lines unless something fails.
 
-## 3. Entry from UNCOMMISSIONED_AP - PASSED
-**Evidence Provided:** Screenshots showing confirmation pop-up, transition pending page, and successful transition to `SERVICE_AP_ONLY` with `LOCAL_SERVICE`/`BROWSER` authority.
+## 3. Entry from UNCOMMISSIONED_AP - ❌ FAILED (Awaiting Retest)
+### Failure Evidence (Red)
+During physical testing, the browser requested service entry from the `UNCOMMISSIONED_AP` baseline but the transition stalled. The HTTP server was intentionally stopped but failed to restore upon transition failure, stranding the browser on the "Transition Pending" page.
+**Screenshots Provided:**
+- `enter_local_service-confirmation_pop-up.png`
+- `enter_local_service-Transition-Pending_Landing_Page.png`
+- (Transition failed to complete)
+
+### Retest (Green) - PENDING
 -Before commissioning:
 -Connect to the Service AP.
 -Log into the portal and complete the forced password change if required.
