@@ -3121,6 +3121,42 @@ static esp_err_t test_service_entry_edge_cases(void)
     return ESP_OK;
 }
 
+// Test 82: STA Disconnect Convergence Evaluation
+static esp_err_t test_sta_disconnect_eval(void)
+{
+    bool disconnect_needed;
+    esp_err_t err;
+
+    // 1. AP-only, STA not started, not connected, no IP: disconnect driver call skipped
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_AP, ESP_OK, false, false, false, &disconnect_needed);
+    TEST_ASSERT(err == ESP_OK, "AP-only with absent STA should return ESP_OK");
+    TEST_ASSERT(disconnect_needed == false, "Disconnect should be skipped");
+
+    // 2. AP-only, STA lifecycle already absent (but started): operation treated as already converged.
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_AP, ESP_OK, true, false, false, &disconnect_needed);
+    TEST_ASSERT(err == ESP_OK, "AP-only with absent STA lifecycle should return ESP_OK");
+    TEST_ASSERT(disconnect_needed == false, "Disconnect should be skipped");
+
+    // 3. APSTA, STA connected with IP: disconnect driver call required.
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_APSTA, ESP_OK, true, true, true, &disconnect_needed);
+    TEST_ASSERT(err == ESP_OK, "APSTA with connection should return ESP_OK");
+    TEST_ASSERT(disconnect_needed == true, "Disconnect should be required");
+
+    // 4. APSTA, STA disconnected with no IP: redundant disconnect driver call skipped.
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_APSTA, ESP_OK, true, false, false, &disconnect_needed);
+    TEST_ASSERT(err == ESP_OK, "APSTA disconnected should return ESP_OK");
+    TEST_ASSERT(disconnect_needed == false, "Disconnect should be skipped");
+
+    // 8. Contradictory AP-only mode with active connection or IP observations
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_AP, ESP_OK, true, true, false, &disconnect_needed);
+    TEST_ASSERT(err == ESP_ERR_INVALID_STATE, "Contradictory state (connected) should return ESP_ERR_INVALID_STATE");
+
+    err = argus_net_mgr_eval_sta_disconnect_req(WIFI_MODE_AP, ESP_OK, true, false, true, &disconnect_needed);
+    TEST_ASSERT(err == ESP_ERR_INVALID_STATE, "Contradictory state (IP) should return ESP_ERR_INVALID_STATE");
+
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
@@ -3265,6 +3301,7 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_exit_eligible);
         RUN_TEST(test_service_policy_exit_rejected);
         RUN_TEST(test_service_entry_edge_cases);
+        RUN_TEST(test_sta_disconnect_eval);
     }
 
     int total_executions = passed_executions + failed_executions;

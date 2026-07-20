@@ -568,14 +568,57 @@ static esp_err_t prod_verify_broker_stopped(void *ctx) {
     return argus_mqtt_broker_is_running() ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 
+esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed)
+{
+    if (!out_disconnect_needed) return ESP_ERR_INVALID_ARG;
+    *out_disconnect_needed = true; // Default to requiring disconnect
+
+    // If driver is AP-only, STA should not have connection or IP.
+    if (wifi_mode_err == ESP_OK && wifi_mode == WIFI_MODE_AP) {
+        if (sta_connected || sta_ip_acquired) {
+            ESP_LOGE(TAG, "Contradictory state: WIFI_MODE_AP but STA flags active (conn:%d, ip:%d)",
+                     sta_connected, sta_ip_acquired);
+            return ESP_ERR_INVALID_STATE;
+        }
+        *out_disconnect_needed = false;
+        return ESP_OK;
+    }
+
+    // If STA is already disconnected without an IP, we don't need a redundant disconnect command.
+    if (!sta_connected && !sta_ip_acquired) {
+        *out_disconnect_needed = false;
+        return ESP_OK;
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t prod_disconnect_sta(void *ctx) {
     (void)ctx;
+    
+    wifi_mode_t wifi_mode = WIFI_MODE_NULL;
+    esp_err_t wifi_err = esp_wifi_get_mode(&wifi_mode);
+    
+    bool sta_started = atomic_load(&s_sta_started);
+    bool sta_connected = atomic_load(&s_sta_connected);
+    bool sta_ip_acquired = atomic_load(&s_sta_ip_acquired);
+
+    bool disconnect_needed = false;
+    esp_err_t eval_err = argus_net_mgr_eval_sta_disconnect_req(wifi_mode, wifi_err, sta_started, sta_connected, sta_ip_acquired, &disconnect_needed);
+    if (eval_err != ESP_OK) {
+        return eval_err;
+    }
+
+    if (!disconnect_needed) {
+        ESP_LOGI(TAG, "STA already absent/disconnected, skipping esp_wifi_disconnect");
+        return ESP_OK;
+    }
+
     esp_err_t err = esp_wifi_disconnect();
     if (err == ESP_ERR_WIFI_NOT_STARTED || err == ESP_ERR_WIFI_NOT_INIT) {
         return ESP_OK; // Not started, so disconnected
     }
-    // Also ESP_ERR_WIFI_NOT_CONNECT means not connected, which is also fine,
-    // but esp_wifi_disconnect returns ESP_OK even if not connected as long as STA is active.
+    // ESP_ERR_WIFI_NOT_CONNECT is also technically okay, but we preserve original error if it wasn't requested.
     return err;
 }
 

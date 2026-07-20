@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "argus_authority_mgr.h"
+#include "esp_wifi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -176,6 +177,11 @@ bool argus_net_mgr_is_sta_connected(void);
 bool argus_net_mgr_is_sta_ip_acquired(void);
 bool argus_net_mgr_is_ap_started(void);
 const char *argus_net_mgr_get_wifi_driver_mode_name(void);
+
+/**
+ * @brief Pure testable helper to evaluate if a STA disconnect driver call is required.
+ */
+esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed);
 
 #ifdef __cplusplus
 }

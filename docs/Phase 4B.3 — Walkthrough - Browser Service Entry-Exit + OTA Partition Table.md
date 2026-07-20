@@ -132,6 +132,21 @@ The HTTP server did not spontaneously crash; it was intentionally stopped, but u
    - The `argus_service_transition_ops_t` and `argus_net_mgr_orchestrate_service_entry` seams were expanded to cover the complete transition sequence, including network locks, dispatch revalidation, and HTTP lifecycle.
    - `argus_net_mgr_request_service` was refactored to wrap and delegate to this 100% pure orchestrator, allowing complete stack-local verification without singleton pollution.
 
+---
+
+### Second Physical Failure (STA Disconnect)
+During retesting, a second failure occurred during the `ensure STA disconnected` stage. `esp_wifi_disconnect()` was called unconditionally and returned `ESP_FAIL` because the STA interface was already entirely absent (UNCOMMISSIONED_AP state). The transition failed closed safely, and HTTP was correctly restored (Authority: NONE/NONE, Network: NETWORK_FAULT).
+
+### Second Correction Architecture (Evidence-Driven Convergence)
+1. **Pure Helper Evaluation**:
+   - Created `argus_net_mgr_eval_sta_disconnect_req` as a pure, testable helper to evaluate if a disconnect is necessary.
+   - It cross-references `wifi_mode`, `sta_started`, `sta_connected`, and `sta_ip_acquired`.
+   - Redundant disconnect driver calls are safely bypassed (`ESP_OK`) if STA is already disconnected.
+2. **Contradictory State Protection**:
+   - The pure helper rejects contradictory states (e.g. `WIFI_MODE_AP` but `sta_connected == true`), never silently normalizing flags to manufacture success.
+3. **Pure Tests Expanded**:
+   - Added test 82 (`test_sta_disconnect_eval`) covering 6 pure permutations (AP-only absent, APSTA connected, APSTA disconnected, and contradictory states).
+
 ## Verification
 
 | # | Item | Result |
@@ -139,7 +154,7 @@ The HTTP server did not spontaneously crash; it was intentionally stopped, but u
 | 1 | Full build | Pending operator |
 | 2 | Binary size | Pending operator |
 | 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
-| 4 | Test count | 90 distinct cases (270 total executions) |
+| 4 | Test count | 91 distinct cases (273 total executions) |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |

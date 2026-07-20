@@ -27,6 +27,27 @@ During physical testing, the browser requested service entry from the `UNCOMMISS
 - (Transition failed to complete)
 
 ### Retest (Green) - PENDING
+**Focused Operator Retest (Firmware update required):**
+1. Reboot and confirm:
+   - `UNCOMMISSIONED_AP`
+   - `NONE / NONE`
+   - machine `UNLOCKED`
+   - broker stopped
+   - Service AP and HTTP available.
+2. Run lowercase `t` and capture the complete final summary.
+3. Connect to the Service AP and log into the portal.
+4. Press **Enter Local Service** and accept confirmation.
+5. Confirm the serial log does not report an STA-disconnect failure.
+6. Reload the dashboard and verify:
+   - Network: `SERVICE_AP_ONLY`
+   - Authority mode: `LOCAL_SERVICE`
+   - Authority owner: `BROWSER`
+   - STA connected: `No`
+   - AP started: `Yes`
+   - Broker: `Stopped`
+   - Exit Local Service button visible.
+7. Save the transition log and dashboard screenshot.
+
 -Before commissioning:
 -Connect to the Service AP.
 -Log into the portal and complete the forced password change if required.
