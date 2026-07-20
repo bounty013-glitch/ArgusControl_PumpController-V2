@@ -7,7 +7,8 @@
 -Service AP and HTTP portal become available.
 A pasted log is ideal; a screenshot is sufficient if it contains those facts.
 
-## 2. Pure tests
+## 2. Pure tests - PASSED
+**Evidence Provided:** Operator confirmed 267 executions, 0 failures, 3 repeat passes.
 -Run lowercase t once and send the final summary showing:
 -83 distinct tests.
 -Three repeat passes.
@@ -17,7 +18,8 @@ A pasted log is ideal; a screenshot is sufficient if it contains those facts.
 -No panic or unexpected reboot.
 I do not need all 249 lines unless something fails.
 
-## 3. Entry from UNCOMMISSIONED_AP
+## 3. Entry from UNCOMMISSIONED_AP - PASSED
+**Evidence Provided:** Screenshots showing confirmation pop-up, transition pending page, and successful transition to `SERVICE_AP_ONLY` with `LOCAL_SERVICE`/`BROWSER` authority.
 -Before commissioning:
 -Connect to the Service AP.
 -Log into the portal and complete the forced password change if required.
