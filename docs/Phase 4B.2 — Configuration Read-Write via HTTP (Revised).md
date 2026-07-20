@@ -17,7 +17,7 @@ Phase 4B.1 delivered the credential-protected service portal. Phase 4B.2 adds co
 
 ### NVS Config Module
 
-#### [MODIFY] [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c)
+#### [MODIFY] [argus_nvs_config.c](../main/argus_nvs_config.c)
 
 **Lines 544-547:** Remove `is_commissioned()` gate from `commit()`. Replace with diagnostic log. Identity-only configs (no WiFi) become saveable.
 
@@ -27,7 +27,7 @@ Phase 4B.1 delivered the credential-protected service portal. Phase 4B.2 adds co
 
 ### HTTP Server
 
-#### [MODIFY] [argus_http_server.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.c)
+#### [MODIFY] [argus_http_server.c](../main/argus_http_server.c)
 
 **New endpoints:**
 
@@ -72,7 +72,7 @@ Phase 4B.1 delivered the credential-protected service portal. Phase 4B.2 adds co
 
 ### HTTP Server Header
 
-#### [MODIFY] [argus_http_server.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.h)
+#### [MODIFY] [argus_http_server.h](../main/argus_http_server.h)
 
 Update scope documentation to reflect config and restart endpoints.
 
@@ -80,7 +80,7 @@ Update scope documentation to reflect config and restart endpoints.
 
 ### Tests
 
-#### [MODIFY] [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+#### [MODIFY] [argus_tests_4a.c](../main/argus_tests_4a.c)
 
 Add: `test_nvs_commit_identity_only_payload` — verify that a payload with valid identity but empty WiFi passes `validate()` and `commit()` succeeds (the old `is_commissioned()` gate no longer blocks it).
 
@@ -90,7 +90,7 @@ Test count: 19 → 20.
 
 ### Documentation
 
-#### [MODIFY] [PHASE_4B_IMPLEMENTATION_PLAN.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/PHASE_4B_IMPLEMENTATION_PLAN.md)
+#### [MODIFY] [PHASE_4B_IMPLEMENTATION_PLAN.md](../docs/PHASE_4B_IMPLEMENTATION_PLAN.md)
 
 Update 4B.2 status, reflect operator audible.
 

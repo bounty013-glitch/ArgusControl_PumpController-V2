@@ -2,7 +2,7 @@
 
 **Source-correction baseline:** `f0f3b0e` on `phase4b-config-portal`
 **Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)
-**Build:** ESP-IDF 5.5.3 incremental build — 992,149 bytes (68% free on 3MB partition)
+**Build:** ESP-IDF 5.5.3 full-clean build — 992,149 bytes (68% free on 3MB partition)
 
 ---
 
@@ -23,8 +23,8 @@ Migrated from the default 1MB single-app partition (6% free, dangerously tight) 
 | *(free)* | — | — | **~9.6MB** | Future use |
 
 **Files:**
-- [NEW] [partitions.csv](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/partitions.csv)
-- [MODIFY] [sdkconfig.defaults](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/sdkconfig.defaults) — `PARTITION_TABLE_CUSTOM=y`
+- [NEW] [partitions.csv](../partitions.csv)
+- [MODIFY] [sdkconfig.defaults](../sdkconfig.defaults) — `PARTITION_TABLE_CUSTOM=y`
 
 ---
 
@@ -34,7 +34,7 @@ Two new POST endpoints wire the browser portal to the existing service orchestra
 
 #### `POST /api/service/enter`
 
-- **Mode gate:** `AP_DISCOVERABLE` or `UNCOMMISSIONED_AP`
+- **Mode gate:** `AP_DISCOVERABLE` or `AP_DISCOVERABLE`
 - **Idempotent:** Returns `200 OK` if already `SERVICE_AP_ONLY` / `BROWSER`
 - **A1 compliance:** Posts `ARGUS_NET_EVT_SERVICE_REQUEST` to the net_mgr event queue. Cannot call `request_service()` directly because it calls `httpd_stop()`, which would deadlock from within an httpd handler.
 - **Response:** `202 Accepted` — browser reconnects to AP after transition completes
@@ -48,7 +48,7 @@ Two new POST endpoints wire the browser portal to the existing service orchestra
 
 Both handlers use the existing event queue (`argus_net_mgr_post_event`) and existing production orchestration. No new locks, mutexes, or task contexts introduced.
 
-**File:** [MODIFY] [argus_http_server.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.c) — handlers, URI definitions, registrations
+**File:** [MODIFY] [argus_http_server.c](../main/argus_http_server.c) — handlers, URI definitions, registrations
 
 ---
 
@@ -106,10 +106,10 @@ The production NVS driver returns `ESP_ERR_NVS_NOT_FOUND` when the configuration
 ## Phase 4B.3 — Uncommissioned Browser Service-Entry Correction
 
 ### Physical Failure Evidence
-During physical testing, the browser requested service entry from the `UNCOMMISSIONED_AP` baseline but failed during the transition:
+During physical testing, the browser requested service entry from the `AP_DISCOVERABLE` baseline but failed during the transition:
 ```text
 argus_auth_mgr: authority: NONE/NONE -> SERVICE_TRANSITION/NONE
-argus_net_mgr: network: UNCOMMISSIONED_AP -> SERVICE_TRANSITION
+argus_net_mgr: network: AP_DISCOVERABLE -> SERVICE_TRANSITION
 argus_http: HTTP server stopped
 argus_net_mgr: Service entry failed during transition: ESP_FAIL
 argus_auth_mgr: Aborting service transition -> setting authority NONE/NONE
@@ -135,7 +135,7 @@ The HTTP server did not spontaneously crash; it was intentionally stopped, but u
 ---
 
 ### Second Physical Failure (STA Disconnect)
-During retesting, a second failure occurred during the `ensure STA disconnected` stage. `esp_wifi_disconnect()` was called unconditionally and returned `ESP_FAIL` because the STA interface was already entirely absent (UNCOMMISSIONED_AP state). The transition failed closed safely, and HTTP was correctly restored (Authority: NONE/NONE, Network: NETWORK_FAULT).
+During retesting, a second failure occurred during the `ensure STA disconnected` stage. `esp_wifi_disconnect()` was called unconditionally and returned `ESP_FAIL` because the STA interface was already entirely absent (AP_DISCOVERABLE state). The transition failed closed safely, and HTTP was correctly restored (Authority: NONE/NONE, Network: NETWORK_FAULT).
 
 ### Second Correction Architecture (Evidence-Driven Convergence)
 1. **Pure Helper Evaluation**:
@@ -154,13 +154,13 @@ During retesting, a second failure occurred during the `ensure STA disconnected`
 | 1 | Full build | PASSED |
 | 2 | Binary size | Verified |
 | 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
-| 4 | Test count | 91 distinct cases (273 total executions) |
+| 4 | Test count | 94 distinct cases (282 total executions) |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |
 | 8 | Flash command | Includes `ota_data_initial.bin` at 0xF000 |
 | 9 | **Physical test execution** | **PASSED (All tests)** |
-| 10 | **Production isolation** | **Confirmed by operator** (Authority generation=2, Network=UNCOMMISSIONED_AP, Broker=STOPPED, Machine=UNLOCKED, Task count=14) |
+| 10 | **Production isolation** | **Confirmed by operator** (Authority generation=2, Network=AP_DISCOVERABLE, Broker=STOPPED, Machine=UNLOCKED, Task count=14) |
 | 11 | **Service entry/exit** | **PASSED** |
 
 > [!IMPORTANT]

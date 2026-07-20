@@ -13,14 +13,14 @@ Phase 4B.2 adds configuration provisioning to the Argus service portal. Identity
 ## Changes Made
 
 ### 1. NVS Commit Gate Removed
-**File:** [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c)
+**File:** [argus_nvs_config.c](../main/argus_nvs_config.c)
 
 - `is_commissioned()` no longer blocks NVS commit — identity-only configs (empty WiFi) are now saveable
 - Mask-string rejection adjusted: empty `sta_pass` is no longer incorrectly rejected
 - Commissioning status is logged for diagnostics but does not gate the commit
 
 ### 2. Coordinated Restart API
-**Files:** [argus_net_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.h) · [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c)
+**Files:** [argus_net_mgr.h](../main/argus_net_mgr.h) · [argus_net_mgr.c](../main/argus_net_mgr.c)
 
 - New event type: `ARGUS_NET_EVT_RESTART_REQUEST`
 - New API: `argus_net_mgr_request_restart()` — checks machine state via `argus_state_mgr_get_snapshot()`, rejects if motion active (not HOLDING/UNLOCKED) or E-stop latched
@@ -28,7 +28,7 @@ Phase 4B.2 adds configuration provisioning to the Argus service portal. Identity
 - HTTP handler can transmit response before shutdown occurs
 
 ### 3. HTTP Endpoints (5 new)
-**File:** [argus_http_server.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.c)
+**File:** [argus_http_server.c](../main/argus_http_server.c)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -57,7 +57,7 @@ Phase 4B.2 adds configuration provisioning to the Argus service portal. Identity
 - Restart shows confirmation dialog, then full-screen "Restarting..." message
 
 ### 7. Header Documentation
-**File:** [argus_http_server.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.h)
+**File:** [argus_http_server.h](../main/argus_http_server.h)
 
 Updated scope docs to reflect Phase 4B.2 endpoints, write gates, and security posture.
 

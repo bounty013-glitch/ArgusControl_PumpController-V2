@@ -26,7 +26,7 @@
 | **Current Exposure Assumptions** | Controller is on a trusted local network. Not Internet-exposed. No routing from public networks to the controller. |
 | **Reconsideration Trigger** | Before production field release. Before any architecture permits controller access from an untrusted or publicly routed network. |
 | **Target Phase** | Phase 4D (Security Hardening) |
-| **Status** | OPEN |
+| **Status** | CLOSED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -43,7 +43,7 @@
 | **Current Exposure Assumptions** | WPA2-PSK AP provides link-layer encryption for AP clients. LAN is trusted. No traffic exits the local network. |
 | **Reconsideration Trigger** | Before production field release. Before any untrusted network path exists between client and controller. |
 | **Target Phase** | Phase 4D (HTTPS / TLS) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -60,7 +60,7 @@
 | **Current Exposure Assumptions** | Controller is in a physically controlled environment. Physical access implies operator trust. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where physical access is not equivalent to operator trust. |
 | **Target Phase** | Phase 4D (Hashed Credential Storage) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -77,7 +77,7 @@
 | **Current Exposure Assumptions** | Operator accesses the portal promptly after enabling service mode. No untrusted actors have access during the bootstrap window. |
 | **Reconsideration Trigger** | Before production field release. If the bootstrap window duration becomes a concern. |
 | **Target Phase** | Phase 4D |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -94,7 +94,7 @@
 | **Current Exposure Assumptions** | No untrusted network access to the controller. |
 | **Reconsideration Trigger** | Before production field release. When authentication throttling is implemented. |
 | **Target Phase** | Phase 4D (Stronger Password Policy) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -111,7 +111,7 @@
 | **Current Exposure Assumptions** | Trusted local network. AP limited to 1 client. |
 | **Reconsideration Trigger** | Before production field release. Before any untrusted network access. |
 | **Target Phase** | Phase 4D (Abuse Throttling) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -128,7 +128,7 @@
 | **Current Exposure Assumptions** | Operator uses a dedicated device for portal access. No untrusted web content is loaded in the same browser session. |
 | **Reconsideration Trigger** | Before production field release. Before motion-control POST endpoints are added (Phase 4B.3). |
 | **Target Phase** | Phase 4D (CSRF Hardening) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 
@@ -147,7 +147,7 @@
 | **Current Exposure Assumptions** | Operator always has serial console access. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where serial console access is not guaranteed. |
 | **Target Phase** | Phase 4D (Unified Reset) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 
@@ -166,7 +166,7 @@
 | **Current Exposure Assumptions** | Development-phase deployment on trusted networks only. |
 | **Reconsideration Trigger** | After Phase 4B completion. Before production field release. |
 | **Target Phase** | Phase 4D (Formal Security Review) |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -183,7 +183,7 @@
 | **Current Exposure Assumptions** | Single-operator usage. The quirk is a UX inconvenience, not a security vulnerability. |
 | **Reconsideration Trigger** | If session-based authentication is implemented in Phase 4D. If multi-user access is required. |
 | **Target Phase** | Phase 4D (Session-Based Auth) |
-| **Status** | OPEN — Accepted by operator as usable |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Closure Evidence** | Not yet applicable |
 
 ---
@@ -194,7 +194,7 @@
 |-------|-------|
 | **System Area** | Network Lifecycle / Portal |
 | **Phase Introduced** | Phase 4B.2 Corrections |
-| **Status** | OPEN |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
 | **Target Phase** | Post-field-evaluation |
 | **Operator Decision** | 2026-07-18 |
 
@@ -237,6 +237,8 @@
 
 **Closure:** The app-partition constraint is resolved by the dual 3 MB OTA layout introduced in Phase 4B.3.
 
+**Closure evidence:** dual 3 MB OTA partitions; `otadata`; successful ESP32-S3 boot; final v5.5.3 build; Phase 4B.3 merge SHA (1fc356aee87f60199f4fc0ad1e0e09255ac53760).
+
 ---
 
 ## DHR-013 — Deferred Privileged Identity Modification
@@ -246,7 +248,7 @@
 | **Date Recorded** | 2026-07-19 |
 | **System Area** | Identity Provisioning / Portal |
 | **Phase Introduced** | Phase 4B.2 |
-| **Status** | OPEN |
+| **Status** | CLOSED |
 | **Target Phase** | Post-field-evaluation |
 | **Operator Decision** | 2026-07-19 |
 
@@ -271,8 +273,8 @@
 | **Date Recorded** | 2026-07-20 |
 | **System Area** | Network Manager / API |
 | **Phase Introduced** | Phase 4B.3a (Reverted) |
-| **Status** | OPEN |
-| **Target Phase** | Phase 4B.4 (or later standalone micro-phase) |
+| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
+| **Target Phase | Phase 4B.3a |
 | **Operator Decision** | 2026-07-20 |
 
 **Limitation:** The device currently connects to Wi-Fi automatically. If the connection drops or fails due to an authentication error, there is no operator visibility into the failure reason (e.g., bad password, AP out of range), no classification of error types, no bounded retry logic preventing infinite loops on authentication failure, and no HTTP API for the operator to manually request a connection retry without a system restart.

@@ -24,8 +24,8 @@ Six correction items from the independent review, executed as a single coherent 
 ## Item 2: Restart Transaction Seam
 
 ### New Files
-- [argus_restart_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_restart_mgr.h) — Injectable ops struct, result struct, step enums
-- [argus_restart_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_restart_mgr.c) — 6-step orchestration + production ops
+- [argus_restart_mgr.h](../main/argus_restart_mgr.h) — Injectable ops struct, result struct, step enums
+- [argus_restart_mgr.c](../main/argus_restart_mgr.c) — 6-step orchestration + production ops
 
 ### Architecture
 
@@ -47,7 +47,7 @@ graph LR
 The production `argus_net_mgr.c` restart handler is now 10 lines — it creates ops and calls the shared transaction function. Tests inject mock ops that record the exact call sequence.
 
 ### Wiring
-- [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L180-L197): `ARGUS_NET_EVT_RESTART_REQUEST` now calls `argus_restart_execute()`
+- [argus_net_mgr.c](../main/argus_net_mgr.c#L180-L197): `ARGUS_NET_EVT_RESTART_REQUEST` now calls `argus_restart_execute()`
 
 ---
 
@@ -63,18 +63,18 @@ If the active slot (gen=2, PROVISIONED) is corrupted and LKG (gen=1, not provisi
 3. **Driver Interface:** `read_provisioned_hwm` / `write_provisioned_hwm` added to `argus_nvs_driver_t` — fully injectable for testing
 
 ### Changes
-- [argus_nvs_config.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.h#L60-L61): Driver interface extended
-- [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L204-L235): Production HWM ops
-- [argus_nvs_config.c core_init](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L285-L304): Monotonic OR + HWM read
-- [argus_nvs_config.c core_commit](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L360-L368): HWM write on PROVISIONED
+- [argus_nvs_config.h](../main/argus_nvs_config.h#L60-L61): Driver interface extended
+- [argus_nvs_config.c](../main/argus_nvs_config.c#L204-L235): Production HWM ops
+- [argus_nvs_config.c core_init](../main/argus_nvs_config.c#L285-L304): Monotonic OR + HWM read
+- [argus_nvs_config.c core_commit](../main/argus_nvs_config.c#L360-L368): HWM write on PROVISIONED
 
 ---
 
 ## Item 4: Configuration Overlay Seam
 
 ### New Files
-- [argus_config_overlay.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_config_overlay.h) — Scope enum, fields struct, result struct
-- [argus_config_overlay.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_config_overlay.c) — Pure overlay logic
+- [argus_config_overlay.h](../main/argus_config_overlay.h) — Scope enum, fields struct, result struct
+- [argus_config_overlay.c](../main/argus_config_overlay.c) — Pure overlay logic
 
 ### Architecture
 
@@ -88,7 +88,7 @@ And returns:
 - Error code + message (on failure)
 
 ### Wiring
-- [argus_http_server.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_http_server.c#L1125-L1230): `config_save_handler` now parses JSON fields → calls `argus_config_overlay_apply()` → commits result
+- [argus_http_server.c](../main/argus_http_server.c#L1125-L1230): `config_save_handler` now parses JSON fields → calls `argus_config_overlay_apply()` → commits result
 
 ---
 
@@ -118,8 +118,8 @@ And returns:
 
 ## Item 5: Documentation
 
-- [DHR-012](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/DEFERRED_HARDENING_REGISTER.md#L212): App partition size — 10% headroom, custom partition table recommended before 4B.3
-- [DHR-013](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/DEFERRED_HARDENING_REGISTER.md#L240): Deferred privileged identity modification — factory reset and password-protected identity changes deferred
+- [DHR-012](../docs/DEFERRED_HARDENING_REGISTER.md#L212): App partition size — 10% headroom, custom partition table recommended before 4B.3
+- [DHR-013](../docs/DEFERRED_HARDENING_REGISTER.md#L240): Deferred privileged identity modification — factory reset and password-protected identity changes deferred
 
 ---
 

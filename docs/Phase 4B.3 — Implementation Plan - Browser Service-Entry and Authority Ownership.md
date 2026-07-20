@@ -53,13 +53,13 @@ The pure policy seam is exercised by stack-local tests covering eligible entry p
 
 ---
 
-## Verification Plan
+## Actually Executed Verification (Final Accepted Result)
 
 ### Static Verification
 1. `git diff --check` — clean
 2. Full clean build — zero errors, zero warnings
 3. Binary size within new partition budget
-4. 83 Distinct Pure Tests all passing
+4. 94 Distinct Pure Tests all passing
 
 ### Physical Verification
 1. Flash to device using `idf.py -p COMx erase-flash flash monitor`

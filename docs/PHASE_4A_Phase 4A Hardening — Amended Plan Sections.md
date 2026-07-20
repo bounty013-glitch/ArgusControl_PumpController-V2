@@ -37,7 +37,7 @@ static esp_err_t prod_grant_local(void *ctx, argus_authority_owner_t owner) {
 }
 ```
 
-`argus_authority_grant_local_service` ([argus_authority_mgr.c:206–234](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L206-L234)) currently reads the authority snapshot and verifies machine state before granting. The state verification (`argus_state_mgr_get_snapshot`) is read-only; the grant call itself only acquires `s_auth_mutex`.
+`argus_authority_grant_local_service` ([argus_authority_mgr.c:206–234](../main/argus_authority_mgr.c#L206-L234)) currently reads the authority snapshot and verifies machine state before granting. The state verification (`argus_state_mgr_get_snapshot`) is read-only; the grant call itself only acquires `s_auth_mutex`.
 
 > [!IMPORTANT]
 > `argus_authority_grant_local_service` also validates machine state via `argus_state_mgr_get_snapshot` at L223. This is read-only observation but should the authority layer be checking machine state at all? The orchestrator's `verify_stopped` callback has already confirmed the machine is stopped before `grant_local` is called. Decision: retain the guard as defense-in-depth — it does not mutate state or acquire motion locks.
@@ -97,10 +97,10 @@ argus_net_mgr_request_service(requested_owner)     [argus_net_mgr.c]
 ### Deletion Scope for `argus_authority_prepare_service_transition()`
 
 Delete entirely:
-- Declaration at [argus_authority_mgr.h:77](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h#L77)
-- Implementation at [argus_authority_mgr.c:162–204](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L162-L204) (43 lines including dispatch lock/unlock, stop_normal, 5s poll, E-stop fallback)
+- Declaration at [argus_authority_mgr.h:77](../main/argus_authority_mgr.h#L77)
+- Implementation at [argus_authority_mgr.c:162–204](../main/argus_authority_mgr.c#L162-L204) (43 lines including dispatch lock/unlock, stop_normal, 5s poll, E-stop fallback)
 
-The `prod_prepare_transition` callback ([argus_authority_mgr.c:99–102](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L99-L102)) becomes a single `set_mode` call.
+The `prod_prepare_transition` callback ([argus_authority_mgr.c:99–102](../main/argus_authority_mgr.c#L99-L102)) becomes a single `set_mode` call.
 
 ---
 
@@ -154,7 +154,7 @@ Dirty:   M main/CMakeLists.txt
 
 ### Current Architecture (Source-Verified)
 
-E-stop enters through `argus_cmd_router_dispatch` ([argus_cmd_router.c:44–47](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c#L44-L47)):
+E-stop enters through `argus_cmd_router_dispatch` ([argus_cmd_router.c:44–47](../main/argus_cmd_router.c#L44-L47)):
 
 ```c
 if (env->source == ARGUS_CMD_SRC_INTERNAL_SAFETY || env->command_type == ARGUS_CMD_TYPE_ESTOP) {
@@ -162,7 +162,7 @@ if (env->source == ARGUS_CMD_SRC_INTERNAL_SAFETY || env->command_type == ARGUS_C
 }
 ```
 
-`argus_state_mgr_estop` ([argus_state_mgr.c:480–487](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L480-L487)):
+`argus_state_mgr_estop` ([argus_state_mgr.c:480–487](../main/argus_state_mgr.c#L480-L487)):
 
 ```c
 esp_err_t argus_state_mgr_estop(void) {
@@ -193,7 +193,7 @@ argus_state_mgr_start():
 
 ### Generation Counter Is Dead Code
 
-`argus_state_core_start` ([argus_state_mgr.c:159–184](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L159-L184)) checks `command_generation` after each motion op:
+`argus_state_core_start` ([argus_state_mgr.c:159–184](../main/argus_state_mgr.c#L159-L184)) checks `command_generation` after each motion op:
 
 ```c
 uint32_t entry_gen = core->command_generation;
@@ -203,11 +203,11 @@ if (core->command_generation != entry_gen || core->estop_latched) { return ...; 
 if (core->command_generation != entry_gen || core->estop_latched) { return ...; }
 ```
 
-But `command_generation` is incremented only by `argus_state_core_estop` at [argus_state_mgr.c:267](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L267). E-stop can only write this field while holding `s_state_mutex`. The `start` caller already holds `s_state_mutex`. Therefore the generation counter **never changes between the checks** — the revalidation logic at L172 and L182 is unreachable.
+But `command_generation` is incremented only by `argus_state_core_estop` at [argus_state_mgr.c:267](../main/argus_state_mgr.c#L267). E-stop can only write this field while holding `s_state_mutex`. The `start` caller already holds `s_state_mutex`. Therefore the generation counter **never changes between the checks** — the revalidation logic at L172 and L182 is unreachable.
 
 ### Actual Pulse-Stop Path
 
-When E-stop finally acquires `s_state_mutex`, `argus_state_core_estop` at [argus_state_mgr.c:271–273](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L271-L273) calls `core->ops->stop_immediate()` which cascades:
+When E-stop finally acquires `s_state_mutex`, `argus_state_core_estop` at [argus_state_mgr.c:271–273](../main/argus_state_mgr.c#L271-L273) calls `core->ops->stop_immediate()` which cascades:
 
 ```text
 argus_trajectory_stop_immediate()     [argus_trajectory.c:205]
@@ -223,7 +223,7 @@ argus_trajectory_stop_immediate()     [argus_trajectory.c:205]
     → s_traj_mutex release
 ```
 
-The `gptimer_stop()` and `gpio_set_level()` calls in `argus_step_gen_stop_immediate` are the actual hardware operations that halt pulse generation. These execute under `s_timing_mux` (spinlock), which ensures ISR-safe atomicity for the timer alarm callback at [argus_step_gen.c:72–106](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_step_gen.c#L72-L106).
+The `gptimer_stop()` and `gpio_set_level()` calls in `argus_step_gen_stop_immediate` are the actual hardware operations that halt pulse generation. These execute under `s_timing_mux` (spinlock), which ensures ISR-safe atomicity for the timer alarm callback at [argus_step_gen.c:72–106](../main/argus_step_gen.c#L72-L106).
 
 ### Phase 4A Decision: Defer Concurrent E-Stop Preemption
 
@@ -401,7 +401,7 @@ Replace `volatile bool` flags with C11 `_Atomic bool` for network lifecycle stat
 
 ### Affected Variables
 
-Replace in [argus_net_mgr.c:55–58](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L55-L58):
+Replace in [argus_net_mgr.c:55–58](../main/argus_net_mgr.c#L55-L58):
 
 ```c
 // Before:
@@ -534,10 +534,10 @@ This tests the latch assertion, the cutoff behavior, and the authority abort —
 
 ### Q1 — Service Exit: Network Manager Owns Serialization ✓
 
-`argus_authority_request_exit()` at [argus_authority_mgr.c:249–297](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L249-L297) currently acquires `s_dispatch_mutex` independently at L252. Per your directive, the network manager must own coordinated exit serialization, and authority callbacks must be state-only.
+`argus_authority_request_exit()` at [argus_authority_mgr.c:249–297](../main/argus_authority_mgr.c#L249-L297) currently acquires `s_dispatch_mutex` independently at L252. Per your directive, the network manager must own coordinated exit serialization, and authority callbacks must be state-only.
 
 **Change:** Refactor exit into the same pattern as entry:
-- Network manager task SERVICE_EXIT handler acquires `s_net_mutex` (already does at [argus_net_mgr.c:131](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L131)), then acquires `s_dispatch_mutex`, then calls an exit orchestrator with state-only authority callbacks.
+- Network manager task SERVICE_EXIT handler acquires `s_net_mutex` (already does at [argus_net_mgr.c:131](../main/argus_net_mgr.c#L131)), then acquires `s_dispatch_mutex`, then calls an exit orchestrator with state-only authority callbacks.
 - Authority exit callback only sets `ARGUS_AUTHORITY_NONE/NONE` under `s_auth_mutex`.
 - Motion stop and network restoration are separate orchestrator steps, not embedded in authority callbacks.
 - Delete the standalone `argus_authority_request_exit()` public API.
@@ -558,7 +558,7 @@ for (int i = 0; i < 11; i++) {
 
 **Evidence:**
 
-1. **Not in build:** [CMakeLists.txt](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/CMakeLists.txt) lists 19 source files. `argus_stepper.c` is NOT among them. It is not compiled.
+1. **Not in build:** [CMakeLists.txt](../main/CMakeLists.txt) lists 19 source files. `argus_stepper.c` is NOT among them. It is not compiled.
 
 2. **Not referenced:** Search for `argus_stepper_` across all `.c` and `.h` files returns results ONLY within `argus_stepper.c` and `argus_stepper.h` themselves. No other V2 production file calls any `argus_stepper_*` API.
 

@@ -22,9 +22,9 @@ argus_net_mgr_request_service()                [argus_net_mgr.c:515]
           L165: argus_cmd_router_lock_dispatch() ← ATTEMPTS LOCK #2 AGAIN → DEADLOCK
 ```
 
-`s_dispatch_mutex` is a non-recursive `xSemaphoreCreateMutexStatic` ([argus_cmd_router.c:20](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c#L20)). Calling `xSemaphoreTake` on a mutex already held by the same task blocks forever.
+`s_dispatch_mutex` is a non-recursive `xSemaphoreCreateMutexStatic` ([argus_cmd_router.c:20](../main/argus_cmd_router.c#L20)). Calling `xSemaphoreTake` on a mutex already held by the same task blocks forever.
 
-**Every runtime call to `argus_net_mgr_request_service()` from [app_main.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/app_main.c) (lines 453, 554, 886) is affected.**
+**Every runtime call to `argus_net_mgr_request_service()` from [app_main.c](../main/app_main.c) (lines 453, 554, 886) is affected.**
 
 ### Fix
 
@@ -79,7 +79,7 @@ argus_net_mgr_request_service(requested_owner) [argus_net_mgr.c]
 
 ### What Exists Now
 
-[argus_authority_mgr.h:101](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h#L101) declares `argus_authority_request_service()`. [argus_authority_mgr.c:242–247](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L242-L247) implements it as a simple `prepare + grant` convenience wrapper.
+[argus_authority_mgr.h:101](../main/argus_authority_mgr.h#L101) declares `argus_authority_request_service()`. [argus_authority_mgr.c:242–247](../main/argus_authority_mgr.c#L242-L247) implements it as a simple `prepare + grant` convenience wrapper.
 
 ### Verified Scope of Impact
 
@@ -88,8 +88,8 @@ argus_net_mgr_request_service(requested_owner) [argus_net_mgr.c]
 
 ### Change
 
-- **Delete** the declaration from [argus_authority_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h).
-- **Delete** the definition from [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c).
+- **Delete** the declaration from [argus_authority_mgr.h](../main/argus_authority_mgr.h).
+- **Delete** the definition from [argus_authority_mgr.c](../main/argus_authority_mgr.c).
 - **Delete** the old `argus_authority_prepare_service_transition()` public API (line 77 in header, line 162 in source).
 - **Replace** with `argus_authority_prepare_service_transition_locked()` — a function that does NOT acquire/release `s_dispatch_mutex`. Keep it accessible via the `prod_prepare_transition` callback in `argus_service_authority_ops_t`.
 
@@ -103,16 +103,16 @@ Governance: `argus_net_mgr_request_service()` is the **sole** production entry p
 
 | # | Lock Name | Actual File | Line | Type | Scope |
 |:---:|:---|:---|:---:|:---|:---|
-| 1 | `s_net_mutex` | [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L30) | 30 | Static Mutex | Network mode transitions, coherent state |
-| 2 | `s_dispatch_mutex` | [argus_cmd_router.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c#L13) | 13 | Static Mutex | Command envelope dispatch serialization |
-| 3 | `s_command_mutex` | [argus_state_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L41) | 41 | Dynamic Mutex | State-manager command serialization |
-| 4 | `s_auth_mutex` | [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L21) | 21 | Static Mutex | Authority core read/write |
-| 5 | `s_state_mutex` | [argus_state_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L42) | 42 | Dynamic Mutex | State machine transitions, fault latches |
-| 6 | `s_traj_mutex` | [argus_trajectory.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_trajectory.c#L13) | 13 | Dynamic Mutex | Trajectory ramps, velocity targets |
-| 7 | `s_lifecycle_mutex` | [argus_step_gen.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_step_gen.c#L25) | 25 | Dynamic Mutex | Step generator lifecycle (arm, start, stop, direction) |
-| 8 | `s_timing_mux` | [argus_step_gen.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_step_gen.c#L32) | 32 | portMUX_TYPE (spinlock) | GPTimer pulse timing (ISR-safe) |
-| 9 | `s_broker.lock` | [argus_mqtt_broker.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_mqtt_broker.c#L44) | 44 | Dynamic Mutex | Broker client slot allocation, publish, stop |
-| 10 | `s_ctx.lock` | [argus_stepper.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_stepper.c#L31) | 31 | Dynamic Mutex | Legacy stepper driver (independent, not in V2 motion stack) |
+| 1 | `s_net_mutex` | [argus_net_mgr.c](../main/argus_net_mgr.c#L30) | 30 | Static Mutex | Network mode transitions, coherent state |
+| 2 | `s_dispatch_mutex` | [argus_cmd_router.c](../main/argus_cmd_router.c#L13) | 13 | Static Mutex | Command envelope dispatch serialization |
+| 3 | `s_command_mutex` | [argus_state_mgr.c](../main/argus_state_mgr.c#L41) | 41 | Dynamic Mutex | State-manager command serialization |
+| 4 | `s_auth_mutex` | [argus_authority_mgr.c](../main/argus_authority_mgr.c#L21) | 21 | Static Mutex | Authority core read/write |
+| 5 | `s_state_mutex` | [argus_state_mgr.c](../main/argus_state_mgr.c#L42) | 42 | Dynamic Mutex | State machine transitions, fault latches |
+| 6 | `s_traj_mutex` | [argus_trajectory.c](../main/argus_trajectory.c#L13) | 13 | Dynamic Mutex | Trajectory ramps, velocity targets |
+| 7 | `s_lifecycle_mutex` | [argus_step_gen.c](../main/argus_step_gen.c#L25) | 25 | Dynamic Mutex | Step generator lifecycle (arm, start, stop, direction) |
+| 8 | `s_timing_mux` | [argus_step_gen.c](../main/argus_step_gen.c#L32) | 32 | portMUX_TYPE (spinlock) | GPTimer pulse timing (ISR-safe) |
+| 9 | `s_broker.lock` | [argus_mqtt_broker.c](../main/argus_mqtt_broker.c#L44) | 44 | Dynamic Mutex | Broker client slot allocation, publish, stop |
+| 10 | `s_ctx.lock` | [argus_stepper.c](../main/argus_stepper.c#L31) | 31 | Dynamic Mutex | Legacy stepper driver (independent, not in V2 motion stack) |
 
 ### Verified Nesting Order (Maximum Depth Path)
 
@@ -131,15 +131,15 @@ s_net_mutex                          [argus_net_mgr.c]
 ### Hierarchy Rules
 
 1. **Strict downward-only**: Lower locks never call APIs that acquire higher locks.
-2. **E-stop bypass**: `argus_state_mgr_estop()` ([argus_state_mgr.c:480–487](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_state_mgr.c#L480-L487)) intentionally bypasses `s_command_mutex` — acquires only `s_state_mutex` for immediate preemption.
-3. **E-stop dispatch bypass**: `argus_cmd_router_dispatch()` ([argus_cmd_router.c:44–47](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c#L44-L47)) with `ARGUS_CMD_SRC_INTERNAL_SAFETY` or `ARGUS_CMD_TYPE_ESTOP` bypasses `s_dispatch_mutex` entirely and calls `argus_state_mgr_estop()` directly.
+2. **E-stop bypass**: `argus_state_mgr_estop()` ([argus_state_mgr.c:480–487](../main/argus_state_mgr.c#L480-L487)) intentionally bypasses `s_command_mutex` — acquires only `s_state_mutex` for immediate preemption.
+3. **E-stop dispatch bypass**: `argus_cmd_router_dispatch()` ([argus_cmd_router.c:44–47](../main/argus_cmd_router.c#L44-L47)) with `ARGUS_CMD_SRC_INTERNAL_SAFETY` or `ARGUS_CMD_TYPE_ESTOP` bypasses `s_dispatch_mutex` entirely and calls `argus_state_mgr_estop()` directly.
 4. **Broker isolation**: `s_broker.lock` is independent of the authority/state hierarchy. The `on_message` callback is invoked **after** the lock is released.
 5. **Network event callbacks**: ESP-IDF Wi-Fi and IP event callbacks execute in the system event-loop task, **not ISR context**. They modify `volatile bool` flags (`s_sta_connected`, `s_sta_ip_acquired`, `s_ap_started`) without acquiring `s_net_mutex`. The proposed event-group additions (`xEventGroupSetBits`/`ClearBits`) will be called from these callbacks. Network event callbacks do not acquire `s_net_mutex`; therefore the proposed event-bit waits introduce no `s_net_mutex` dependency in that callback path.
 
 ### Confirmations
 
-- Software E-stop does **not** require `s_dispatch_mutex` — confirmed at [argus_cmd_router.c:44–47](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c#L44-L47).
-- The broker server task does **not** acquire `s_net_mutex` — confirmed by exhaustive search of [argus_mqtt_broker.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_mqtt_broker.c).
+- Software E-stop does **not** require `s_dispatch_mutex` — confirmed at [argus_cmd_router.c:44–47](../main/argus_cmd_router.c#L44-L47).
+- The broker server task does **not** acquire `s_net_mutex` — confirmed by exhaustive search of [argus_mqtt_broker.c](../main/argus_mqtt_broker.c).
 - `s_auth_mutex` is a **leaf lock** — confirmed: only `get_snapshot` and `set_mode` acquire it, neither calls any function that acquires another lock.
 
 ---
@@ -148,7 +148,7 @@ s_net_mutex                          [argus_net_mgr.c]
 
 ### Current State (Defects Found)
 
-Source: [argus_mqtt_broker.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_mqtt_broker.c) (688 lines)
+Source: [argus_mqtt_broker.c](../main/argus_mqtt_broker.c) (688 lines)
 
 | # | Defect | Evidence |
 |---|--------|----------|
@@ -179,13 +179,13 @@ Returns `true` only when broker state == `BROKER_RUNNING`. Reads state under `s_
 
 ### Current API
 
-[argus_nvs_config.h:143](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.h#L143):
+[argus_nvs_config.h:143](../main/argus_nvs_config.h#L143):
 ```c
 esp_err_t argus_nvs_config_get_observation_snapshot(uint8_t *out_selector,
     argus_cfg_slot_t *out_slot_a, argus_cfg_slot_t *out_slot_b);
 ```
 
-[Current implementation](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L569-L583) always returns `ESP_OK` and does not report whether NVS reads actually succeeded or whether the device is uncommissioned (NVS absent).
+[Current implementation](../main/argus_nvs_config.c#L569-L583) always returns `ESP_OK` and does not report whether NVS reads actually succeeded or whether the device is uncommissioned (NVS absent).
 
 ### Change
 
@@ -219,7 +219,7 @@ The production snapshot (`capture_prod_snapshot`) will use this struct and propa
 
 ### Current State
 
-[argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c) (848 lines) contains production API calls that violate the pure-test constraint:
+[argus_tests_4a.c](../main/argus_tests_4a.c) (848 lines) contains production API calls that violate the pure-test constraint:
 
 | Line | Production Call | Violation |
 |:---:|:---|:---|
@@ -247,7 +247,7 @@ Replace the live dispatch/E-stop calls with a **stack-local mock simulation**:
 
 ### Production Snapshot Guard (Retained)
 
-The `run_all` function's before/after `capture_prod_snapshot` + `compare_prod_snapshots` mechanism ([argus_tests_4a.c:776–814](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c#L776-L814)) is a **read-only observation**, not a test. It reads 11 production APIs (lines 705–715) and compares 31 fields (lines 730–760). This mechanism is retained as-is — it does not mutate production state.
+The `run_all` function's before/after `capture_prod_snapshot` + `compare_prod_snapshots` mechanism ([argus_tests_4a.c:776–814](../main/argus_tests_4a.c#L776-L814)) is a **read-only observation**, not a test. It reads 11 production APIs (lines 705–715) and compares 31 fields (lines 730–760). This mechanism is retained as-is — it does not mutate production state.
 
 ---
 
@@ -255,7 +255,7 @@ The `run_all` function's before/after `capture_prod_snapshot` + `compare_prod_sn
 
 ### Current Stage 3 Gap
 
-The failure injection loop ([argus_tests_4a.c:592–614](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c#L592-L614)) iterates stages 2–13. Stage 3 injects **no error** — none of the mock callbacks check `fail_stage == 3`. The orchestrator's internal step 3 maps to no distinct injectable callback. The test asserts `res != ESP_OK` for all stages, but stage 3 may silently pass.
+The failure injection loop ([argus_tests_4a.c:592–614](../main/argus_tests_4a.c#L592-L614)) iterates stages 2–13. Stage 3 injects **no error** — none of the mock callbacks check `fail_stage == 3`. The orchestrator's internal step 3 maps to no distinct injectable callback. The test asserts `res != ESP_OK` for all stages, but stage 3 may silently pass.
 
 ### Fix
 
@@ -289,7 +289,7 @@ All stages assert: `abort_transition` called once, `net_mode == NETWORK_FAULT`, 
 
 ### Current State
 
-No FreeRTOS Event Groups exist in the codebase. The `volatile bool` flags `s_sta_connected`, `s_sta_ip_acquired`, `s_ap_started` in [argus_net_mgr.c:55–58](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L55-L58) are set directly in Wi-Fi/IP event callbacks and polled via spin-loops in the verification callbacks.
+No FreeRTOS Event Groups exist in the codebase. The `volatile bool` flags `s_sta_connected`, `s_sta_ip_acquired`, `s_ap_started` in [argus_net_mgr.c:55–58](../main/argus_net_mgr.c#L55-L58) are set directly in Wi-Fi/IP event callbacks and polled via spin-loops in the verification callbacks.
 
 ### Change
 
@@ -310,20 +310,20 @@ The `volatile bool` flags are retained as secondary reads for `argus_net_mgr_is_
 
 | # | File | Changes |
 |:---:|:---|:---|
-| 1 | [argus_authority_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h) | Delete `argus_authority_request_service()` (L101). Delete `argus_authority_prepare_service_transition()` (L77). Add `argus_authority_prepare_service_transition_locked()` declaration. |
-| 2 | [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c) | Delete `argus_authority_request_service()` (L242–247). Refactor `argus_authority_prepare_service_transition()` into `_locked()` variant that does NOT touch `s_dispatch_mutex`. Update `prod_prepare_transition` callback to call the `_locked()` variant. Delete `argus_authority_request_exit()`'s `lock_dispatch` / `unlock_dispatch` pair (L252, L258) — it must also be called from within an already-held dispatch context, or refactored to acquire dispatch itself as the sole entry point for exit. |
-| 3 | [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c) | Add `s_net_event_group`. Replace volatile-polling verification callbacks with `xEventGroupWaitBits`. Add `#include "freertos/event_groups.h"`. Add `argus_net_mgr_get_snapshot()` for coherent read under `s_net_mutex`. |
-| 4 | [argus_net_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.h) | Declare `argus_net_snapshot_t` and `argus_net_mgr_get_snapshot()`. |
-| 5 | [argus_mqtt_broker.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_mqtt_broker.c) | Add broker state enum. Store `TaskHandle_t`. Add `s_broker_event_group`. Implement lifecycle signal handshake in server task. Implement bounded `start()`/`stop()` with event-group waits. Fix semaphore leak on restart. |
-| 6 | [argus_mqtt_broker.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_mqtt_broker.h) | Declare any new lifecycle queries if needed. |
-| 7 | [argus_nvs_config.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.h) | Add `argus_nvs_observation_t` struct. Update `argus_nvs_config_get_observation_snapshot` signature. |
-| 8 | [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c) | Implement error-checked observation snapshot with status/presence/validity per slot. |
-| 9 | [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c) | Remove live dispatch/E-stop calls (L536, 543, 544). Replace with stack-local mock E-stop simulation. Fix stage 3 gap. Update `argus_prod_snapshot_t` to use `argus_nvs_observation_t`. |
-| 10 | [app_main.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/app_main.c) | No changes needed — all three service-entry call sites already route through `argus_net_mgr_request_service`. |
-| 11 | [docs/PHASE_4A_RUNTIME_ACCEPTANCE.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/PHASE_4A_RUNTIME_ACCEPTANCE.md) | Update documentation record after implementation. |
+| 1 | [argus_authority_mgr.h](../main/argus_authority_mgr.h) | Delete `argus_authority_request_service()` (L101). Delete `argus_authority_prepare_service_transition()` (L77). Add `argus_authority_prepare_service_transition_locked()` declaration. |
+| 2 | [argus_authority_mgr.c](../main/argus_authority_mgr.c) | Delete `argus_authority_request_service()` (L242–247). Refactor `argus_authority_prepare_service_transition()` into `_locked()` variant that does NOT touch `s_dispatch_mutex`. Update `prod_prepare_transition` callback to call the `_locked()` variant. Delete `argus_authority_request_exit()`'s `lock_dispatch` / `unlock_dispatch` pair (L252, L258) — it must also be called from within an already-held dispatch context, or refactored to acquire dispatch itself as the sole entry point for exit. |
+| 3 | [argus_net_mgr.c](../main/argus_net_mgr.c) | Add `s_net_event_group`. Replace volatile-polling verification callbacks with `xEventGroupWaitBits`. Add `#include "freertos/event_groups.h"`. Add `argus_net_mgr_get_snapshot()` for coherent read under `s_net_mutex`. |
+| 4 | [argus_net_mgr.h](../main/argus_net_mgr.h) | Declare `argus_net_snapshot_t` and `argus_net_mgr_get_snapshot()`. |
+| 5 | [argus_mqtt_broker.c](../main/argus_mqtt_broker.c) | Add broker state enum. Store `TaskHandle_t`. Add `s_broker_event_group`. Implement lifecycle signal handshake in server task. Implement bounded `start()`/`stop()` with event-group waits. Fix semaphore leak on restart. |
+| 6 | [argus_mqtt_broker.h](../main/argus_mqtt_broker.h) | Declare any new lifecycle queries if needed. |
+| 7 | [argus_nvs_config.h](../main/argus_nvs_config.h) | Add `argus_nvs_observation_t` struct. Update `argus_nvs_config_get_observation_snapshot` signature. |
+| 8 | [argus_nvs_config.c](../main/argus_nvs_config.c) | Implement error-checked observation snapshot with status/presence/validity per slot. |
+| 9 | [argus_tests_4a.c](../main/argus_tests_4a.c) | Remove live dispatch/E-stop calls (L536, 543, 544). Replace with stack-local mock E-stop simulation. Fix stage 3 gap. Update `argus_prod_snapshot_t` to use `argus_nvs_observation_t`. |
+| 10 | [app_main.c](../main/app_main.c) | No changes needed — all three service-entry call sites already route through `argus_net_mgr_request_service`. |
+| 11 | [docs/PHASE_4A_RUNTIME_ACCEPTANCE.md](../docs/PHASE_4A_RUNTIME_ACCEPTANCE.md) | Update documentation record after implementation. |
 
 > [!WARNING]
-> `argus_authority_request_exit()` ([argus_authority_mgr.c:249–297](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c#L249-L297)) also calls `argus_cmd_router_lock_dispatch()` at L252. This exit path is called from `net_mgr_task()` SERVICE_EXIT handler while `s_net_mutex` is already held ([argus_net_mgr.c:131–134](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c#L131-L134)). This is not a recursive deadlock (it's `s_net_mutex → s_dispatch_mutex`, which is the correct ordering), but it uses the same `lock_dispatch` pattern internally. Refactoring `request_exit` for consistency is recommended but not blocking — it follows the correct hierarchy order. Document this path explicitly in the lock doctrine.
+> `argus_authority_request_exit()` ([argus_authority_mgr.c:249–297](../main/argus_authority_mgr.c#L249-L297)) also calls `argus_cmd_router_lock_dispatch()` at L252. This exit path is called from `net_mgr_task()` SERVICE_EXIT handler while `s_net_mutex` is already held ([argus_net_mgr.c:131–134](../main/argus_net_mgr.c#L131-L134)). This is not a recursive deadlock (it's `s_net_mutex → s_dispatch_mutex`, which is the correct ordering), but it uses the same `lock_dispatch` pattern internally. Refactoring `request_exit` for consistency is recommended but not blocking — it follows the correct hierarchy order. Document this path explicitly in the lock doctrine.
 
 ## Open Questions
 
@@ -336,7 +336,7 @@ The `volatile bool` flags are retained as secondary reads for `argus_net_mgr_is_
 > Prefer option (A): Remove stage 3 from the loop entirely since there is no injectable callback at that point. Confirm.
 
 > [!IMPORTANT]
-> **Q3: `s_ctx.lock` (legacy stepper, [argus_stepper.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_stepper.c)).**
+> **Q3: `s_ctx.lock` (legacy stepper, [argus_stepper.c](../main/argus_stepper.c)).**
 > This is a legacy stepper driver with its own independent mutex. It is not used in the V2 motion stack. Is it safe to exclude it from the lock hierarchy table? Confirm it is not called from any V2 production path.
 
 ---

@@ -62,7 +62,7 @@ graph TD
 ## Component Specifications
 
 ### 1. Device Identity Module (`argus_identity`)
-##### [NEW] [argus_identity.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_identity.h) / [argus_identity.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_identity.c)
+##### [NEW] [argus_identity.h](../main/argus_identity.h) / [argus_identity.c](../main/argus_identity.c)
 
 *   **Immutable Hardware UID**: Derived at runtime from `esp_efuse_mac_get_default()` (`ESP32S3-XXYYZZAABBCC`). Not stored in editable NVS.
 *   **Application Metadata**: Firmware version derived from `esp_app_get_description()->version`. Product model compiled constant `"ARGUS-PUMP-V2"`.
@@ -101,7 +101,7 @@ graph TD
 ---
 
 ### 3. Concrete Dual-Slot Boot-Selection & Write Algorithm
-##### [NEW] [argus_nvs_config.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.h) / [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c)
+##### [NEW] [argus_nvs_config.h](../main/argus_nvs_config.h) / [argus_nvs_config.c](../main/argus_nvs_config.c)
 
 NVS layout uses dual slots (`slot_a`, `slot_b`) in `"argus_cfg"` and an active selector `active_slot`:
 
@@ -133,7 +133,7 @@ typedef struct {
 ---
 
 ### 4. Coherent Authority Snapshot & Router Serialization (`s_dispatch_mutex`)
-##### [NEW] [argus_cmd_router.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.h) / [argus_cmd_router.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_cmd_router.c)
+##### [NEW] [argus_cmd_router.h](../main/argus_cmd_router.h) / [argus_cmd_router.c](../main/argus_cmd_router.c)
 
 #### Lock Serialization Sequence
 1. **Normal Command Dispatch**:
@@ -152,7 +152,7 @@ typedef struct {
 ---
 
 ### 5. Control-Authority Manager & Owner Permission Matrix
-##### [NEW] [argus_authority_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h) / [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c)
+##### [NEW] [argus_authority_mgr.h](../main/argus_authority_mgr.h) / [argus_authority_mgr.c](../main/argus_authority_mgr.c)
 
 ```c
 typedef enum {
@@ -240,7 +240,7 @@ stateDiagram-v2
 ## Complete Planned Verification Matrices
 
 ### Planned Automated Pure Unit Test Matrix (42 Planned Tests)
-##### [NEW] [main/argus_tests_4a.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.h) / [main/argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+##### [NEW] [main/argus_tests_4a.h](../main/argus_tests_4a.h) / [main/argus_tests_4a.c](../main/argus_tests_4a.c)
 
 Will execute using stack-local instances and mock backends (0 Wi-Fi, 0 NVS, 0 GPIO, 0 tasks):
 

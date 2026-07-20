@@ -26,8 +26,8 @@ Implement comprehensive pure-test and service-orchestration hardening for Argus 
 
 ### Component 1: Authority Core & Snapshot Separation
 
-#### [MODIFY] [argus_authority_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h)
-#### [MODIFY] [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c)
+#### [MODIFY] [argus_authority_mgr.h](../main/argus_authority_mgr.h)
+#### [MODIFY] [argus_authority_mgr.c](../main/argus_authority_mgr.c)
 
 - Define `argus_authority_core_t` struct containing `mode`, `owner`, `generation`, and `last_error`.
 - Keep `argus_authority_snapshot_t` as a read-only observation DTO.
@@ -38,8 +38,8 @@ Implement comprehensive pure-test and service-orchestration hardening for Argus 
 
 ### Component 2: Complete Service Transition Orchestration Seam
 
-#### [MODIFY] [argus_net_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.h)
-#### [MODIFY] [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c)
+#### [MODIFY] [argus_net_mgr.h](../main/argus_net_mgr.h)
+#### [MODIFY] [argus_net_mgr.c](../main/argus_net_mgr.c)
 
 - Expand `argus_service_transition_ops_t` to include mandatory function pointers:
   - `request_normal_stop`
@@ -59,8 +59,8 @@ Implement comprehensive pure-test and service-orchestration hardening for Argus 
 
 ### Component 3: In-Memory NVS Core & Caller-Owned Mock Storage
 
-#### [MODIFY] [argus_nvs_config.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.h)
-#### [MODIFY] [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c)
+#### [MODIFY] [argus_nvs_config.h](../main/argus_nvs_config.h)
+#### [MODIFY] [argus_nvs_config.c](../main/argus_nvs_config.c)
 
 - Ensure `argus_nvs_core_commit()` updates `core->active_config` from `verify_slot.payload` upon verified readback.
 - Support caller-owned void context in driver read/write callbacks for 100% stack-local mock storage.
@@ -69,7 +69,7 @@ Implement comprehensive pure-test and service-orchestration hardening for Argus 
 
 ### Component 4: Pure Unit Test Suite & Complete 23-Field Snapshot Proof
 
-#### [MODIFY] [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+#### [MODIFY] [argus_tests_4a.c](../main/argus_tests_4a.c)
 
 - Replace file-static `s_mock_nvs` with caller-owned stack-local `mock_nvs_store_t local_mock` in each test.
 - Refactor all 18 test cases:
@@ -85,7 +85,7 @@ Implement comprehensive pure-test and service-orchestration hardening for Argus 
 
 ### Component 5: Documentation
 
-#### [MODIFY] [PHASE_4A_RUNTIME_ACCEPTANCE.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/PHASE_4A_RUNTIME_ACCEPTANCE.md)
+#### [MODIFY] [PHASE_4A_RUNTIME_ACCEPTANCE.md](../docs/PHASE_4A_RUNTIME_ACCEPTANCE.md)
 
 - Update documentation to reflect operator-supplied prior runtime results (17/18 cases passed, line 178 failure) and document current hardening status as `IMPLEMENTED AND COMPILED — PENDING SHAWN'S RUNTIME TEST`.
 

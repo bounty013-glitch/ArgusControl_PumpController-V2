@@ -47,14 +47,14 @@ After:
 
 ## Supporting Fix: Init-Path Error Hiding Eliminated
 
-### [prod_read_reset_pending()](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L175-L206)
+### [prod_read_reset_pending()](../main/argus_nvs_config.c#L175-L206)
 
 | NVS Result | Before | After |
 |------------|--------|-------|
 | `NOT_FOUND` (namespace or key) | `pending=false, ESP_OK` | `pending=false, ESP_OK` (unchanged) |
 | Any other error | `pending=false, ESP_OK` | Error propagated |
 
-### [argus_nvs_config_init()](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c#L554-L601)
+### [argus_nvs_config_init()](../main/argus_nvs_config.c#L554-L601)
 
 | Operation | Before | After |
 |-----------|--------|-------|
@@ -115,5 +115,5 @@ All tests use stack-local `argus_nvs_core_t` and `mock_nvs_store_t`. Zero produc
 
 | File | Changes |
 |------|---------|
-| [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c) | `ARGUS_NVS_NS_RST` namespace, `prod_read/write_reset_pending` → RST namespace, `prod_erase_all` unchanged (CFG+SYS only), `argus_nvs_config_init` error propagation, `nvs_flash_init/erase` error propagation |
-| [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c) | `reset_pend_read_error` field, `mock_erase_all` preserves pending, `mock_read_reset_pending` error check, T68 updated, T71-T78 added, runner count → 78 |
+| [argus_nvs_config.c](../main/argus_nvs_config.c) | `ARGUS_NVS_NS_RST` namespace, `prod_read/write_reset_pending` → RST namespace, `prod_erase_all` unchanged (CFG+SYS only), `argus_nvs_config_init` error propagation, `nvs_flash_init/erase` error propagation |
+| [argus_tests_4a.c](../main/argus_tests_4a.c) | `reset_pend_read_error` field, `mock_erase_all` preserves pending, `mock_read_reset_pending` error check, T68 updated, T71-T78 added, runner count → 78 |

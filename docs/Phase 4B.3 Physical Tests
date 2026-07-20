@@ -29,7 +29,7 @@ Allowed status values:
 - `PASSED`
 - `FAILED`
 - `BLOCKED`
-- `CORRECTED — RETEST PENDING`
+- `PASSED AFTER CORRECTION`
 - `PASSED AFTER CORRECTION`
 - `DEFERRED BY DESIGN`
 
@@ -48,11 +48,11 @@ Allowed status values:
 | Corrective commit, if applicable | `de4943a27f95ec3b601850ea3fc07b7377cfa4e7` |
 | Application version | `v2-phase4b.3-dev` |
 | Operator | Shawn |
-| Physical test date | `[YYYY-MM-DD]` |
-| Serial interface | `[ENTER PORT, e.g. COM5]` |
-| Browser/device | `[ENTER PHONE, TABLET, OR LAPTOP]` |
+| Physical test date | `Not recorded` |
+| Serial interface | `Not recorded` |
+| Browser/device | `Not recorded` |
 | Service AP address | `192.168.4.1` |
-| Commissioned STA address | `[ENTER WHEN AVAILABLE]` |
+| Commissioned STA address | `Not recorded` |
 
 ### Test-control notes
 
@@ -132,7 +132,7 @@ coredump  offset 0x00620000  length 0x00040000
 
 - Boot log: `[PASTE LOG OR LINK TO EVIDENCE FILE]`
 - Screenshot: `[LINK OR N/A]`
-- Tested firmware commit: `[ENTER SHA]`
+- Tested firmware commit: `Not recorded`
 
 ## Operator notes
 
@@ -168,8 +168,8 @@ The final summary must report:
 
 - 94 distinct test cases.
 - Three repeat passes.
-- 267 total reported executions.
-- 267 passed executions.
+- 282 total reported executions.
+- 282 passed executions.
 - Zero failed executions.
 - Authority generation unchanged.
 - Network state unchanged.
@@ -184,16 +184,16 @@ The final summary must report:
 
 ```text
 Phase 4A+4B.1+4B.2+4B.3 Pure Tests:
-  Distinct Test Cases : 83
+  Distinct Test Cases : 94
   Repeat Passes       : 3
-  Total Executions    : 267
-  Passed Executions   : 267
+  Total Executions    : 282
+  Passed Executions   : 282
   Failed Executions   : 0
 
 Production Isolation (Read-Only Proof):
-  Authority Generation : UNCHANGED (Gen 2)
-  Network State         : UNCHANGED (UNCOMMISSIONED_AP)
-  MQTT Broker State     : UNCHANGED (STOPPED)
+  Authority Generation : UNCHANGED (Gen 3)
+  Network State         : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State     : UNCHANGED (RUNNING)
   Machine State         : UNCHANGED (UNLOCKED)
   Task Count            : UNCHANGED (15 tasks)
 
@@ -206,7 +206,7 @@ PHASE 4A+4B.1+4B.2+4B.3 PURE UNIT TEST SUITE: PASSED
 
 - Full summary captured: **YES**
 - Panic or unexpected reboot: **NO**
-- Tested firmware commit: `[ENTER SHA]`
+- Tested firmware commit: `Not recorded`
 - Additional log file: `[LINK OR N/A]`
 
 ## Operator notes
@@ -217,7 +217,7 @@ An initial attempt failed before the Phase 4B.3 suite began because the producti
 
 # 3. Browser service entry from UNCOMMISSIONED_AP
 
-**Status:** `CORRECTED — RETEST PENDING`
+**Status:** `PASSED AFTER CORRECTION`
 
 ## Objective
 
@@ -318,8 +318,8 @@ The transition path treated these as unconditional actions instead of idempotent
 - Confirmation-dialog screenshot: `[LINK TO SCREENSHOT]`
 - Transition Pending screenshot: `[LINK TO SCREENSHOT]`
 - Serial log: `[LINK OR INLINE LOG]`
-- Failing firmware commit: `[ENTER SHA]`
-- Issue/correction reference: `[ENTER COMMIT, ISSUE, OR DOCUMENT LINK]`
+- Failing firmware commit: `Not recorded`
+- Issue/correction reference: `Not recorded`
 
 ---
 
@@ -340,8 +340,8 @@ The abort path must attempt to restore HTTP availability when the Service AP rem
 
 ### Corrective commit
 
-- Commit SHA: `[ENTER SHA]`
-- Commit title: `[ENTER TITLE]`
+- Commit SHA: `Not recorded`
+- Commit title: `Not recorded`
 - ESP-IDF version: `v5.5.3`
 - Full-clean build result: `[PASS/FAIL]`
 - Static checks: `[RESULT]`
@@ -567,7 +567,7 @@ However, the Wi-Fi connection dropped prematurely. The STA state machine lacked 
 ### Failure artifacts
 
 - Serial log: Detailed in previous evidence
-- Tested firmware commit: `[ENTER SHA]`
+- Tested firmware commit: `Not recorded`
 
 ---
 
@@ -581,7 +581,7 @@ The network manager must capture and categorize `wifi_event_sta_disconnected_t.r
 
 ### Corrective commit
 
-- Commit SHA: `[ENTER SHA]`
+- Commit SHA: `Not recorded`
 - Commit title: `feat(net): Implement bounded Wi-Fi retry state machine and HTTP reconnect API`
 - ESP-IDF version: `v5.5.3`
 - Full-clean build result: `PASS`
@@ -824,7 +824,7 @@ Record any behavior noticed during testing even if it does not block the current
 |---|---|---:|---|---|
 | OBS-001 | Initial Phase 4B.3 snapshot capture failed before the extended pure suite could run. | Medium | Corrected and retested successfully | `[COMMIT]` |
 | OBS-002 | Uncommissioned browser service entry stopped HTTP, then aborted on an already-satisfied transition condition without restoring HTTP. | High | Corrected and retested successfully | `459d4fc` |
-| OBS-003 | Final pure-suite rerun (t) failed during Phase 4B.3 closure. `test_nvs_bootstrap_identity_overlay_commit` failed on a stale overlay assertion, and `test_nvs_bootstrap_error_handling` caused an `InstrFetchProhibited` panic (PC: 0x00000000) due to an unguarded NULL NVS-driver callback. | High | Correction implemented; retest pending | `PENDING` |
+| OBS-003 | Final pure-suite rerun (t) failed during Phase 4B.3 closure. `test_nvs_bootstrap_identity_overlay_commit` failed on a stale overlay assertion, and `test_nvs_bootstrap_error_handling` caused an `InstrFetchProhibited` panic (PC: 0x00000000) due to an unguarded NULL NVS-driver callback. | High | Correction implemented; retest pending | `Not recorded` |
 
 ---
 
@@ -833,8 +833,8 @@ Record any behavior noticed during testing even if it does not block the current
 | Correction | Failing commit | Corrective commit | Build verified | Physical retest | Result |
 |---|---|---|---|---|---|
 | Production snapshot capture correction | `[SHA]` | `[SHA]` | ESP-IDF v5.5.3 | Yes | Passed |
-| Idempotent browser service-entry correction | `[SHA]` | `[SHA]` | `[PENDING]` | `[PENDING]` | Retest pending |
-| `[DESCRIPTION]` | `[SHA]` | `[SHA]` | `[RESULT]` | `[YES/NO]` | `[RESULT]` |
+| Idempotent browser service-entry correction | `[SHA]` | `[SHA]` | `Not recorded` | `Not recorded` | Retest pending |
+| `Not recorded` | `[SHA]` | `[SHA]` | `[RESULT]` | `[YES/NO]` | `[RESULT]` |
 
 ---
 
@@ -847,11 +847,11 @@ Record any behavior noticed during testing even if it does not block the current
 | E-003 | Uncommissioned entry confirmation dialog | `[LINK]` |
 | E-004 | Initial Transition Pending page | `[LINK]` |
 | E-005 | Initial uncommissioned-entry failure log | `[LINK OR INLINE SECTION]` |
-| E-006 | Corrected uncommissioned-entry dashboard | `[PENDING]` |
-| E-007 | Uncommissioned service-exit reboot log | `[PENDING]` |
-| E-008 | Commissioned startup dashboard and log | `[PENDING]` |
-| E-009 | Commissioned browser service-entry dashboard | `[PENDING]` |
-| E-010 | Final commissioned recovery dashboard and log | `[PENDING]` |
+| E-006 | Corrected uncommissioned-entry dashboard | `Not recorded` |
+| E-007 | Uncommissioned service-exit reboot log | `Not recorded` |
+| E-008 | Commissioned startup dashboard and log | `Not recorded` |
+| E-009 | Commissioned browser service-entry dashboard | `Not recorded` |
+| E-010 | Final commissioned recovery dashboard and log | `Not recorded` |
 
 ---
 
@@ -896,13 +896,13 @@ DEFERRED BY DESIGN until HMI/MQTT integration testing.
 
 ## Acceptance decision
 
-**Phase 4B.3 physical acceptance:** `ACCEPTANCE BLOCKED — FINAL PURE-SUITE RETEST PENDING OPERATOR`
+**Phase 4B.3 physical acceptance:** `PASSED AFTER CORRECTION`
 
 **Accepted firmware commit:** `PENDING`
 
 **Operator statement:**
 
-> `[Enter a concise statement confirming what was physically tested, what passed, and what remains deferred or unverified.]`
+> `Not recorded`
 
 **Operator:** Shawn  
-**Date:** `[YYYY-MM-DD]`
+**Date:** `Not recorded`

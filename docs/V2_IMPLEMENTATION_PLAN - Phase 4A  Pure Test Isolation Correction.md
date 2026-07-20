@@ -19,8 +19,8 @@ Correct the Phase 4A pure non-motion unit test suite (`t`) so that it executes 1
 
 ### Component 1: Stack-Local Authority Core
 
-#### [MODIFY] [argus_authority_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.h)
-#### [MODIFY] [argus_authority_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_authority_mgr.c)
+#### [MODIFY] [argus_authority_mgr.h](../main/argus_authority_mgr.h)
+#### [MODIFY] [argus_authority_mgr.c](../main/argus_authority_mgr.c)
 
 - Extract pure, caller-provided authority state transition logic (`argus_authority_core_*`) operating on stack-local `argus_authority_snapshot_t` instances.
 - Re-implement production `argus_authority_mgr` functions as wrappers around `&s_authority`.
@@ -30,8 +30,8 @@ Correct the Phase 4A pure non-motion unit test suite (`t`) so that it executes 1
 
 ### Component 2: Injected Mock Operations Seam for Network & Service Entry
 
-#### [MODIFY] [argus_net_mgr.h](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.h)
-#### [MODIFY] [argus_net_mgr.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_net_mgr.c)
+#### [MODIFY] [argus_net_mgr.h](../main/argus_net_mgr.h)
+#### [MODIFY] [argus_net_mgr.c](../main/argus_net_mgr.c)
 
 - Define `argus_service_transition_ops_t` containing function pointers for `stop_broker`, `disconnect_sta`, `set_wifi_ap_only`, `verify_broker_stopped`, `verify_sta_disconnected`, and `verify_ap_active`.
 - Extract pure service entry orchestration function `argus_net_mgr_orchestrate_service_entry()` accepting stack-local authority snapshot, network mode, and `const argus_service_transition_ops_t *ops`.
@@ -42,7 +42,7 @@ Correct the Phase 4A pure non-motion unit test suite (`t`) so that it executes 1
 
 ### Component 3: Phase 4A Test Suite & Non-Mutation Proof
 
-#### [MODIFY] [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+#### [MODIFY] [argus_tests_4a.c](../main/argus_tests_4a.c)
 
 - Update all 18 test cases to operate 100% synchronously on stack-local memory structures, stack-local mock NVS drivers, stack-local authority snapshots, and stack-local mock transition operations.
 - Completely remove all calls to live `nvs_flash_init`, `argus_net_mgr_post_event`, real `argus_authority_prepare_service_transition`, and production NVS driver re-initialization.
@@ -80,7 +80,7 @@ Correct the Phase 4A pure non-motion unit test suite (`t`) so that it executes 1
 
 ### Component 4: Documentation
 
-#### [MODIFY] [PHASE_4A_RUNTIME_ACCEPTANCE.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/PHASE_4A_RUNTIME_ACCEPTANCE.md)
+#### [MODIFY] [PHASE_4A_RUNTIME_ACCEPTANCE.md](../docs/PHASE_4A_RUNTIME_ACCEPTANCE.md)
 
 - Update documentation to record that Scenario C is `COMPLETE — PHYSICALLY VERIFIED`, the pure-test isolation correction is implemented and compiled, and Scenario D is pending Shawn's physical testing.
 

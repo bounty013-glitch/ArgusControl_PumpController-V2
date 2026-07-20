@@ -5,9 +5,9 @@ This document summarizes the changes, automated test results, and logic validati
 ## Changes Made
 
 ### 1. Planning Documents Updated
-*   **V2 Baseline Audit**: [V2_BASELINE_AUDIT.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/V2_BASELINE_AUDIT.md)
-*   **V2 Controller Architecture**: [V2_CONTROLLER_ARCHITECTURE.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/V2_CONTROLLER_ARCHITECTURE.md)
-*   **V2 Implementation Plan**: [V2_IMPLEMENTATION_PLAN.md](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/docs/V2_IMPLEMENTATION_PLAN.md)
+*   **V2 Baseline Audit**: [V2_BASELINE_AUDIT.md](../docs/V2_BASELINE_AUDIT.md)
+*   **V2 Controller Architecture**: [V2_CONTROLLER_ARCHITECTURE.md](../docs/V2_CONTROLLER_ARCHITECTURE.md)
+*   **V2 Implementation Plan**: [V2_IMPLEMENTATION_PLAN.md](../docs/V2_IMPLEMENTATION_PLAN.md)
 *   *Key updates*: Corrected timing conversions (12000 milli-RPM = 12.0 RPM); updated telemetry terms to `requested_rpm_milli`, `generated_rpm_milli`, and `generated_step_count` to reflect open-loop design; documented safety/E-stop definitions (MQTT is not safety-rated); noted that generated pulses do not prove physical motion; marked displacement configuration as unconfirmed; established ENABLE polarity as a hardware blocker.
 
 ### 2. Cleanup

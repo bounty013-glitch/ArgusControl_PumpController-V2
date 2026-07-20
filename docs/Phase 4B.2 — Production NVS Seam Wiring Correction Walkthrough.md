@@ -45,7 +45,7 @@ argus_nvs_config_get()   → reads s_prod_core.active_config
 
 ## Changes
 
-### [argus_nvs_config.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_nvs_config.c)
+### [argus_nvs_config.c](../main/argus_nvs_config.c)
 
 #### Globals
 - Replaced 4 static globals with single `static argus_nvs_core_t s_prod_core`
@@ -86,7 +86,7 @@ argus_nvs_config_get()   → reads s_prod_core.active_config
 | Both slots unprovisioned despite HWM | HWM merge already locks all bits (fail-closed) |
 | Only one valid slot | No selector-failure possible, normal path |
 
-### [argus_tests_4a.c](file:///c:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/main/argus_tests_4a.c)
+### [argus_tests_4a.c](../main/argus_tests_4a.c)
 
 #### Mock Infrastructure
 - Added `selector_write_error` to `mock_nvs_store_t`
