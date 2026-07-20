@@ -397,8 +397,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     /* NVS commissioned status — no secrets */
     argus_config_payload_t cfg;
-    bool commissioned = (argus_nvs_config_get(&cfg) == ESP_OK) &&
-                        argus_nvs_config_is_commissioned(&cfg);
+    bool has_cfg = false;
+    bool commissioned = (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK) &&
+                        has_cfg && argus_nvs_config_is_commissioned(&cfg);
     /* Zero the config to prevent accidental secret leakage */
     memset(&cfg, 0, sizeof(cfg));
 
@@ -417,7 +418,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"generation\":%" PRIu32 "},"
         "\"network\":{\"mode\":\"%s\","
         "\"sta_connected\":%s,\"sta_ip_acquired\":%s,"
-        "\"ap_started\":%s},"
+        "\"ap_started\":%s,"
+        "\"sta_state\":\"%s\","
+        "\"last_error_category\":\"%s\","
+        "\"last_disconnect_reason_code\":%d,"
+        "\"last_disconnect_reason_name\":\"%s\","
+        "\"retry_count\":%" PRIu32 ","
+        "\"seconds_until_retry\":%" PRIu32 ","
+        "\"manual_reconnect_permitted\":%s,"
+        "\"operator_action_required\":%s,"
+        "\"operator_guidance\":\"%s\"},"
         "\"broker\":{\"running\":%s,"
         "\"active_clients\":%" PRId32 ","
         "\"observable\":%s},"
@@ -436,6 +446,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.sta_connected ? "true" : "false",
         net_snap.sta_ip_acquired ? "true" : "false",
         net_snap.ap_started ? "true" : "false",
+        argus_net_mgr_get_sta_state_name(argus_net_mgr_get_sta_state()),
+        argus_net_mgr_get_last_disconnect_category_name(),
+        argus_net_mgr_get_last_disconnect_reason(),
+        argus_net_mgr_get_last_disconnect_reason_name(),
+        argus_net_mgr_get_consecutive_failures(),
+        argus_net_mgr_get_retry_seconds(),
+        (!net_snap.sta_ip_acquired && commissioned && net_mode_str[0] != 'S') ? "true" : "false",
+        argus_net_mgr_is_action_required() ? "true" : "false",
+        argus_net_mgr_get_operator_guidance(),
         net_snap.mqtt_broker_running ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
         (broker_err == ESP_OK) ? "true" : "false",
@@ -1081,7 +1100,8 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     set_api_headers(req);
 
     argus_config_payload_t cfg;
-    esp_err_t err = argus_nvs_config_get(&cfg);
+    bool has_cfg = false;
+    esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
@@ -1223,9 +1243,10 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         fields.has_sta_pass = (jr_pass == ARGUS_JSON_OK);
     }
 
-    /* Load current config from NVS as base for overlay */
+    /* Load current effective config as base for overlay */
     argus_config_payload_t cfg;
-    esp_err_t err = argus_nvs_config_get(&cfg);
+    bool has_cfg = false;
+    esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"config_read_failed\"}");
@@ -1735,6 +1756,56 @@ static esp_err_t stop_server_locked(void)
     return ESP_OK;
 }
 
+/* ── POST /api/network/reconnect ───────────────────────────────────── */
+static esp_err_t reconnect_post_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+
+    if (req->method != HTTP_POST) {
+        return send_method_not_allowed(req);
+    }
+
+    set_api_headers(req);
+
+    argus_config_payload_t cfg;
+    bool has_cfg = false;
+    bool commissioned = (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK) &&
+                        has_cfg && argus_nvs_config_is_commissioned(&cfg);
+
+    if (!commissioned) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"Not commissioned\"}");
+        return ESP_OK;
+    }
+
+    argus_network_mode_t mode = argus_net_mgr_get_mode();
+    if (mode == ARGUS_NET_MODE_SERVICE_TRANSITION || mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"Local service active\"}");
+        return ESP_OK;
+    }
+
+    argus_net_event_t evt = { .type = ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST };
+    esp_err_t err = argus_net_mgr_post_event(&evt);
+    if (err == ESP_OK) {
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "{\"status\":\"accepted\"}");
+    } else {
+        httpd_resp_set_status(req, "429 Too Many Requests");
+        httpd_resp_sendstr(req, "{\"error\":\"Queue full\"}");
+    }
+
+    return ESP_OK;
+}
+
+static const httpd_uri_t uri_network_reconnect = {
+    .uri       = "/api/network/reconnect",
+    .method    = HTTP_POST,
+    .handler   = reconnect_post_handler,
+    .user_ctx  = NULL
+};
+
+
 esp_err_t argus_http_server_start(void)
 {
     if (!s_initialized) {
@@ -1795,6 +1866,8 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_restart);
     if (reg_err != ESP_OK) goto rollback;
     /* Phase 4B.3 endpoints */
+    reg_err = httpd_register_uri_handler(s_server, &uri_network_reconnect);
+    if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);

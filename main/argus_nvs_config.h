@@ -107,11 +107,12 @@ esp_err_t argus_nvs_core_factory_reset(argus_nvs_core_t *core, const argus_nvs_d
 esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver);
 
 /**
- * @brief Load current active LKG configuration.
- * @param[out] out_cfg Destination payload struct.
- * @return ESP_OK if valid configuration loaded; ESP_ERR_NOT_FOUND if uncommissioned/empty.
+ * @brief Load current effective configuration payload (persisted or defaults).
+ * @param[out] out_cfg Destination payload struct (populated with defaults if uncommissioned).
+ * @param[out] out_has_persisted_config Set to true if a valid LKG slot exists in NVS.
+ * @return ESP_OK if effective configuration is available; error if initialization or core access genuinely failed.
  */
-esp_err_t argus_nvs_config_get(argus_config_payload_t *out_cfg);
+esp_err_t argus_nvs_config_get_effective(argus_config_payload_t *out_cfg, bool *out_has_persisted_config);
 
 /**
  * @brief Stage and commit a new configuration payload via power-loss-safe dual-slot sequence.

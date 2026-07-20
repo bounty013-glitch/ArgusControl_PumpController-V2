@@ -676,12 +676,21 @@ esp_err_t argus_nvs_config_init(const argus_nvs_driver_t *driver)
     return ESP_OK;
 }
 
-esp_err_t argus_nvs_config_get(argus_config_payload_t *out_cfg)
+esp_err_t argus_nvs_config_get_effective(argus_config_payload_t *out_cfg, bool *out_has_persisted_config)
 {
-    if (!out_cfg) return ESP_ERR_INVALID_ARG;
-    if (!s_initialized) argus_nvs_config_init(NULL);
+    if (!out_cfg || !out_has_persisted_config) return ESP_ERR_INVALID_ARG;
+    
+    if (!s_initialized) {
+        esp_err_t err = argus_nvs_config_init(NULL);
+        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            return err;
+        }
+    }
+    
     memcpy(out_cfg, &s_prod_core.active_config, sizeof(argus_config_payload_t));
-    return s_prod_core.has_valid_config ? ESP_OK : ESP_ERR_NOT_FOUND;
+    *out_has_persisted_config = s_prod_core.has_valid_config;
+    
+    return ESP_OK;
 }
 
 esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg)

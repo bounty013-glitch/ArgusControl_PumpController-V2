@@ -388,7 +388,8 @@ static void argus_phase4a_acceptance_menu(void)
                 argus_identity_t id;
                 argus_identity_get(&id);
                 argus_config_payload_t cfg;
-                bool has_cfg = (argus_nvs_config_get(&cfg) == ESP_OK);
+                bool has_cfg = false;
+                argus_nvs_config_get_effective(&cfg, &has_cfg);
 
                 printf("\n--- Sanitized Device Identity & Configuration ---\n");
                 printf("Hardware UID : %s\n", id.mac_uid);
@@ -423,9 +424,10 @@ static void argus_phase4a_acceptance_menu(void)
             }
             case '3': {
                 argus_config_payload_t cfg;
-                esp_err_t err = argus_nvs_config_get(&cfg);
+                bool has_cfg = false;
+                esp_err_t err = argus_nvs_config_get_effective(&cfg, &has_cfg);
                 printf("\n--- NVS Slot Validity & Generation ---\n");
-                if (err == ESP_OK) {
+                if (err == ESP_OK && has_cfg) {
                     uint32_t crc = argus_nvs_config_calc_crc32(&cfg);
                     printf("Commissioned : YES\n");
                     printf("Client ID    : %s\n", cfg.client_id);

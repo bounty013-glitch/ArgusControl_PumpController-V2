@@ -46,6 +46,10 @@ esp_err_t argus_identity_init(void);
  */
 esp_err_t argus_identity_get(argus_identity_t *out_id);
 
+struct argus_config_payload_t; /* Forward decl */
+void argus_identity_compose_effective(argus_identity_t *out_id, const argus_identity_t *hw_metadata, const void *nvs_cfg, bool has_persisted);
+
+
 /**
  * @brief Validate a proposed client_id string.
  * @param client_id String to validate (must be 1..32 chars, alphanumeric, '-' or '_').

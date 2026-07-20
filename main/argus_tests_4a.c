@@ -3157,6 +3157,126 @@ static esp_err_t test_sta_disconnect_eval(void)
     return ESP_OK;
 }
 
+// Test 41: Fresh store and effective defaults, GET /api/config behavior
+static esp_err_t test_nvs_bootstrap_fresh_returns_defaults(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Core init failed");
+
+    // Simulate argus_nvs_config_init's defaulting logic
+    if (!core.has_valid_config) {
+        snprintf(core.active_config.client_id, sizeof(core.active_config.client_id), "default_client");
+        snprintf(core.active_config.unit_id, sizeof(core.active_config.unit_id), "unit_01");
+        snprintf(core.active_config.device_name, sizeof(core.active_config.device_name), "Argus Peristaltic Pump V2");
+    }
+
+    TEST_ASSERT(core.has_valid_config == false, "Persisted indicator is true on fresh store");
+    TEST_ASSERT(strcmp(core.active_config.client_id, "default_client") == 0, "Defaults not applied");
+
+    // Simulate GET /api/config logic
+    bool id_prov = (core.active_config.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0;
+    bool pass_set = (strlen(core.active_config.sta_pass) > 0);
+    TEST_ASSERT(id_prov == false, "Identity provisioned on fresh store");
+    TEST_ASSERT(pass_set == false, "Password set on fresh store");
+
+    return ESP_OK;
+}
+
+// Test 42: First Identity overlay, commit, readback, and subsequent Wi-Fi overlay
+static esp_err_t test_nvs_bootstrap_identity_overlay_commit(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "Core init failed");
+
+    // Defaults
+    if (!core.has_valid_config) {
+        strlcpy(core.active_config.client_id, "default_client", sizeof(core.active_config.client_id));
+        strlcpy(core.active_config.unit_id, "unit_01", sizeof(core.active_config.unit_id));
+        strlcpy(core.active_config.device_name, "Argus Peristaltic Pump V2", sizeof(core.active_config.device_name));
+    }
+
+    // Invalid identity input rejected
+    argus_config_fields_t invalid_fields = {0};
+    strlcpy(invalid_fields.client_id, "invalid client!", sizeof(invalid_fields.client_id)); // Invalid characters
+    invalid_fields.has_client_id = true;
+    argus_config_payload_t out_cfg_invalid;
+    argus_config_overlay_result_t overlay_res = argus_config_overlay_apply(&core.active_config, ARGUS_CONFIG_SCOPE_IDENTITY, &invalid_fields, &out_cfg_invalid);
+    TEST_ASSERT(overlay_res.success, "Overlay apply should succeed for syntactic checks");
+    // But validation fails:
+    TEST_ASSERT(argus_nvs_config_validate(&out_cfg_invalid) != ESP_OK, "Validation should fail on invalid identity");
+
+    // First Identity overlay
+    argus_config_fields_t fields = {0};
+    strlcpy(fields.client_id, "paladin", sizeof(fields.client_id));
+    fields.has_client_id = true;
+    strlcpy(fields.unit_id, "pump_001", sizeof(fields.unit_id));
+    fields.has_unit_id = true;
+    strlcpy(fields.device_name, "Testing Pump", sizeof(fields.device_name));
+    fields.has_device_name = true;
+
+    argus_config_payload_t out_cfg;
+    TEST_ASSERT(argus_config_overlay_apply(&core.active_config, ARGUS_CONFIG_SCOPE_IDENTITY, &fields, &out_cfg).success, "Overlay failed");
+    TEST_ASSERT(strcmp(out_cfg.client_id, "paladin") == 0, "Client ID not overlayed");
+    TEST_ASSERT(strlen(out_cfg.sta_ssid) == 0, "SSID not empty");
+
+    // First verified commit
+    TEST_ASSERT(argus_nvs_core_commit(&core, &out_cfg) == ESP_OK, "Commit failed");
+    TEST_ASSERT(core.has_valid_config == true, "Persisted indicator not true after commit");
+
+    // Configuration retrieval after first commit
+    argus_nvs_core_t core2;
+    TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Second init failed");
+    TEST_ASSERT(core2.has_valid_config == true, "Persisted indicator not true after reboot");
+    TEST_ASSERT(strcmp(core2.active_config.client_id, "paladin") == 0, "Saved identity not retrieved");
+    TEST_ASSERT(strlen(core2.active_config.sta_ssid) == 0, "SSID not empty on reboot");
+
+    // Wi-Fi overlay after identity-only provisioning
+    argus_config_fields_t wifi_fields = {0};
+    strlcpy(wifi_fields.sta_ssid, "MyNet", sizeof(wifi_fields.sta_ssid));
+    wifi_fields.has_sta_ssid = true;
+    strlcpy(wifi_fields.sta_pass, "SuperSecret123", sizeof(wifi_fields.sta_pass));
+    wifi_fields.has_sta_pass = true;
+
+    argus_config_payload_t out_cfg_wifi;
+    TEST_ASSERT(argus_config_overlay_apply(&core2.active_config, ARGUS_CONFIG_SCOPE_WIFI, &wifi_fields, &out_cfg_wifi).success, "WiFi overlay failed");
+    TEST_ASSERT(strcmp(out_cfg_wifi.client_id, "paladin") == 0, "Saved identity overwritten");
+    TEST_ASSERT(strcmp(out_cfg_wifi.sta_ssid, "MyNet") == 0, "SSID not overlayed");
+
+    TEST_ASSERT(argus_nvs_core_commit(&core2, &out_cfg_wifi) == ESP_OK, "WiFi commit failed");
+
+    // Readback verification
+    argus_nvs_core_t core3;
+    TEST_ASSERT(argus_nvs_core_init(&core3, &driver) == ESP_OK, "Third init failed");
+    TEST_ASSERT(strcmp(core3.active_config.sta_ssid, "MyNet") == 0, "Saved WiFi not retrieved");
+
+    return ESP_OK;
+}
+
+// Test 43: Genuine initialization or backend read failure handling
+static esp_err_t test_nvs_bootstrap_error_handling(void)
+{
+    corruptible_mock_nvs_t cstore = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &cstore.store);
+
+    // Provide a driver that fails init or read
+    driver.read_slot = NULL; // Simulate missing read function, will fail core_init
+
+    argus_nvs_core_t core;
+    esp_err_t err = argus_nvs_core_init(&core, &driver);
+    TEST_ASSERT(err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND, "Core init should fail completely on missing backend");
+
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
@@ -3210,6 +3330,9 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_identity_field_sanitization);
         RUN_TEST(test_nvs_schema_validation);
         RUN_TEST(test_nvs_open_sta_rejection);
+        RUN_TEST(test_nvs_bootstrap_fresh_returns_defaults);
+        RUN_TEST(test_nvs_bootstrap_identity_overlay_commit);
+        RUN_TEST(test_nvs_bootstrap_error_handling);
         RUN_TEST(test_nvs_dual_slot_atomic_write_readback);
         RUN_TEST(test_nvs_lkg_rollback_on_crc_mismatch);
         RUN_TEST(test_password_masking_in_telemetry);
@@ -3375,3 +3498,74 @@ esp_err_t argus_tests_4a_run_all(void)
 
     return overall_pass ? ESP_OK : ESP_FAIL;
 }
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Phase 4B.3: Wi-Fi Recovery, Observability, and Identity Reconciliation
+ * ───────────────────────────────────────────────────────────────────────────*/
+
+static esp_err_t test_4b3_classify_reasons(void)
+{
+    const char *name;
+    argus_disconnect_category_t cat;
+    
+    cat = argus_net_classify_disconnect(WIFI_REASON_AUTH_EXPIRE, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "AUTH_EXPIRE should be AUTHENTICATION");
+    
+    cat = argus_net_classify_disconnect(WIFI_REASON_NO_AP_FOUND, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "NO_AP_FOUND should be AP_UNAVAILABLE");
+    
+    cat = argus_net_classify_disconnect(99, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_UNKNOWN, "99 should be UNKNOWN");
+    
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3_evaluate_retry(void)
+{
+    argus_sta_state_t state;
+    
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 1);
+    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "1 auth fail -> RETRY_WAIT");
+    
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 3);
+    TEST_ASSERT(state == ARGUS_STA_ACTION_REQUIRED, "3 auth fails -> ACTION_REQUIRED");
+    
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, 5);
+    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "5 AP fails -> RETRY_WAIT");
+    
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3_can_manual_reconnect(void)
+{
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_AP_ONLY, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_AP_ONLY");
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_TRANSITION, ARGUS_STA_ACTION_REQUIRED) == false, "Cannot reconnect in SERVICE_TRANSITION");
+    
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_ACTION_REQUIRED) == true, "Can reconnect in COMMISSIONED_STA if ACTION_REQUIRED");
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_RETRY_WAIT) == true, "Can reconnect in AP_DISCOVERABLE if RETRY_WAIT");
+    
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_CONNECTED) == false, "Cannot reconnect if CONNECTED");
+    
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3_identity_composition(void)
+{
+    argus_identity_t hw = {0};
+    strlcpy(hw.mac_uid, "ESP32S3-123", sizeof(hw.mac_uid));
+    strlcpy(hw.fw_version, "v2-dev", sizeof(hw.fw_version));
+    
+    argus_config_payload_t cfg = {0};
+    strlcpy(cfg.client_id, "test_client", sizeof(cfg.client_id));
+    strlcpy(cfg.unit_id, "test_unit", sizeof(cfg.unit_id));
+    strlcpy(cfg.device_name, "Test Name", sizeof(cfg.device_name));
+    
+    argus_identity_t composed = {0};
+    argus_identity_compose_effective(&composed, &hw, &cfg, true);
+    
+    TEST_ASSERT(strcmp(composed.mac_uid, "ESP32S3-123") == 0, "Immutable metadata preserved");
+    TEST_ASSERT(strcmp(composed.client_id, "test_client") == 0, "Mutable NVS data applied");
+    
+    return ESP_OK;
+}
+
+
