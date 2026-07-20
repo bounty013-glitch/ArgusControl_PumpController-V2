@@ -36,3 +36,15 @@ Each timer captures the active generation when scheduled. Callback events carry 
 All Phase 4B.3a tests use caller-owned authority, transaction, evidence, and callback-trace state. Tests must cover valid/invalid authority pairs, asynchronous apply ordering, stale events, all required callback failures, configuration validation, secret clearing, successful completion, duplicate requests, reconnect policy, evidence retention, mixed failure streaks, countdown boundaries, queue truthfulness, service cancellation, and AP/HTTP preservation.
 
 Every test is registered through `RUN_TEST()`. The source registration count remains provisional until diagnostic option `t` executes on hardware. Compilation does not establish a runtime pass.
+
+## Post-`d8c898f` service-entry correction
+
+Triple independent review after `d8c898f` identified a policy contradiction: the physical checklist required browser Local Service entry during Wi-Fi recovery, but both HTTP preflight and production execution rejected the truthful recovery authority pair `NONE/NONE`. Production also cancelled the active transaction and timers before completing that rejection. This history is retained; the defect was not present only in documentation.
+
+The corrected shared policy preserves normal `AP_DISCOVERABLE + SUPERVISORY/MQTT` entry and uncommissioned `UNCOMMISSIONED_AP + NONE/NONE` entry. It additionally permits commissioned `AP_DISCOVERABLE + NONE/NONE` only when the Service AP is active, STA is disconnected, no STA IP is held, the broker is observably stopped, no service transition is active, and recovery is explicitly cancellable through `RETRY_WAIT`, `ACTION_REQUIRED`, `IDLE`, or an active generation-tagged recovery transaction. Connected STA, retained IP, running or unobservable broker, absent Service AP, uncommissioned recovery, mixed authority, ineligible lifecycle state, and an active service transition all reject.
+
+HTTP preflight and queued execution use the same pure evaluator. An accepted browser request carries a fingerprint of the coherent eligibility snapshot. The network-manager task revalidates policy and that fingerprint under the network lock, then revalidates again after taking dispatch ownership. Rejection occurs before any transaction, generation, timer, evidence, counter, mode, authority, broker, or STA mutation.
+
+Only after eligibility is proven does production invalidate recovery generations, cancel and scrub the transaction, and stop both timers before continuing through the existing service-entry orchestrator. A timer-command failure preserves the exact callback error and identifies whether retry-timer or IP-timeout stopping failed; generations remain invalidated so a delayed event cannot restart recovery.
+
+Physical Test 8 remains pending. No physical acceptance has occurred. The corrected runner contains 139 source registrations, including 45 Phase 4B.3a registrations; both counts remain provisional until diagnostic option `t` executes the suite on hardware.

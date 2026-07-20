@@ -1013,6 +1013,8 @@ esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t 
     out->active_client_count = atomic_load(&s_broker.active_client_count);
     out->has_server_task = (s_broker.server_task_handle != NULL);
     out->has_listener = (s_broker.listen_sock >= 0);
+    out->running = s_broker.state == BROKER_STATE_RUNNING;
+    out->stopped = s_broker.state == BROKER_STATE_STOPPED;
     xSemaphoreGive(s_broker.lifecycle_mutex);
     return ESP_OK;
 }

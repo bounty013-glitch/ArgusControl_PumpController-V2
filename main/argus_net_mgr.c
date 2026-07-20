@@ -12,6 +12,7 @@
 #include "argus_mqtt_broker.h"
 #include "argus_http_server.h"
 #include "argus_restart_mgr.h"
+#include "argus_service_policy.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -298,6 +299,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 }
 
 static void argus_wifi_apply_get_production_ops(argus_wifi_apply_ops_t *ops);
+static esp_err_t argus_net_mgr_request_service_internal(
+    argus_authority_owner_t requested_owner,
+    const argus_service_entry_fingerprint_t *expected_preflight);
 
 static void net_mgr_task(void *pvParameters)
 {
@@ -306,7 +310,9 @@ static void net_mgr_task(void *pvParameters)
         if (xQueueReceive(s_event_queue, &evt, portMAX_DELAY) == pdTRUE) {
             switch (evt.type) {
                 case ARGUS_NET_EVT_SERVICE_REQUEST:
-                    argus_net_mgr_request_service(evt.requested_owner);
+                    argus_net_mgr_request_service_internal(
+                        evt.requested_owner,
+                        evt.service_preflight_required ? &evt.service_preflight : NULL);
                     break;
 
                 case ARGUS_NET_EVT_SERVICE_EXIT:
@@ -1365,6 +1371,37 @@ void argus_wifi_transaction_cancel(argus_wifi_transaction_t *txn)
     txn->last_error = ESP_ERR_INVALID_STATE;
 }
 
+esp_err_t argus_net_cancel_recovery_for_service(
+    const argus_service_recovery_cancel_ops_t *ops,
+    argus_service_cancel_failure_t *out_failure)
+{
+    if (out_failure) *out_failure = ARGUS_SERVICE_CANCEL_FAILURE_NONE;
+    if (!ops || !ops->transaction || !ops->timer_generation ||
+        !ops->active_transaction_generation ||
+        !ops->auto_retry_timer_generation || !ops->ip_timeout_timer_generation ||
+        !ops->stop_retry_timer || !ops->stop_ip_timeout_timer) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    (*ops->timer_generation)++;
+    atomic_store(ops->active_transaction_generation, 0);
+    atomic_store(ops->auto_retry_timer_generation, 0);
+    atomic_store(ops->ip_timeout_timer_generation, 0);
+    argus_wifi_transaction_cancel(ops->transaction);
+
+    esp_err_t retry_err = ops->stop_retry_timer(ops->ctx);
+    esp_err_t ip_err = ops->stop_ip_timeout_timer(ops->ctx);
+    if (retry_err != ESP_OK) {
+        if (out_failure) *out_failure = ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER;
+        return retry_err;
+    }
+    if (ip_err != ESP_OK) {
+        if (out_failure) *out_failure = ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER;
+        return ip_err;
+    }
+    return ESP_OK;
+}
+
 esp_err_t argus_net_mgr_orchestrate_wifi_apply(argus_network_mode_t *net_mode,
                                                argus_sta_state_t *sta_state,
                                                bool sta_connected,
@@ -1458,6 +1495,63 @@ static void argus_wifi_apply_get_production_ops(argus_wifi_apply_ops_t *ops) {
     ops->ctx = NULL;
 }
 
+static void populate_net_snapshot_locked(argus_net_snapshot_t *out_snap)
+{
+    memset(out_snap, 0, sizeof(*out_snap));
+    out_snap->mode = s_net_mode;
+    out_snap->last_error = s_last_error;
+    out_snap->sta_connected = atomic_load(&s_sta_connected);
+    out_snap->sta_ip_acquired = atomic_load(&s_sta_ip_acquired);
+    out_snap->ap_started = atomic_load(&s_ap_started);
+
+    argus_mqtt_broker_lifecycle_obs_t broker_obs = {0};
+    out_snap->mqtt_broker_observable =
+        argus_mqtt_broker_get_lifecycle_obs(&broker_obs) == ESP_OK;
+    out_snap->mqtt_broker_running = out_snap->mqtt_broker_observable && broker_obs.running;
+    out_snap->mqtt_broker_stopped = out_snap->mqtt_broker_observable && broker_obs.stopped;
+    out_snap->commissioned = has_valid_commissioned_config();
+    out_snap->sta_state = s_sta_state;
+    out_snap->last_disconnect_category = s_last_disconnect_category;
+    out_snap->last_disconnect_reason = s_last_disconnect_reason;
+    out_snap->consecutive_failures = s_consecutive_failures;
+    out_snap->seconds_until_retry = argus_net_mgr_get_retry_seconds();
+    out_snap->action_required = argus_net_mgr_is_action_required();
+    out_snap->manual_reconnect_permitted = argus_net_can_manual_reconnect(
+        s_net_mode, s_sta_state, out_snap->commissioned);
+    out_snap->apply_state = s_wifi_transaction.state;
+    out_snap->timer_generation = s_timer_generation;
+    out_snap->wifi_transaction_active = s_wifi_transaction.active;
+    out_snap->transaction_generation = s_wifi_transaction.generation;
+    out_snap->auto_retry_timer_active =
+        s_auto_retry_timer && xTimerIsTimerActive(s_auto_retry_timer);
+    out_snap->auto_retry_timer_generation =
+        atomic_load(&s_auto_retry_timer_generation);
+    out_snap->ip_timeout_timer_active =
+        s_ip_timeout_timer && xTimerIsTimerActive(s_ip_timeout_timer);
+    out_snap->ip_timeout_timer_generation =
+        atomic_load(&s_ip_timeout_timer_generation);
+
+    if (out_snap->sta_ip_acquired && s_netif_sta) {
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(s_netif_sta, &ip_info) == ESP_OK) {
+            snprintf(out_snap->sta_ip_address, sizeof(out_snap->sta_ip_address),
+                     IPSTR, IP2STR(&ip_info.ip));
+        }
+    }
+}
+
+static esp_err_t service_stop_retry_timer(void *ctx)
+{
+    (void)ctx;
+    return xTimerStop(s_auto_retry_timer, 0) == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t service_stop_ip_timeout_timer(void *ctx)
+{
+    (void)ctx;
+    return xTimerStop(s_ip_timeout_timer, 0) == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
 esp_err_t argus_net_mgr_request_manual_reconnect(void)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
@@ -1478,7 +1572,9 @@ esp_err_t argus_net_mgr_request_manual_reconnect(void)
     return argus_net_mgr_post_event(&evt);
 }
 
-esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
+static esp_err_t argus_net_mgr_request_service_internal(
+    argus_authority_owner_t requested_owner,
+    const argus_service_entry_fingerprint_t *expected_preflight)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
@@ -1489,55 +1585,80 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
 
     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
 
-    if (s_net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE && s_net_mode != ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
-        ESP_LOGE(TAG, "Service entry rejected: starting mode must be AP_DISCOVERABLE or UNCOMMISSIONED_AP (current: %s)",
-                 argus_net_mgr_get_mode_name(s_net_mode));
+    argus_net_snapshot_t net_pre;
+    argus_authority_snapshot_t auth_pre;
+    argus_net_event_t evaluated_evt = {0};
+    populate_net_snapshot_locked(&net_pre);
+    esp_err_t auth_err = argus_authority_mgr_get_snapshot(&auth_pre);
+    if (auth_err != ESP_OK) {
+        ESP_LOGE(TAG, "Service entry rejected: authority snapshot failed: %s",
+                 esp_err_to_name(auth_err));
         xSemaphoreGive(s_net_mutex);
-        return ESP_ERR_INVALID_STATE;
+        return auth_err;
     }
-
-    if (!atomic_load(&s_ap_started)) {
-        ESP_LOGE(TAG, "Service entry rejected: Service AP is not started");
+    argus_svc_policy_result_t policy = argus_service_policy_evaluate_entry_for_owner(
+        &net_pre, &auth_pre, requested_owner, &evaluated_evt);
+    if (policy != ARGUS_SVC_POLICY_OK ||
+        (expected_preflight && !argus_service_entry_fingerprint_matches(
+            expected_preflight, &evaluated_evt.service_preflight))) {
+        ESP_LOGW(TAG, "Service entry rejected before mutation: policy=%d, preflight_changed=%d",
+                 (int)policy,
+                 expected_preflight && policy == ARGUS_SVC_POLICY_OK);
         xSemaphoreGive(s_net_mutex);
         return ESP_ERR_INVALID_STATE;
     }
 
     argus_cmd_router_lock_dispatch();
 
-    s_timer_generation++;
-    atomic_store(&s_active_transaction_generation, 0);
-    argus_wifi_transaction_cancel(&s_wifi_transaction);
-    if (xTimerStop(s_auto_retry_timer, 0) != pdPASS ||
-        xTimerStop(s_ip_timeout_timer, 0) != pdPASS) {
-        s_last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
-        ESP_LOGE(TAG, "Service entry could not cancel all Wi-Fi timers");
+    argus_net_snapshot_t net_locked;
+    argus_authority_snapshot_t auth_locked;
+    argus_net_event_t locked_evt = {0};
+    populate_net_snapshot_locked(&net_locked);
+    auth_err = argus_authority_mgr_get_snapshot(&auth_locked);
+    if (auth_err != ESP_OK) {
+        ESP_LOGE(TAG, "Service entry rejected after dispatch lock: authority snapshot failed: %s",
+                 esp_err_to_name(auth_err));
         argus_cmd_router_unlock_dispatch();
         xSemaphoreGive(s_net_mutex);
-        return ESP_FAIL;
+        return auth_err;
+    }
+    policy = argus_service_policy_evaluate_entry_for_owner(
+        &net_locked, &auth_locked, requested_owner, &locked_evt);
+    if (policy != ARGUS_SVC_POLICY_OK ||
+        (expected_preflight && !argus_service_entry_fingerprint_matches(
+            expected_preflight, &locked_evt.service_preflight))) {
+        ESP_LOGW(TAG, "Service entry state changed before dispatch ownership; request rejected without mutation");
+        argus_cmd_router_unlock_dispatch();
+        xSemaphoreGive(s_net_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    argus_service_recovery_cancel_ops_t cancel_ops = {
+        .transaction = &s_wifi_transaction,
+        .timer_generation = &s_timer_generation,
+        .active_transaction_generation = &s_active_transaction_generation,
+        .auto_retry_timer_generation = &s_auto_retry_timer_generation,
+        .ip_timeout_timer_generation = &s_ip_timeout_timer_generation,
+        .stop_retry_timer = service_stop_retry_timer,
+        .stop_ip_timeout_timer = service_stop_ip_timeout_timer,
+        .ctx = NULL
+    };
+    argus_service_cancel_failure_t cancel_failure;
+    esp_err_t cancel_err = argus_net_cancel_recovery_for_service(
+        &cancel_ops, &cancel_failure);
+    if (cancel_err != ESP_OK) {
+        s_last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
+        ESP_LOGE(TAG, "Service entry recovery cancellation failed at %s: %s",
+                 cancel_failure == ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER
+                     ? "auto-retry timer stop" : "IP-timeout timer stop",
+                 esp_err_to_name(cancel_err));
+        argus_cmd_router_unlock_dispatch();
+        xSemaphoreGive(s_net_mutex);
+        return cancel_err;
     }
 
     argus_service_authority_ops_t auth_ops;
     argus_authority_get_production_service_ops(&auth_ops);
-
-    argus_authority_snapshot_t auth_pre;
-    argus_authority_mgr_get_snapshot(&auth_pre);
-    if (s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE) {
-        if (auth_pre.mode != ARGUS_AUTHORITY_SUPERVISORY || auth_pre.owner != ARGUS_AUTH_OWNER_MQTT) {
-            ESP_LOGE(TAG, "Service entry: AP_DISCOVERABLE requires SUPERVISORY/MQTT (got mode=%d, owner=%d)",
-                     (int)auth_pre.mode, (int)auth_pre.owner);
-            argus_cmd_router_unlock_dispatch();
-            xSemaphoreGive(s_net_mutex);
-            return ESP_ERR_INVALID_STATE;
-        }
-    } else if (s_net_mode == ARGUS_NET_MODE_UNCOMMISSIONED_AP) {
-        if (auth_pre.mode != ARGUS_AUTHORITY_NONE || auth_pre.owner != ARGUS_AUTH_OWNER_NONE) {
-            ESP_LOGE(TAG, "Service entry: UNCOMMISSIONED_AP requires NONE/NONE (got mode=%d, owner=%d)",
-                     (int)auth_pre.mode, (int)auth_pre.owner);
-            argus_cmd_router_unlock_dispatch();
-            xSemaphoreGive(s_net_mutex);
-            return ESP_ERR_INVALID_STATE;
-        }
-    }
 
     argus_service_transition_ops_t prod_ops = {
         .request_normal_stop = prod_request_normal_stop,
@@ -1573,6 +1694,11 @@ esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
     return res;
 }
 
+esp_err_t argus_net_mgr_request_service(argus_authority_owner_t requested_owner)
+{
+    return argus_net_mgr_request_service_internal(requested_owner, NULL);
+}
+
 
 esp_err_t argus_net_mgr_post_event(const argus_net_event_t *evt)
 {
@@ -1591,33 +1717,32 @@ esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap)
     if (!out_snap) return ESP_ERR_INVALID_ARG;
 
     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
-    out_snap->mode = s_net_mode;
-    out_snap->last_error = s_last_error;
-    out_snap->sta_connected = atomic_load(&s_sta_connected);
-    out_snap->sta_ip_acquired = atomic_load(&s_sta_ip_acquired);
-    out_snap->ap_started = atomic_load(&s_ap_started);
-    out_snap->mqtt_broker_running = argus_mqtt_broker_is_running();
-    out_snap->sta_state = s_sta_state;
-    out_snap->last_disconnect_category = s_last_disconnect_category;
-    out_snap->last_disconnect_reason = s_last_disconnect_reason;
-    out_snap->consecutive_failures = s_consecutive_failures;
-    out_snap->seconds_until_retry = argus_net_mgr_get_retry_seconds();
-    out_snap->action_required = argus_net_mgr_is_action_required();
-    out_snap->manual_reconnect_permitted = argus_net_can_manual_reconnect(
-        s_net_mode, s_sta_state, has_valid_commissioned_config());
-    out_snap->apply_state = s_wifi_transaction.state;
-    out_snap->timer_generation = s_timer_generation;
-
-    out_snap->sta_ip_address[0] = '\0';
-    if (out_snap->sta_ip_acquired && s_netif_sta) {
-        esp_netif_ip_info_t ip_info;
-        if (esp_netif_get_ip_info(s_netif_sta, &ip_info) == ESP_OK) {
-            snprintf(out_snap->sta_ip_address, sizeof(out_snap->sta_ip_address), IPSTR, IP2STR(&ip_info.ip));
-        }
-    }
+    populate_net_snapshot_locked(out_snap);
     xSemaphoreGive(s_net_mutex);
 
     return ESP_OK;
+}
+
+esp_err_t argus_net_mgr_evaluate_service_entry(
+    argus_authority_owner_t requested_owner,
+    argus_net_snapshot_t *out_net,
+    argus_authority_snapshot_t *out_auth,
+    argus_net_event_t *out_evt,
+    argus_svc_policy_result_t *out_policy)
+{
+    if (!out_net || !out_auth || !out_evt || !out_policy) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    populate_net_snapshot_locked(out_net);
+    esp_err_t auth_err = argus_authority_mgr_get_snapshot(out_auth);
+    if (auth_err == ESP_OK) {
+        *out_policy = argus_service_policy_evaluate_entry_for_owner(
+            out_net, out_auth, requested_owner, out_evt);
+    }
+    xSemaphoreGive(s_net_mutex);
+    return auth_err;
 }
 
 esp_err_t argus_net_mgr_request_restart(void)

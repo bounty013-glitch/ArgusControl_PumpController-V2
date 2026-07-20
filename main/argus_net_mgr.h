@@ -7,6 +7,7 @@
 #define ARGUS_NET_MGR_H
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "argus_authority_mgr.h"
@@ -97,6 +98,40 @@ typedef enum {
     ARGUS_NET_EVT_APPLY_WIFI_CONFIG        /**< Apply new Wi-Fi credentials without restart */
 } argus_net_event_type_t;
 
+typedef enum {
+    ARGUS_SVC_POLICY_OK = 0,
+    ARGUS_SVC_POLICY_IDEMPOTENT,
+    ARGUS_SVC_POLICY_REJECT_MODE,
+    ARGUS_SVC_POLICY_REJECT_AUTHORITY,
+    ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS
+} argus_svc_policy_result_t;
+
+typedef struct {
+    argus_network_mode_t mode;
+    argus_sta_state_t sta_state;
+    argus_wifi_apply_state_t apply_state;
+    argus_control_authority_t authority_mode;
+    argus_authority_owner_t authority_owner;
+    uint32_t authority_generation;
+    uint32_t timer_generation;
+    uint32_t transaction_generation;
+    uint32_t auto_retry_timer_generation;
+    uint32_t ip_timeout_timer_generation;
+    uint32_t consecutive_failures;
+    uint8_t last_disconnect_reason;
+    argus_disconnect_category_t last_disconnect_category;
+    bool sta_connected;
+    bool sta_ip_acquired;
+    bool ap_started;
+    bool mqtt_broker_running;
+    bool mqtt_broker_stopped;
+    bool mqtt_broker_observable;
+    bool commissioned;
+    bool wifi_transaction_active;
+    bool auto_retry_timer_active;
+    bool ip_timeout_timer_active;
+} argus_service_entry_fingerprint_t;
+
 /* Pure helpers for classification and retry decisions */
 argus_disconnect_category_t argus_net_classify_disconnect(uint8_t reason, const char **out_name);
 argus_sta_state_t argus_net_evaluate_retry(argus_disconnect_category_t cat, uint32_t consecutive_failures);
@@ -115,6 +150,8 @@ typedef struct {
     uint8_t disconnect_reason;             /**< Captured from WIFI_EVENT_STA_DISCONNECTED */
     uint32_t timer_generation;
     uint32_t transaction_generation;
+    bool service_preflight_required;
+    argus_service_entry_fingerprint_t service_preflight;
 } argus_net_event_t;
 
 /**
@@ -254,6 +291,27 @@ void argus_wifi_transaction_cancel(argus_wifi_transaction_t *txn);
 bool argus_wifi_transaction_event_matches(const argus_wifi_transaction_t *txn,
                                           uint32_t event_generation);
 
+typedef enum {
+    ARGUS_SERVICE_CANCEL_FAILURE_NONE = 0,
+    ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER,
+    ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER
+} argus_service_cancel_failure_t;
+
+typedef struct {
+    argus_wifi_transaction_t *transaction;
+    uint32_t *timer_generation;
+    _Atomic uint32_t *active_transaction_generation;
+    _Atomic uint32_t *auto_retry_timer_generation;
+    _Atomic uint32_t *ip_timeout_timer_generation;
+    esp_err_t (*stop_retry_timer)(void *ctx);
+    esp_err_t (*stop_ip_timeout_timer)(void *ctx);
+    void *ctx;
+} argus_service_recovery_cancel_ops_t;
+
+esp_err_t argus_net_cancel_recovery_for_service(
+    const argus_service_recovery_cancel_ops_t *ops,
+    argus_service_cancel_failure_t *out_failure);
+
 /* Compatibility entry point for existing pure tests; production owns a
  * persistent argus_wifi_transaction_t and uses the transaction API above. */
 esp_err_t argus_net_mgr_orchestrate_wifi_apply(argus_network_mode_t *net_mode,
@@ -351,6 +409,9 @@ typedef struct {
     bool sta_ip_acquired;
     bool ap_started;
     bool mqtt_broker_running;
+    bool mqtt_broker_stopped;
+    bool mqtt_broker_observable;
+    bool commissioned;
     argus_sta_state_t sta_state;
     argus_disconnect_category_t last_disconnect_category;
     uint8_t last_disconnect_reason;
@@ -361,9 +422,22 @@ typedef struct {
     char sta_ip_address[16];
     argus_wifi_apply_state_t apply_state;
     uint32_t timer_generation;
+    bool wifi_transaction_active;
+    uint32_t transaction_generation;
+    bool auto_retry_timer_active;
+    uint32_t auto_retry_timer_generation;
+    bool ip_timeout_timer_active;
+    uint32_t ip_timeout_timer_generation;
 } argus_net_snapshot_t;
 
 esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);
+
+esp_err_t argus_net_mgr_evaluate_service_entry(
+    argus_authority_owner_t requested_owner,
+    argus_net_snapshot_t *out_net,
+    argus_authority_snapshot_t *out_auth,
+    argus_net_event_t *out_evt,
+    argus_svc_policy_result_t *out_policy);
 
 bool argus_net_mgr_is_sta_started(void);
 bool argus_net_mgr_is_sta_connected(void);

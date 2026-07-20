@@ -972,6 +972,21 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     CHECK_DIFF_INT("15. sta_ip_acquired", b->net_snap.sta_ip_acquired, a->net_snap.sta_ip_acquired);
     CHECK_DIFF_INT("16. ap_started", b->net_snap.ap_started, a->net_snap.ap_started);
     CHECK_DIFF_INT("17. mqtt_broker_running", b->net_snap.mqtt_broker_running, a->net_snap.mqtt_broker_running);
+    CHECK_DIFF_INT("17a. mqtt_broker_stopped", b->net_snap.mqtt_broker_stopped, a->net_snap.mqtt_broker_stopped);
+    CHECK_DIFF_INT("17b. mqtt_broker_observable", b->net_snap.mqtt_broker_observable, a->net_snap.mqtt_broker_observable);
+    CHECK_DIFF_INT("17c. commissioned", b->net_snap.commissioned, a->net_snap.commissioned);
+    CHECK_DIFF_INT("17d. sta_state", b->net_snap.sta_state, a->net_snap.sta_state);
+    CHECK_DIFF_INT("17e. last_disconnect_category", b->net_snap.last_disconnect_category, a->net_snap.last_disconnect_category);
+    CHECK_DIFF_INT("17f. last_disconnect_reason", b->net_snap.last_disconnect_reason, a->net_snap.last_disconnect_reason);
+    CHECK_DIFF_INT("17g. consecutive_failures", b->net_snap.consecutive_failures, a->net_snap.consecutive_failures);
+    CHECK_DIFF_INT("17h. apply_state", b->net_snap.apply_state, a->net_snap.apply_state);
+    CHECK_DIFF_INT("17i. timer_generation", b->net_snap.timer_generation, a->net_snap.timer_generation);
+    CHECK_DIFF_INT("17j. wifi_transaction_active", b->net_snap.wifi_transaction_active, a->net_snap.wifi_transaction_active);
+    CHECK_DIFF_INT("17k. transaction_generation", b->net_snap.transaction_generation, a->net_snap.transaction_generation);
+    CHECK_DIFF_INT("17l. auto_retry_timer_active", b->net_snap.auto_retry_timer_active, a->net_snap.auto_retry_timer_active);
+    CHECK_DIFF_INT("17m. auto_retry_timer_generation", b->net_snap.auto_retry_timer_generation, a->net_snap.auto_retry_timer_generation);
+    CHECK_DIFF_INT("17n. ip_timeout_timer_active", b->net_snap.ip_timeout_timer_active, a->net_snap.ip_timeout_timer_active);
+    CHECK_DIFF_INT("17o. ip_timeout_timer_generation", b->net_snap.ip_timeout_timer_generation, a->net_snap.ip_timeout_timer_generation);
     CHECK_DIFF_INT("18. authority.mode", b->authority.mode, a->authority.mode);
     CHECK_DIFF_INT("19. authority.owner", b->authority.owner, a->authority.owner);
     CHECK_DIFF_INT("20. authority.generation", b->authority.generation, a->authority.generation);
@@ -1011,6 +1026,8 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     CHECK_DIFF_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
     CHECK_DIFF_INT("34. broker.has_server_task", b->broker_obs.has_server_task, a->broker_obs.has_server_task);
     CHECK_DIFF_INT("35. broker.has_listener", b->broker_obs.has_listener, a->broker_obs.has_listener);
+    CHECK_DIFF_INT("35a. broker.running", b->broker_obs.running, a->broker_obs.running);
+    CHECK_DIFF_INT("35b. broker.stopped", b->broker_obs.stopped, a->broker_obs.stopped);
 
 #undef CHECK_DIFF_INT
 #undef CHECK_DIFF_UINT64
@@ -2934,7 +2951,10 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
 // Test 79: Service Policy Entry Eligible (AP_DISCOVERABLE / UNCOMMISSIONED_AP)
 static esp_err_t test_service_policy_entry_eligible(void)
 {
-    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_AP_DISCOVERABLE };
+    argus_net_snapshot_t net = {
+        .mode = ARGUS_NET_MODE_AP_DISCOVERABLE,
+        .ap_started = true
+    };
     argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT };
     argus_net_event_t evt = {0};
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "AP_DISCOVERABLE rejected");
@@ -2969,15 +2989,21 @@ static esp_err_t test_service_policy_entry_rejected(void)
 {
     argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_COMMISSIONED_STA };
     argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_NONE };
-    argus_net_event_t evt = {0};
+    argus_net_event_t evt = {
+        .type = ARGUS_NET_EVT_RESTART_REQUEST,
+        .requested_owner = ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI
+    };
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from STA allowed");
-    TEST_ASSERT(evt.type == 0, "Event generated despite rejection");
+    TEST_ASSERT(evt.type == ARGUS_NET_EVT_RESTART_REQUEST &&
+                    evt.requested_owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI,
+                "Rejected policy evaluation mutated the caller's event");
 
     net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY; // But auth is not local service/browser
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from SERVICE_AP_ONLY without BROWSER auth allowed");
 
     // Invalid authority for AP_DISCOVERABLE
     net.mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+    net.ap_started = true;
     auth.mode = ARGUS_AUTHORITY_NONE;
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_AUTHORITY, "AP_DISCOVERABLE with NONE auth allowed");
 
@@ -3925,6 +3951,349 @@ static esp_err_t test_4b3a_queue_failure_truthfulness(void)
     return ESP_OK;
 }
 
+static argus_net_snapshot_t service_recovery_snapshot(void)
+{
+    argus_net_snapshot_t net = {
+        .mode = ARGUS_NET_MODE_AP_DISCOVERABLE,
+        .sta_connected = false,
+        .sta_ip_acquired = false,
+        .ap_started = true,
+        .mqtt_broker_running = false,
+        .mqtt_broker_stopped = true,
+        .mqtt_broker_observable = true,
+        .commissioned = true,
+        .sta_state = ARGUS_STA_RETRY_WAIT,
+        .last_disconnect_category = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
+        .last_disconnect_reason = WIFI_REASON_NO_AP_FOUND,
+        .consecutive_failures = 2,
+        .apply_state = ARGUS_WIFI_APPLY_IDLE,
+        .timer_generation = 41,
+        .auto_retry_timer_active = true,
+        .auto_retry_timer_generation = 41
+    };
+    return net;
+}
+
+static esp_err_t test_4b3a_service_recovery_policy_eligible(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 9
+    };
+    argus_net_event_t evt = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) ==
+                    ARGUS_SVC_POLICY_OK,
+                "Disconnected commissioned retry must permit browser service entry");
+    TEST_ASSERT(evt.service_preflight_required &&
+                    evt.service_preflight.timer_generation == 41,
+                "Accepted request must capture its coherent preflight fingerprint");
+
+    net.sta_state = ARGUS_STA_CONNECTING;
+    net.wifi_transaction_active = true;
+    net.transaction_generation = 42;
+    net.apply_state = ARGUS_WIFI_APPLY_CONNECTING;
+    TEST_ASSERT(argus_service_policy_entry_permitted(&net, &auth),
+                "Active generation-tagged recovery transaction must remain service eligible");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_recovery_policy_contradictions(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE
+    };
+    argus_net_event_t evt = {0};
+
+    net.sta_connected = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Connected STA must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.sta_ip_acquired = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Acquired STA IP must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_running = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Running broker must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_observable = false;
+    net.mqtt_broker_stopped = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Unverifiable broker stop must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_stopped = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Transitional broker state must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.ap_started = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Absent Service AP must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) ==
+                    ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS,
+                "Concurrent service transition must be rejected explicitly");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_recovery_invalid_authority_pairs(void)
+{
+    const argus_authority_snapshot_t invalid[] = {
+        {.mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_MQTT},
+        {.mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_NONE},
+        {.mode = ARGUS_AUTHORITY_LOCAL_SERVICE, .owner = ARGUS_AUTH_OWNER_BROWSER},
+        {.mode = ARGUS_AUTHORITY_SERVICE_TRANSITION, .owner = ARGUS_AUTH_OWNER_NONE}
+    };
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        argus_net_event_t evt = {0};
+        TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &invalid[i], &evt) !=
+                        ARGUS_SVC_POLICY_OK,
+                    "Mixed or transition authority pair accepted for recovery entry");
+    }
+    return ESP_OK;
+}
+
+typedef struct {
+    bool retry_active;
+    bool ip_active;
+    esp_err_t retry_result;
+    esp_err_t ip_result;
+    uint32_t retry_calls;
+    uint32_t ip_calls;
+} mock_service_timer_ctx_t;
+
+static esp_err_t mock_service_stop_retry(void *ctx)
+{
+    mock_service_timer_ctx_t *timers = ctx;
+    timers->retry_calls++;
+    if (timers->retry_result == ESP_OK) timers->retry_active = false;
+    return timers->retry_result;
+}
+
+static esp_err_t mock_service_stop_ip(void *ctx)
+{
+    mock_service_timer_ctx_t *timers = ctx;
+    timers->ip_calls++;
+    if (timers->ip_result == ESP_OK) timers->ip_active = false;
+    return timers->ip_result;
+}
+
+static argus_service_recovery_cancel_ops_t make_service_cancel_ops(
+    argus_wifi_transaction_t *txn,
+    uint32_t *timer_generation,
+    _Atomic uint32_t *active_transaction_generation,
+    _Atomic uint32_t *retry_generation,
+    _Atomic uint32_t *ip_generation,
+    mock_service_timer_ctx_t *timers)
+{
+    argus_service_recovery_cancel_ops_t ops = {
+        .transaction = txn,
+        .timer_generation = timer_generation,
+        .active_transaction_generation = active_transaction_generation,
+        .auto_retry_timer_generation = retry_generation,
+        .ip_timeout_timer_generation = ip_generation,
+        .stop_retry_timer = mock_service_stop_retry,
+        .stop_ip_timeout_timer = mock_service_stop_ip,
+        .ctx = timers
+    };
+    return ops;
+}
+
+static esp_err_t test_4b3a_service_rejection_preserves_recovery(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    net.sta_connected = true;
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 12
+    };
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 55;
+    txn.state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+    txn.config_staged = true;
+    memcpy(txn.pending_config.sta.password, "preserved", 10);
+    argus_wifi_transaction_t txn_before = txn;
+    uint32_t timer_generation = 55;
+    _Atomic uint32_t active_generation = 55;
+    _Atomic uint32_t retry_generation = 55;
+    _Atomic uint32_t ip_generation = 54;
+    mock_service_timer_ctx_t timers = {
+        .retry_active = true,
+        .ip_active = true,
+        .retry_result = ESP_OK,
+        .ip_result = ESP_OK
+    };
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_NO_AP_FOUND,
+        .category = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
+        .consecutive_failures = 4,
+        .authentication_streak = 0
+    };
+    argus_net_event_t evt = {0};
+
+    argus_svc_policy_result_t policy =
+        argus_service_policy_evaluate_entry(&net, &auth, &evt);
+    if (policy == ARGUS_SVC_POLICY_OK) {
+        argus_service_recovery_cancel_ops_t ops = make_service_cancel_ops(
+            &txn, &timer_generation, &active_generation, &retry_generation,
+            &ip_generation, &timers);
+        argus_net_cancel_recovery_for_service(&ops, NULL);
+    }
+
+    TEST_ASSERT(policy != ARGUS_SVC_POLICY_OK, "Contradictory snapshot unexpectedly eligible");
+    TEST_ASSERT(memcmp(&txn, &txn_before, sizeof(txn)) == 0,
+                "Rejected request changed transaction state or staged configuration");
+    TEST_ASSERT(timer_generation == 55 && atomic_load(&active_generation) == 55 &&
+                    atomic_load(&retry_generation) == 55 && atomic_load(&ip_generation) == 54,
+                "Rejected request changed timer or transaction generations");
+    TEST_ASSERT(timers.retry_active && timers.ip_active &&
+                    timers.retry_calls == 0 && timers.ip_calls == 0,
+                "Rejected request stopped a recovery timer");
+    TEST_ASSERT(evidence.reason == WIFI_REASON_NO_AP_FOUND &&
+                    evidence.consecutive_failures == 4 && auth.generation == 12,
+                "Rejected request changed failure evidence, counters, or authority generation");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_success_cancels_recovery(void)
+{
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 61;
+    txn.state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+    txn.config_staged = true;
+    memcpy(txn.pending_config.sta.password, "secret", 7);
+    uint32_t timer_generation = 61;
+    _Atomic uint32_t active_generation = 61;
+    _Atomic uint32_t retry_generation = 61;
+    _Atomic uint32_t ip_generation = 60;
+    mock_service_timer_ctx_t timers = {
+        .retry_active = true,
+        .ip_active = true,
+        .retry_result = ESP_OK,
+        .ip_result = ESP_OK
+    };
+    argus_service_recovery_cancel_ops_t ops = make_service_cancel_ops(
+        &txn, &timer_generation, &active_generation, &retry_generation,
+        &ip_generation, &timers);
+    argus_service_cancel_failure_t failure = ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER;
+
+    TEST_ASSERT(argus_net_cancel_recovery_for_service(&ops, &failure) == ESP_OK,
+                "Eligible service recovery cancellation failed");
+    TEST_ASSERT(failure == ARGUS_SERVICE_CANCEL_FAILURE_NONE &&
+                    !timers.retry_active && !timers.ip_active &&
+                    timers.retry_calls == 1 && timers.ip_calls == 1,
+                "Successful cancellation did not stop both timers exactly once");
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_CANCELLED &&
+                    txn.pending_config.sta.password[0] == '\0',
+                "Successful cancellation did not cancel and scrub transaction");
+    TEST_ASSERT(timer_generation == 62 && atomic_load(&active_generation) == 0 &&
+                    atomic_load(&retry_generation) == 0 && atomic_load(&ip_generation) == 0,
+                "Successful cancellation did not invalidate all recovery generations");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_cancel_failure_truthfulness(void)
+{
+    for (int failed_timer = 0; failed_timer < 2; ++failed_timer) {
+        argus_wifi_transaction_t txn;
+        argus_wifi_transaction_init(&txn);
+        txn.active = true;
+        txn.generation = 70 + (uint32_t)failed_timer;
+        txn.state = ARGUS_WIFI_APPLY_CONNECTING;
+        uint32_t timer_generation = txn.generation;
+        _Atomic uint32_t active_generation = txn.generation;
+        _Atomic uint32_t retry_generation = txn.generation;
+        _Atomic uint32_t ip_generation = txn.generation;
+        mock_service_timer_ctx_t timers = {
+            .retry_active = true,
+            .ip_active = true,
+            .retry_result = failed_timer == 0 ? ESP_ERR_TIMEOUT : ESP_OK,
+            .ip_result = failed_timer == 1 ? ESP_ERR_INVALID_STATE : ESP_OK
+        };
+        argus_service_recovery_cancel_ops_t ops = make_service_cancel_ops(
+            &txn, &timer_generation, &active_generation, &retry_generation,
+            &ip_generation, &timers);
+        argus_service_cancel_failure_t failure;
+        esp_err_t err = argus_net_cancel_recovery_for_service(&ops, &failure);
+        TEST_ASSERT(err == (failed_timer == 0 ? ESP_ERR_TIMEOUT : ESP_ERR_INVALID_STATE),
+                    "Timer cancellation did not preserve exact callback failure");
+        TEST_ASSERT(failure == (failed_timer == 0
+                                   ? ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER
+                                   : ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER),
+                    "Timer cancellation reported wrong failure stage");
+        TEST_ASSERT(!txn.active && timer_generation == txn.generation + 1 &&
+                        timers.retry_calls == 1 && timers.ip_calls == 1,
+                    "Partial timer failure left transaction/generation state untruthful");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
+{
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 80;
+    txn.state = ARGUS_WIFI_APPLY_CONNECTING;
+    uint32_t timer_generation = 80;
+    _Atomic uint32_t active_generation = 80;
+    _Atomic uint32_t retry_generation = 80;
+    _Atomic uint32_t ip_generation = 80;
+    mock_service_timer_ctx_t timers = {
+        .retry_active = true, .ip_active = true,
+        .retry_result = ESP_OK, .ip_result = ESP_OK
+    };
+    argus_service_recovery_cancel_ops_t ops = make_service_cancel_ops(
+        &txn, &timer_generation, &active_generation, &retry_generation,
+        &ip_generation, &timers);
+    argus_network_mode_t mode = ARGUS_NET_MODE_SERVICE_AP_ONLY;
+    TEST_ASSERT(argus_net_cancel_recovery_for_service(&ops, NULL) == ESP_OK,
+                "Service cancellation setup failed");
+    TEST_ASSERT(mode == ARGUS_NET_MODE_SERVICE_AP_ONLY &&
+                    !argus_net_timer_generation_is_current(80, timer_generation) &&
+                    !argus_wifi_transaction_event_matches(&txn, 80),
+                "Delayed timer or transaction event could restart recovery in service mode");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_policy_api_dashboard_consistency(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 20
+    };
+    argus_net_event_t endpoint_evt = {0};
+    bool dashboard_permitted = argus_service_policy_entry_permitted(&net, &auth);
+    argus_svc_policy_result_t endpoint_policy =
+        argus_service_policy_evaluate_entry(&net, &auth, &endpoint_evt);
+    TEST_ASSERT(dashboard_permitted == (endpoint_policy == ARGUS_SVC_POLICY_OK),
+                "Dashboard permission diverged from endpoint production policy");
+
+    argus_net_snapshot_t changed = net;
+    changed.sta_connected = true;
+    argus_net_event_t changed_evt = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&changed, &auth, &changed_evt) !=
+                    ARGUS_SVC_POLICY_OK,
+                "Changed execution snapshot unexpectedly remained eligible");
+    TEST_ASSERT(!argus_service_entry_fingerprint_matches(
+                    &endpoint_evt.service_preflight,
+                    &changed_evt.service_preflight),
+                "Preflight fingerprint failed to detect changed execution state");
+    return ESP_OK;
+}
+
 static esp_err_t test_4b3a_service_retry_suppression(void)
 {
     argus_wifi_transaction_t txn;
@@ -4357,6 +4726,14 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b3a_success_clears_fault_state);
     RUN_TEST(test_4b3a_countdown_underflow_boundary);
     RUN_TEST(test_4b3a_queue_failure_truthfulness);
+    RUN_TEST(test_4b3a_service_recovery_policy_eligible);
+    RUN_TEST(test_4b3a_service_recovery_policy_contradictions);
+    RUN_TEST(test_4b3a_service_recovery_invalid_authority_pairs);
+    RUN_TEST(test_4b3a_service_rejection_preserves_recovery);
+    RUN_TEST(test_4b3a_service_success_cancels_recovery);
+    RUN_TEST(test_4b3a_service_cancel_failure_truthfulness);
+    RUN_TEST(test_4b3a_service_delayed_events_suppressed);
+    RUN_TEST(test_4b3a_service_policy_api_dashboard_consistency);
     RUN_TEST(test_4b3a_service_retry_suppression);
     RUN_TEST(test_4b3a_ap_http_preservation);
     RUN_TEST(test_4b3a_orchestrate_wifi_apply);

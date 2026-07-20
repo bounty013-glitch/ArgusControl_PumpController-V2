@@ -372,20 +372,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     argus_state_snapshot_t state_snap;
     argus_state_mgr_get_snapshot(&state_snap);
 
-    argus_authority_snapshot_t auth_snap;
-    esp_err_t auth_err = argus_authority_mgr_get_snapshot(&auth_snap);
-    if (auth_err != ESP_OK) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"authority snapshot failed\"}");
-        return ESP_OK;
-    }
-
-    /* Coherent network snapshot — takes s_net_mutex (safe: see doc block 4) */
     argus_net_snapshot_t net_snap;
-    esp_err_t net_err = argus_net_mgr_get_snapshot(&net_snap);
-    if (net_err != ESP_OK) {
+    argus_authority_snapshot_t auth_snap;
+    argus_net_event_t service_evt = {0};
+    argus_svc_policy_result_t service_policy;
+    if (argus_net_mgr_evaluate_service_entry(
+            ARGUS_AUTH_OWNER_BROWSER, &net_snap, &auth_snap,
+            &service_evt, &service_policy) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"network snapshot failed\"}");
+        httpd_resp_sendstr(req, "{\"error\":\"service policy snapshot failed\"}");
         return ESP_OK;
     }
 
@@ -398,12 +393,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const char *auth_owner_str = argus_authority_mgr_get_owner_name(auth_snap.owner);
 
     /* NVS commissioned status — no secrets */
-    argus_config_payload_t cfg;
-    bool has_cfg = false;
-    bool commissioned = (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK) &&
-                        has_cfg && argus_nvs_config_is_commissioned(&cfg);
-    /* Zero the config to prevent accidental secret leakage */
-    memset(&cfg, 0, sizeof(cfg));
+    bool commissioned = net_snap.commissioned;
+    bool service_entry_permitted = service_policy == ARGUS_SVC_POLICY_OK;
 
     const char *reason_name = "NONE";
     argus_net_classify_disconnect(net_snap.last_disconnect_reason, &reason_name);
@@ -435,7 +426,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
 
     /* Build JSON response */
-    char buf[1280];
+    char buf[1408];
     int len = snprintf(buf, sizeof(buf),
         "{"
         "\"machine\":{\"state\":\"%s\","
@@ -459,6 +450,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"retry_count\":%" PRIu32 ","
         "\"seconds_until_retry\":%" PRIu32 ","
         "\"manual_reconnect_permitted\":%s,"
+        "\"service_entry_permitted\":%s,"
         "\"operator_action_required\":%s,"
         "\"operator_guidance\":\"%s\"},"
         "\"broker\":{\"running\":%s,"
@@ -488,6 +480,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.consecutive_failures,
         net_snap.seconds_until_retry,
         net_snap.manual_reconnect_permitted ? "true" : "false",
+        service_entry_permitted ? "true" : "false",
         net_snap.action_required ? "true" : "false",
         operator_guidance,
         net_snap.mqtt_broker_running ? "true" : "false",
@@ -704,7 +697,7 @@ static const char PORTAL_HTML[] =
     "if(n.manual_reconnect_permitted){\n"
     "sc.innerHTML+='<button id=\"btn-reconnect\" class=\"refresh-btn\" style=\"background:#3b82f6;margin-bottom:8px\" onclick=\"doReconnect()\">Reconnect Wi-Fi</button>';\n"
     "}\n"
-    "if(nmode==='AP_DISCOVERABLE'||nmode==='UNCOMMISSIONED_AP'){\n"
+    "if(n.service_entry_permitted){\n"
     "sc.innerHTML+='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';\n"
     "}else if(nmode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){\n"
     "sc.innerHTML+='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';\n"
@@ -1484,19 +1477,16 @@ static esp_err_t service_enter_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    /* Check current state for idempotency and policy */
     argus_net_snapshot_t net_snap;
-    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
+    argus_authority_snapshot_t auth_snap;
+    argus_net_event_t evt = {0};
+    argus_svc_policy_result_t pol;
+    if (argus_net_mgr_evaluate_service_entry(
+            ARGUS_AUTH_OWNER_BROWSER, &net_snap, &auth_snap, &evt, &pol) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
         return ESP_OK;
     }
-
-    argus_authority_snapshot_t auth_snap;
-    argus_authority_mgr_get_snapshot(&auth_snap);
-
-    argus_net_event_t evt;
-    argus_svc_policy_result_t pol = argus_service_policy_evaluate_entry(&net_snap, &auth_snap, &evt);
 
     if (pol == ARGUS_SVC_POLICY_IDEMPOTENT) {
         httpd_resp_sendstr(req,

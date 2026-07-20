@@ -42,6 +42,8 @@ typedef struct {
     int32_t active_client_count;
     bool has_server_task;
     bool has_listener;
+    bool running;
+    bool stopped;
 } argus_mqtt_broker_lifecycle_obs_t;
 
 esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t *out);

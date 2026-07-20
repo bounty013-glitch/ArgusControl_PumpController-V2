@@ -69,7 +69,11 @@ Actual: `[PENDING]`
 
 Begin while retry or recovery is active, then enter browser Local Service.
 
-Expected: retry timers and active Wi-Fi transactions are cancelled; delayed events do not restart recovery; STA is disabled/idle in `SERVICE_AP_ONLY`; reconnect is unavailable; staged password material is not exposed.
+Correction history: review after `d8c898f` found that the checklist required this path while production rejected `AP_DISCOVERABLE + NONE/NONE` and mutated recovery state before that rejection. The corrected candidate must be used; this test has not yet been executed against it.
+
+Expected preflight: **Enter Local Service** is visible only when the server-derived `service_entry_permitted` result is true. During commissioned disconnected recovery this requires Service AP active, STA disconnected, no STA IP, broker observably stopped, exact `NONE/NONE` authority, and `RETRY_WAIT`, `ACTION_REQUIRED`, `IDLE`, or an active recovery transaction. Introduce each contradictory condition where practical and confirm rejection leaves transaction generation, timers, failure evidence, counters, network mode, authority generation, broker, and STA state unchanged.
+
+Expected transition: retry and IP-timeout timers and active Wi-Fi transactions are cancelled only after eligibility revalidation; delayed events do not restart recovery; STA is disabled/idle in `SERVICE_AP_ONLY`; reconnect is unavailable; staged password material is scrubbed and not exposed. If state changes between HTTP preflight and queued execution, execution rejects without cancelling recovery and retains truthful operator evidence.
 
 Actual: `[PENDING]`
 
@@ -88,3 +92,7 @@ Open the serial diagnostic console and select option `t`.
 Expected: the suite reports runtime-derived distinct, repeat, total, passed, and failed counts plus `Production isolation: VERIFIED`. No final count is assumed from source or compilation. Preserve complete console output.
 
 Actual: `[PENDING]`
+
+## Acceptance note
+
+All physical tests, including corrected Test 8, remain pending. No physical acceptance has occurred. Any source-derived registration count is provisional until diagnostic option `t` executes on hardware.

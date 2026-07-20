@@ -40,6 +40,16 @@ Earlier Phase 4B.3a passes contained or reported missing Wi-Fi observability, un
 
 The pure suite is launched manually with diagnostic option `t`; it does not execute automatically during boot. The source-derived registration count is provisional and must not be promoted to a final count or passing result until the corrected suite executes on hardware.
 
+### Post-review service-entry correction
+
+After `d8c898f`, triple independent review found that Local Service entry was unavailable in the exact disconnected recovery states required by Physical Test 8. The endpoint admitted only `AP_DISCOVERABLE + SUPERVISORY/MQTT` or `UNCOMMISSIONED_AP + NONE/NONE`, while recovery truthfully held `AP_DISCOVERABLE + NONE/NONE`. The production request path also cancelled transaction and timer state before rejecting that authority pair.
+
+The correction uses one production policy for dashboard permission, `/api/service/enter` preflight, and network-manager execution. Commissioned recovery entry requires all of the following: active Service AP; disconnected STA; no STA IP; broker observably stopped; exact `NONE/NONE` authority; commissioned configuration; no transition in progress; and `RETRY_WAIT`, `ACTION_REQUIRED`, `IDLE`, or an active generation-tagged recovery transaction. Any contradictory fact rejects. Existing normal and uncommissioned entry paths remain accepted when the Service AP is active.
+
+Queued browser entry carries its accepted snapshot fingerprint. The network manager revalidates the fingerprint and policy before and after dispatch serialization, with no recovery, evidence, network, authority, broker, or STA mutation on rejection. After acceptance, cancellation invalidates transaction and timer generations, scrubs staged credentials, attempts both timer stops, and reports the exact failing timer operation if either command fails. The server exposes `service_entry_permitted`, and dashboard JavaScript consumes that result without recreating policy from network mode.
+
+Physical Test 8 remains pending. No hardware execution, physical readiness, or acceptance is claimed. The corrected registration count remains source-derived and provisional until diagnostic option `t` runs on the controller.
+
 ## Build verification
 
 The closure candidate was full-clean built and sized with ESP-IDF v5.5.3:
@@ -52,6 +62,21 @@ The closure candidate was full-clean built and sized with ESP-IDF v5.5.3:
 - OTA headroom: `0x20a580` bytes (68% free)
 
 These are build facts only. They do not establish a pure-suite runtime pass or physical acceptance.
+
+### Correction build verification
+
+The post-`d8c898f` correction was full-clean built and sized with ESP-IDF v5.5.3:
+
+- Build result: success
+- Compiler warnings: 0
+- Compiler errors: 0
+- Application image: `0xf7860` bytes
+- Smallest application partition: `0x300000` bytes
+- OTA headroom: `0x2087a0` bytes (68% free)
+- Embedded JavaScript: 4 of 4 script blocks passed syntax validation
+- Source registrations: 139 total, including 45 Phase 4B.3a; provisional until hardware execution
+
+These correction-build facts supersede the earlier candidate size for the new commit only. They do not erase the earlier build record and do not establish runtime or physical acceptance.
 
 ## Remaining acceptance
 
