@@ -1,113 +1,736 @@
-## 1. First boot after erase - PASSED
--Save the boot-log portion showing:
--Partition table loads successfully.
--Firmware boots without panic or reboot loop.
--Booted application partition, preferably showing ota_0.
--Controller enters UNCOMMISSIONED_AP.
--Service AP and HTTP portal become available.
-A pasted log is ideal; a screenshot is sufficient if it contains those facts.
+# Phase 4B.3 — Physical Acceptance Record
 
-## 2. Pure tests - PASSED
-**Evidence Provided:** Operator confirmed 267 executions, 0 failures, 3 repeat passes.
--Run lowercase t once and send the final summary showing:
--83 distinct tests.
--Three repeat passes.
--249 total executions.
--Zero failures.
--Production-state invariance passed.
--No panic or unexpected reboot.
-I do not need all 249 lines unless something fails.
+## Document purpose
 
-## 3. Entry from UNCOMMISSIONED_AP - ❌ FAILED (Awaiting Retest)
-### Failure Evidence (Red)
-During physical testing, the browser requested service entry from the `UNCOMMISSIONED_AP` baseline but the transition stalled. The HTTP server was intentionally stopped but failed to restore upon transition failure, stranding the browser on the "Transition Pending" page.
-**Screenshots Provided:**
-- `enter_local_service-confirmation_pop-up.png`
-- `enter_local_service-Transition-Pending_Landing_Page.png`
-- (Transition failed to complete)
+This document is the permanent physical-verification record for Phase 4B.3.
 
-### Retest (Green) - PENDING
-**Focused Operator Retest (Firmware update required):**
-1. Reboot and confirm:
-   - `UNCOMMISSIONED_AP`
-   - `NONE / NONE`
-   - machine `UNLOCKED`
-   - broker stopped
-   - Service AP and HTTP available.
-2. Run lowercase `t` and capture the complete final summary.
-3. Connect to the Service AP and log into the portal.
-4. Press **Enter Local Service** and accept confirmation.
-5. Confirm the serial log does not report an STA-disconnect failure.
-6. Reload the dashboard and verify:
-   - Network: `SERVICE_AP_ONLY`
-   - Authority mode: `LOCAL_SERVICE`
-   - Authority owner: `BROWSER`
-   - STA connected: `No`
-   - AP started: `Yes`
-   - Broker: `Stopped`
-   - Exit Local Service button visible.
-7. Save the transition log and dashboard screenshot.
+It distinguishes between:
 
--Before commissioning:
--Connect to the Service AP.
--Log into the portal and complete the forced password change if required.
--Confirm the Enter Local Service button appears.
--Press it and accept the confirmation.
--Reconnect or reload when instructed.
--Send a dashboard screenshot showing:   
--Network: SERVICE_AP_ONLY
--Authority mode: LOCAL_SERVICE
--Authority owner: BROWSER
--STA disconnected/inactive
--MQTT broker stopped
--Exit Local Service button visible
-Then press Exit Local Service and confirm the controller reboots back into UNCOMMISSIONED_AP.
+- source and build evidence,
+- pure-test evidence,
+- operator-observed physical behavior,
+- failures discovered during acceptance,
+- corrective commits,
+- successful retests,
+- deferred or unverified behavior.
 
-## 4. Commission normally
--Configure:
--Identity
--Wi-Fi credentials
--Any other required commissioning fields
--Restart and confirm:
--STA connects and obtains an IP.
--Network becomes AP_DISCOVERABLE.
--Authority returns to SUPERVISORY/MQTT.
--Broker is running.
--Service AP and portal remain available.
-A dashboard screenshot plus the relevant serial lines is enough.
+A failed test remains recorded after correction. Its successful retest is added beneath the original result rather than replacing it.
 
-## 5. Entry from AP_DISCOVERABLE
--With the commissioned controller connected to the LAN:
--Open the portal.
--Confirm Enter Local Service appears.
--Press it.
--Reconnect through the Service AP if necessary.
--Refresh the dashboard.
--Send a screenshot showing again:
-    -NETWORK: SERVICE_AP_ONLY
-    -Authority mode: LOCAL_SERVICE
-    -Authority owner: BROWSER
-    -STA disconnected/inactive
-    -MQTT broker stopped
-    -Exit Local Service button visible
-This proves the second permitted entry route and the actual MQTT-to-browser authority handoff.
+---
 
-## 6. Browser service exit and recovery
-Press Exit Local Service and confirm:
--The portal reports that exit/reboot was requested.
--The connection drops.
--The controller reboots cleanly.
--Commissioned configuration survives.
--STA reconnects.
--Broker returns to running.
--Final authority is SUPERVISORY/MQTT.
--Final network mode is AP_DISCOVERABLE.
+## Acceptance status
 
-## What to send me
-Just send:
--First-boot/partition log excerpt.
--Lowercase t final summary.
--Screenshot after uncommissioned service entry.
--Screenshot after commissioned service entry.
--Screenshot or snapshot after final exit/reboot recovery.
--A short note describing anything surprising, including disconnect/reconnect behavior.
+**Overall Phase 4B.3 status:** `IN PROGRESS`
+
+Allowed status values:
+
+- `NOT RUN`
+- `IN PROGRESS`
+- `PASSED`
+- `FAILED`
+- `BLOCKED`
+- `CORRECTED — RETEST PENDING`
+- `PASSED AFTER CORRECTION`
+- `DEFERRED BY DESIGN`
+
+---
+
+## Test environment
+
+| Item | Recorded value |
+|---|---|
+| Controller | Argus Pump Controller V2 |
+| Hardware target | Waveshare ESP32-S3 RS485/CAN controller |
+| Flash size | 16 MB |
+| ESP-IDF version | **v5.5.3** |
+| Test branch | `phase4b-config-portal` |
+| Firmware commit | `[ENTER TESTED COMMIT SHA]` |
+| Corrective commit, if applicable | `[ENTER CORRECTIVE COMMIT SHA OR N/A]` |
+| Application version | `v2-phase4b.3-dev` |
+| Operator | Shawn |
+| Physical test date | `[YYYY-MM-DD]` |
+| Serial interface | `[ENTER PORT, e.g. COM5]` |
+| Browser/device | `[ENTER PHONE, TABLET, OR LAPTOP]` |
+| Service AP address | `192.168.4.1` |
+| Commissioned STA address | `[ENTER WHEN AVAILABLE]` |
+
+### Test-control notes
+
+- Do not record Wi-Fi passwords, portal passwords, tokens, or other credentials.
+- Record only behavior physically observed by the operator.
+- Do not convert an expected result into a pass without evidence.
+- Preserve failure evidence after a correction is made.
+- Identify the exact firmware commit used for every retest.
+- If firmware changes during testing, record the new commit before continuing.
+
+---
+
+# 1. First boot after full flash erase
+
+**Status:** `PASSED`
+
+## Objective
+
+Verify that the new OTA partition layout loads correctly after a complete flash erase and that the controller reaches its intended uncommissioned startup state.
+
+## Preconditions
+
+- Full flash erase performed.
+- Firmware built and flashed using ESP-IDF v5.5.3.
+- Serial monitor open before reset or boot.
+- No previous commissioning data expected to survive the erase.
+
+## Operator actions
+
+1. Erase the complete flash.
+2. Build and flash the firmware.
+3. Open the serial monitor.
+4. Allow the controller to boot without interruption.
+5. Save the relevant boot-log section.
+
+## Required evidence
+
+Confirm that the log proves:
+
+- ESP-IDF v5.5.3 bootloader and application were used.
+- Flash was detected as 16 MB.
+- The custom partition table loaded successfully.
+- `ota_0` and `ota_1` are each 3 MB.
+- The application loaded from `ota_0` at offset `0x20000`.
+- No panic or reboot loop occurred.
+- Application version is `v2-phase4b.3-dev`.
+- Controller entered `UNCOMMISSIONED_AP`.
+- Authority initialized as `NONE / NONE`.
+- Service AP started.
+- DHCP server started at `192.168.4.1`.
+- HTTP portal started successfully.
+
+## Expected partition evidence
+
+```text
+nvs       offset 0x00009000  length 0x00006000
+otadata   offset 0x0000f000  length 0x00002000
+phy_init  offset 0x00011000  length 0x00001000
+ota_0     offset 0x00020000  length 0x00300000
+ota_1     offset 0x00320000  length 0x00300000
+coredump  offset 0x00620000  length 0x00040000
+```
+
+## Actual result
+
+- ESP-IDF v5.5.3 confirmed: **YES**
+- 16 MB flash confirmed: **YES**
+- Partition table loaded: **YES**
+- Application loaded from `ota_0`: **YES**
+- Clean boot without panic or loop: **YES**
+- Final network mode: `UNCOMMISSIONED_AP`
+- Final authority: `NONE / NONE`
+- Service AP available: **YES**
+- HTTP portal available: **YES**
+
+## Evidence
+
+- Boot log: `[PASTE LOG OR LINK TO EVIDENCE FILE]`
+- Screenshot: `[LINK OR N/A]`
+- Tested firmware commit: `[ENTER SHA]`
+
+## Operator notes
+
+The first corrected boot identified and removed stale Phase 4A version labels and restored the required ESP-IDF baseline from v5.5.1 to v5.5.3. The controller was rebuilt and reflashed using v5.5.3 before acceptance testing continued.
+
+---
+
+# 2. Pure non-motion test suite
+
+**Status:** `PASSED`
+
+## Objective
+
+Verify the complete stack-local pure-test suite and confirm that it does not mutate live production state or leak tasks.
+
+## Preconditions
+
+- Controller booted normally.
+- Machine physically stopped.
+- Serial monitor open.
+- No transition or configuration operation running.
+
+## Operator actions
+
+1. Enter lowercase `t` from the diagnostic menu.
+2. Allow the complete suite to finish.
+3. Save the final summary.
+4. Confirm that no panic or unexpected reboot occurred.
+
+## Expected result
+
+The final summary must report:
+
+- 83 distinct test cases.
+- Three repeat passes.
+- 267 total reported executions.
+- 267 passed executions.
+- Zero failed executions.
+- Authority generation unchanged.
+- Network state unchanged.
+- MQTT broker state unchanged.
+- Machine state unchanged.
+- Task count unchanged.
+- Final suite result `PASSED`.
+
+> The runner-reported total of 267 is recorded exactly as physically observed. It must not be silently replaced with a calculated value.
+
+## Actual result
+
+```text
+Phase 4A+4B.1+4B.2+4B.3 Pure Tests:
+  Distinct Test Cases : 83
+  Repeat Passes       : 3
+  Total Executions    : 267
+  Passed Executions   : 267
+  Failed Executions   : 0
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 2)
+  Network State         : UNCHANGED (UNCOMMISSIONED_AP)
+  MQTT Broker State     : UNCHANGED (STOPPED)
+  Machine State         : UNCHANGED (UNLOCKED)
+  Task Count            : UNCHANGED (14 tasks)
+
+===================================================
+PHASE 4A+4B.1+4B.2+4B.3 PURE UNIT TEST SUITE: PASSED
+===================================================
+```
+
+## Evidence
+
+- Full summary captured: **YES**
+- Panic or unexpected reboot: **NO**
+- Tested firmware commit: `[ENTER SHA]`
+- Additional log file: `[LINK OR N/A]`
+
+## Operator notes
+
+An initial attempt failed before the Phase 4B.3 suite began because the production observation snapshot could not capture the broker lifecycle while the broker was uninitialized/stopped. That defect was corrected and the complete suite subsequently passed.
+
+---
+
+# 3. Browser service entry from UNCOMMISSIONED_AP
+
+**Status:** `CORRECTED — RETEST PENDING`
+
+## Objective
+
+Verify browser-requested entry into local service from the valid uncommissioned baseline:
+
+- Network: `UNCOMMISSIONED_AP`
+- Authority mode: `NONE`
+- Authority owner: `NONE`
+- Machine: safely stopped or `UNLOCKED`
+- MQTT broker: stopped
+- STA: inactive or never started
+- Wi-Fi: AP-only
+
+## Preconditions
+
+- Controller is uncommissioned.
+- Controller has booted into `UNCOMMISSIONED_AP`.
+- Pump is physically stopped.
+- Service AP is visible.
+- Portal login is functional.
+- Serial monitor is recording.
+
+## Operator actions
+
+1. Connect to the Service AP.
+2. Open `http://192.168.4.1`.
+3. Log into the portal.
+4. Complete the forced password change if required.
+5. Confirm that **Enter Local Service** is visible.
+6. Press **Enter Local Service**.
+7. Accept the confirmation dialog.
+8. Wait for the Transition Pending page.
+9. Reconnect to the Service AP if necessary.
+10. Reload the dashboard.
+11. Save the transition log and final dashboard screenshot.
+
+## Expected successful result
+
+The dashboard and serial log must show:
+
+- Network becomes `SERVICE_AP_ONLY`.
+- Authority mode becomes `LOCAL_SERVICE`.
+- Authority owner becomes `BROWSER`.
+- STA is disconnected or inactive.
+- STA IP is released.
+- MQTT broker is stopped.
+- Service AP remains active.
+- HTTP portal becomes available after the transition.
+- **Exit Local Service** is visible.
+- No panic or unexpected reboot occurs.
+
+---
+
+## Initial physical attempt
+
+**Initial-attempt status:** `FAILED`
+
+### Observed behavior
+
+- Browser successfully connected to the Service AP.
+- Portal accepted the service-entry request.
+- Confirmation dialog appeared.
+- Transition Pending page appeared.
+- Authority entered `SERVICE_TRANSITION / NONE`.
+- Network entered `SERVICE_TRANSITION`.
+- HTTP server stopped intentionally.
+- The transition then returned `ESP_FAIL`.
+- Authority aborted to `NONE / NONE`.
+- HTTP availability was not restored.
+- Reload Dashboard could not reconnect.
+
+### Failure evidence
+
+```text
+I (...) argus_auth_mgr: authority: NONE/NONE -> SERVICE_TRANSITION/NONE
+I (...) argus_net_mgr: network: UNCOMMISSIONED_AP -> SERVICE_TRANSITION
+I (...) argus_http: HTTP server stopped
+E (...) argus_net_mgr: Service entry failed during transition: ESP_FAIL (-1)
+W (...) argus_auth_mgr: Aborting service transition -> setting authority NONE/NONE
+I (...) argus_auth_mgr: authority: SERVICE_TRANSITION/NONE -> NONE/NONE
+```
+
+### Failure classification
+
+The HTTP server did not spontaneously crash. It was deliberately stopped as part of the transition. A subsequent transition operation failed, and the abort path did not restore HTTP availability.
+
+The uncommissioned starting state already contained several target conditions:
+
+- Machine already `UNLOCKED`
+- Broker already stopped
+- STA already inactive
+- Wi-Fi already AP-only
+
+The transition path treated these as unconditional actions instead of idempotent “ensure target condition” operations.
+
+### Failure artifacts
+
+- Confirmation-dialog screenshot: `[LINK TO SCREENSHOT]`
+- Transition Pending screenshot: `[LINK TO SCREENSHOT]`
+- Serial log: `[LINK OR INLINE LOG]`
+- Failing firmware commit: `[ENTER SHA]`
+- Issue/correction reference: `[ENTER COMMIT, ISSUE, OR DOCUMENT LINK]`
+
+---
+
+## Corrective implementation
+
+**Correction status:** `[IMPLEMENTED / IN PROGRESS]`
+
+### Required correction summary
+
+The service-entry sequence must converge safely from both:
+
+- `UNCOMMISSIONED_AP / NONE / NONE`
+- `AP_DISCOVERABLE / SUPERVISORY / MQTT`
+
+Already-satisfied target conditions must succeed without issuing invalid operations, while genuine failures must remain fail-closed.
+
+The abort path must attempt to restore HTTP availability when the Service AP remains operational, without masking the original transition error.
+
+### Corrective commit
+
+- Commit SHA: `[ENTER SHA]`
+- Commit title: `[ENTER TITLE]`
+- ESP-IDF version: `v5.5.3`
+- Full-clean build result: `[PASS/FAIL]`
+- Static checks: `[RESULT]`
+
+---
+
+## Retest after correction
+
+**Retest status:** `NOT RUN`
+
+### Retest firmware
+
+- Commit SHA: `[ENTER CORRECTIVE SHA]`
+- Build date: `[YYYY-MM-DD]`
+- ESP-IDF: `v5.5.3`
+
+### Retest actual result
+
+- Service-entry request accepted: `[YES/NO]`
+- Transition completed: `[YES/NO]`
+- Final network mode: `[ENTER VALUE]`
+- Final authority mode: `[ENTER VALUE]`
+- Final authority owner: `[ENTER VALUE]`
+- STA inactive: `[YES/NO]`
+- STA IP released: `[YES/NO]`
+- Broker stopped: `[YES/NO]`
+- Service AP active: `[YES/NO]`
+- Portal restored: `[YES/NO]`
+- Exit Local Service visible: `[YES/NO]`
+- Panic or unexpected reboot: `[YES/NO]`
+
+### Retest evidence
+
+- Serial log: `[PASTE OR LINK]`
+- Dashboard screenshot: `[LINK]`
+- Additional notes: `[ENTER NOTES]`
+
+### Final Test 3 disposition
+
+`[PASSED AFTER CORRECTION / FAILED / BLOCKED]`
+
+---
+
+# 4. Exit from uncommissioned local service
+
+**Status:** `NOT RUN`
+
+## Objective
+
+Verify that browser-owned local service can exit cleanly and reboot back into the uncommissioned operating state.
+
+## Preconditions
+
+- Test 3 has passed.
+- Controller is in:
+  - Network: `SERVICE_AP_ONLY`
+  - Authority: `LOCAL_SERVICE / BROWSER`
+- Service portal is available.
+- Serial monitor is recording.
+
+## Operator actions
+
+1. Press **Exit Local Service**.
+2. Accept the confirmation.
+3. Observe the browser response.
+4. Confirm that the connection drops.
+5. Observe the complete reboot.
+6. Reconnect to the Service AP.
+7. Reload the portal.
+8. Save the reboot log and dashboard evidence.
+
+## Expected result
+
+- Exit request is accepted.
+- Controller performs a clean reboot.
+- No panic or reboot loop occurs.
+- Controller returns to `UNCOMMISSIONED_AP`.
+- Authority returns to `NONE / NONE`.
+- Broker remains stopped.
+- Service AP returns.
+- HTTP portal returns.
+- Portal authentication data persists unless flash was erased.
+
+## Actual result
+
+- Exit accepted: `[YES/NO]`
+- Clean reboot: `[YES/NO]`
+- Final network mode: `[ENTER VALUE]`
+- Final authority: `[ENTER MODE / OWNER]`
+- Service AP restored: `[YES/NO]`
+- HTTP portal restored: `[YES/NO]`
+- Credentials persisted: `[YES/NO/NOT TESTED]`
+- Panic or reboot loop: `[YES/NO]`
+
+## Evidence
+
+- Serial log: `[PASTE OR LINK]`
+- Dashboard screenshot: `[LINK]`
+- Tested commit: `[ENTER SHA]`
+- Operator notes: `[ENTER NOTES]`
+
+---
+
+# 5. Normal commissioning
+
+**Status:** `NOT RUN`
+
+## Objective
+
+Verify that identity and Wi-Fi commissioning survive restart and produce the intended commissioned discoverable state.
+
+## Preconditions
+
+- Controller is in `UNCOMMISSIONED_AP`.
+- Portal is available.
+- Valid test-network credentials are available.
+- Credentials will not be copied into this document.
+
+## Operator actions
+
+1. Open the Identity page.
+2. Configure the required identity fields.
+3. Open the Wi-Fi configuration page.
+4. Enter the test-network credentials.
+5. Save the configuration.
+6. Restart the controller through the portal.
+7. Observe the complete reboot.
+8. Confirm STA connection and IP acquisition.
+9. Open the portal from an available interface.
+10. Save the relevant serial log and dashboard screenshot.
+
+## Expected result
+
+- Identity configuration is retained.
+- Wi-Fi configuration is retained.
+- STA connects and obtains an IP.
+- Network becomes `AP_DISCOVERABLE`.
+- Authority becomes `SUPERVISORY / MQTT`.
+- MQTT broker starts and reports running.
+- Service AP remains available.
+- HTTP portal remains available.
+- No credential value is exposed through status APIs or logs.
+- No panic or reboot loop occurs.
+
+## Actual result
+
+- Identity persisted: `[YES/NO]`
+- Wi-Fi configuration persisted: `[YES/NO]`
+- STA connected: `[YES/NO]`
+- STA IP: `[ENTER NON-SENSITIVE IP]`
+- Network mode: `[ENTER VALUE]`
+- Authority: `[ENTER MODE / OWNER]`
+- Broker running: `[YES/NO]`
+- Service AP available: `[YES/NO]`
+- Portal available through AP: `[YES/NO]`
+- Portal available through STA: `[YES/NO]`
+- Panic or unexpected reboot: `[YES/NO]`
+
+## Evidence
+
+- Serial log: `[PASTE OR LINK]`
+- Dashboard screenshot: `[LINK]`
+- Tested commit: `[ENTER SHA]`
+- Operator notes: `[ENTER NOTES]`
+
+---
+
+# 6. Browser service entry from AP_DISCOVERABLE
+
+**Status:** `NOT RUN`
+
+## Objective
+
+Verify the complete MQTT-to-browser authority handoff from commissioned discoverable operation.
+
+## Preconditions
+
+- Test 5 has passed.
+- Controller is commissioned.
+- Network is `AP_DISCOVERABLE`.
+- Authority is `SUPERVISORY / MQTT`.
+- Broker is running.
+- Machine is physically stopped.
+- Portal is available.
+- Serial monitor is recording.
+
+## Operator actions
+
+1. Open and log into the portal.
+2. Confirm that **Enter Local Service** is visible.
+3. Press **Enter Local Service**.
+4. Accept the confirmation dialog.
+5. Observe the transition.
+6. Reconnect through the Service AP if the STA connection drops.
+7. Reload the dashboard.
+8. Save the transition log and dashboard screenshot.
+
+## Expected result
+
+- Machine is verified stopped.
+- MQTT broker stops cleanly.
+- STA disconnects.
+- STA IP is released.
+- Wi-Fi becomes AP-only.
+- Service AP remains active.
+- Authority becomes `LOCAL_SERVICE / BROWSER`.
+- Network becomes `SERVICE_AP_ONLY`.
+- HTTP portal is available after the transition.
+- **Exit Local Service** is visible.
+- No panic or unexpected reboot occurs.
+
+## Actual result
+
+- Entry request accepted: `[YES/NO]`
+- Broker stopped: `[YES/NO]`
+- STA disconnected: `[YES/NO]`
+- STA IP released: `[YES/NO]`
+- Final network mode: `[ENTER VALUE]`
+- Final authority: `[ENTER MODE / OWNER]`
+- Portal available through Service AP: `[YES/NO]`
+- Exit button visible: `[YES/NO]`
+- Panic or unexpected reboot: `[YES/NO]`
+
+## Evidence
+
+- Serial log: `[PASTE OR LINK]`
+- Dashboard screenshot: `[LINK]`
+- Tested commit: `[ENTER SHA]`
+- Operator notes: `[ENTER NOTES]`
+
+---
+
+# 7. Browser service exit and commissioned recovery
+
+**Status:** `NOT RUN`
+
+## Objective
+
+Verify that browser-owned local service exits cleanly and restores commissioned supervisory operation.
+
+## Preconditions
+
+- Test 6 has passed.
+- Controller is in:
+  - Network: `SERVICE_AP_ONLY`
+  - Authority: `LOCAL_SERVICE / BROWSER`
+- Commissioned configuration is present.
+- Serial monitor is recording.
+
+## Operator actions
+
+1. Press **Exit Local Service**.
+2. Accept the confirmation.
+3. Observe the browser response and connection loss.
+4. Observe the controller reboot.
+5. Wait for STA reconnection.
+6. Reopen the portal.
+7. Refresh the dashboard.
+8. Save the reboot and recovery evidence.
+
+## Expected result
+
+- Exit request is accepted.
+- Controller reboots cleanly.
+- Commissioned identity and Wi-Fi configuration survive.
+- STA reconnects and obtains an IP.
+- Broker returns to running.
+- Authority returns to `SUPERVISORY / MQTT`.
+- Network returns to `AP_DISCOVERABLE`.
+- Service AP remains available.
+- HTTP portal returns.
+- No panic or reboot loop occurs.
+
+## Actual result
+
+- Exit accepted: `[YES/NO]`
+- Clean reboot: `[YES/NO]`
+- Configuration survived: `[YES/NO]`
+- STA reconnected: `[YES/NO]`
+- Broker running: `[YES/NO]`
+- Final authority: `[ENTER MODE / OWNER]`
+- Final network mode: `[ENTER VALUE]`
+- Service AP available: `[YES/NO]`
+- Portal available: `[YES/NO]`
+- Panic or reboot loop: `[YES/NO]`
+
+## Evidence
+
+- Serial log: `[PASTE OR LINK]`
+- Final dashboard screenshot: `[LINK]`
+- Tested commit: `[ENTER SHA]`
+- Operator notes: `[ENTER NOTES]`
+
+---
+
+# 8. Regression observations
+
+**Status:** `IN PROGRESS`
+
+Record any behavior noticed during testing even if it does not block the current acceptance scope.
+
+| ID | Observation | Severity | Disposition | Reference |
+|---|---|---:|---|---|
+| OBS-001 | Initial Phase 4B.3 snapshot capture failed before the extended pure suite could run. | Medium | Corrected and retested successfully | `[COMMIT]` |
+| OBS-002 | Uncommissioned browser service entry stopped HTTP, then aborted on an already-satisfied transition condition without restoring HTTP. | High | Correction in progress; retest pending | `[COMMIT]` |
+| OBS-003 | `[ENTER ADDITIONAL OBSERVATION]` | `[LOW/MEDIUM/HIGH]` | `[OPEN/DEFERRED/CORRECTED]` | `[REFERENCE]` |
+
+---
+
+# 9. Corrective-action history
+
+| Correction | Failing commit | Corrective commit | Build verified | Physical retest | Result |
+|---|---|---|---|---|---|
+| Production snapshot capture correction | `[SHA]` | `[SHA]` | ESP-IDF v5.5.3 | Yes | Passed |
+| Idempotent browser service-entry correction | `[SHA]` | `[SHA]` | `[PENDING]` | `[PENDING]` | Retest pending |
+| `[DESCRIPTION]` | `[SHA]` | `[SHA]` | `[RESULT]` | `[YES/NO]` | `[RESULT]` |
+
+---
+
+# 10. Evidence index
+
+| Evidence ID | Description | File or location |
+|---|---|---|
+| E-001 | First boot and OTA partition log | `[LINK]` |
+| E-002 | Pure-test final summary | `[LINK OR INLINE SECTION]` |
+| E-003 | Uncommissioned entry confirmation dialog | `[LINK]` |
+| E-004 | Initial Transition Pending page | `[LINK]` |
+| E-005 | Initial uncommissioned-entry failure log | `[LINK OR INLINE SECTION]` |
+| E-006 | Corrected uncommissioned-entry dashboard | `[PENDING]` |
+| E-007 | Uncommissioned service-exit reboot log | `[PENDING]` |
+| E-008 | Commissioned startup dashboard and log | `[PENDING]` |
+| E-009 | Commissioned browser service-entry dashboard | `[PENDING]` |
+| E-010 | Final commissioned recovery dashboard and log | `[PENDING]` |
+
+---
+
+# 11. Final acceptance summary
+
+## Completed tests
+
+| Test | Result |
+|---|---|
+| First boot after complete erase | `PASSED` |
+| Pure non-motion suite | `PASSED` |
+| Entry from `UNCOMMISSIONED_AP` | `CORRECTED — RETEST PENDING` |
+| Exit to `UNCOMMISSIONED_AP` | `NOT RUN` |
+| Normal commissioning | `NOT RUN` |
+| Entry from `AP_DISCOVERABLE` | `NOT RUN` |
+| Exit and commissioned recovery | `NOT RUN` |
+
+## Final physical state
+
+| Item | Value |
+|---|---|
+| Network mode | `[ENTER VALUE]` |
+| Authority mode | `[ENTER VALUE]` |
+| Authority owner | `[ENTER VALUE]` |
+| Machine state | `[ENTER VALUE]` |
+| STA connected | `[YES/NO]` |
+| Broker state | `[ENTER VALUE]` |
+| Service AP available | `[YES/NO]` |
+| HTTP portal available | `[YES/NO]` |
+
+## Remaining verification
+
+- Corrected service entry from `UNCOMMISSIONED_AP`.
+- Exit and reboot back into `UNCOMMISSIONED_AP`.
+- Normal identity and Wi-Fi commissioning.
+- Service entry from `AP_DISCOVERABLE`.
+- MQTT-to-browser authority handoff.
+- Exit and commissioned recovery.
+- Any explicitly deferred Phase 4B.3 behavior documented below.
+
+## Deferred by design
+
+| Item | Reason | Intended phase or trigger |
+|---|---|---|
+| Active-motion controlled-stop service-entry acceptance | Deferred until the primary HMI and MQTT control path are available together on the bench | Phase 4D or HMI integration |
+| `[ITEM]` | `[REASON]` | `[PHASE/TRIGGER]` |
+
+## Acceptance decision
+
+**Phase 4B.3 physical acceptance:** `[IN PROGRESS / ACCEPTED / ACCEPTED WITH DEFERRALS / REJECTED]`
+
+**Accepted firmware commit:** `[ENTER SHA OR PENDING]`
+
+**Operator statement:**
+
+> `[Enter a concise statement confirming what was physically tested, what passed, and what remains deferred or unverified.]`
+
+**Operator:** Shawn  
+**Date:** `[YYYY-MM-DD]`
