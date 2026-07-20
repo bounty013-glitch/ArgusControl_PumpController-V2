@@ -1,0 +1,83 @@
+## 1. First boot after erase - PASSED
+-Save the boot-log portion showing:
+-Partition table loads successfully.
+-Firmware boots without panic or reboot loop.
+-Booted application partition, preferably showing ota_0.
+-Controller enters UNCOMMISSIONED_AP.
+-Service AP and HTTP portal become available.
+A pasted log is ideal; a screenshot is sufficient if it contains those facts.
+
+## 2. Pure tests
+-Run lowercase t once and send the final summary showing:
+-83 distinct tests.
+-Three repeat passes.
+-249 total executions.
+-Zero failures.
+-Production-state invariance passed.
+-No panic or unexpected reboot.
+I do not need all 249 lines unless something fails.
+
+## 3. Entry from UNCOMMISSIONED_AP
+-Before commissioning:
+-Connect to the Service AP.
+-Log into the portal and complete the forced password change if required.
+-Confirm the Enter Local Service button appears.
+-Press it and accept the confirmation.
+-Reconnect or reload when instructed.
+-Send a dashboard screenshot showing:   
+-Network: SERVICE_AP_ONLY
+-Authority mode: LOCAL_SERVICE
+-Authority owner: BROWSER
+-STA disconnected/inactive
+-MQTT broker stopped
+-Exit Local Service button visible
+Then press Exit Local Service and confirm the controller reboots back into UNCOMMISSIONED_AP.
+
+## 4. Commission normally
+-Configure:
+-Identity
+-Wi-Fi credentials
+-Any other required commissioning fields
+-Restart and confirm:
+-STA connects and obtains an IP.
+-Network becomes AP_DISCOVERABLE.
+-Authority returns to SUPERVISORY/MQTT.
+-Broker is running.
+-Service AP and portal remain available.
+A dashboard screenshot plus the relevant serial lines is enough.
+
+## 5. Entry from AP_DISCOVERABLE
+-With the commissioned controller connected to the LAN:
+-Open the portal.
+-Confirm Enter Local Service appears.
+-Press it.
+-Reconnect through the Service AP if necessary.
+-Refresh the dashboard.
+-Send a screenshot showing again:
+    -NETWORK: SERVICE_AP_ONLY
+    -Authority mode: LOCAL_SERVICE
+    -Authority owner: BROWSER
+    -STA disconnected/inactive
+    -MQTT broker stopped
+    -Exit Local Service button visible
+This proves the second permitted entry route and the actual MQTT-to-browser authority handoff.
+
+## 6. Browser service exit and recovery
+Press Exit Local Service and confirm:
+-The portal reports that exit/reboot was requested.
+-The connection drops.
+-The controller reboots cleanly.
+-Commissioned configuration survives.
+-STA reconnects.
+-Broker returns to running.
+-Final authority is SUPERVISORY/MQTT.
+-Final network mode is AP_DISCOVERABLE.
+
+## What to send me
+Just send:
+-First-boot/partition log excerpt.
+-Lowercase t final summary.
+-Screenshot after uncommissioned service entry.
+-Screenshot after commissioned service entry.
+-Screenshot or snapshot after final exit/reboot recovery.
+-A short note describing anything surprising, including disconnect/reconnect behavior.
