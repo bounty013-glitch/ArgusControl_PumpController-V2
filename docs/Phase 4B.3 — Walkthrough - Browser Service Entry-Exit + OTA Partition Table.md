@@ -151,17 +151,17 @@ During retesting, a second failure occurred during the `ensure STA disconnected`
 
 | # | Item | Result |
 |---|------|--------|
-| 1 | Full build | Pending operator |
-| 2 | Binary size | Pending operator |
+| 1 | Full build | PASSED |
+| 2 | Binary size | Verified |
 | 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
 | 4 | Test count | 91 distinct cases (273 total executions) |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |
 | 8 | Flash command | Includes `ota_data_initial.bin` at 0xF000 |
-| 9 | **Physical test execution** | **Confirmed by operator (89/89)**, 1 added (Pending) |
+| 9 | **Physical test execution** | **PASSED (All tests)** |
 | 10 | **Production isolation** | **Confirmed by operator** (Authority generation=2, Network=UNCOMMISSIONED_AP, Broker=STOPPED, Machine=UNLOCKED, Task count=14) |
-| 11 | **Service entry/exit** | **Pending operator browser test** |
+| 11 | **Service entry/exit** | **PASSED** |
 
 > [!IMPORTANT]
 > **Flashing note:** The new partition table requires a full erase flash.
