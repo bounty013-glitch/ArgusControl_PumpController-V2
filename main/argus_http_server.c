@@ -466,7 +466,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"timer_cancel_failure\":\"%s\","
         "\"timer_cancel_error\":\"%s\","
         "\"operator_guidance\":\"%s\"},"
-        "\"broker\":{\"running\":%s,"
+        "\"broker\":{\"running\":%s,\"stopped\":%s,"
         "\"active_clients\":%" PRId32 ","
         "\"observable\":%s},"
         "\"commissioned\":%s"
@@ -499,6 +499,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         esp_err_to_name(net_snap.last_service_cancel_error),
         operator_guidance,
         net_snap.mqtt_broker_running ? "true" : "false",
+        net_snap.mqtt_broker_stopped ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
         (broker_err == ESP_OK) ? "true" : "false",
         commissioned ? "true" : "false");
@@ -703,7 +704,7 @@ static const char PORTAL_HTML[] =
     "row('STA Connected',n.sta_connected?'Yes':'No',n.sta_connected?'badge-ok':'badge-off')+\n"
     "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+\n"
     "(n.sta_ip_acquired?row('STA IP',n.sta_ip_address||'UNKNOWN','badge-ok'):'')+\n"
-    "row('Broker',d.broker.running?'Running':'Stopped',d.broker.running?'badge-ok':'badge-off')+\n"
+    "row('Broker',!d.broker.observable?'Unobservable':d.broker.running?'Running':d.broker.stopped?'Stopped':'Not converged',d.broker.running?'badge-ok':d.broker.stopped?'badge-off':'badge-warn')+\n"
     "row('Commissioned',d.commissioned?'Yes':'No',d.commissioned?'badge-ok':'badge-warn')+\n"
     "(ncat!=='NONE'?row('Last Failure',ncat+' ('+(n.last_disconnect_reason_name||'')+')','badge-warn'):'')+\n"
     "((n.retry_count||0)>0?row('Failures',n.retry_count,'badge-err'):'')+\n"

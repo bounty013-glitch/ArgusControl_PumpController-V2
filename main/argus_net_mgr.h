@@ -166,6 +166,7 @@ argus_sta_event_action_t argus_net_decide_sta_event(
     bool sta_connected,
     bool sta_ip_acquired);
 void argus_net_apply_sta_event_action(argus_network_mode_t mode,
+                                      argus_sta_lifecycle_event_t event,
                                       argus_sta_event_action_t action,
                                       argus_sta_state_t *sta_state,
                                       bool *sta_started,

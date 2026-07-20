@@ -4136,6 +4136,162 @@ static esp_err_t test_4b3a_broker_observable_stop_requires_convergence(void)
 }
 
 typedef struct {
+    argus_mqtt_broker_lifecycle_obs_t observations[4];
+    size_t observation_count;
+    size_t observation_index;
+    esp_err_t observation_error;
+    esp_err_t stop_result;
+    uint32_t stop_calls;
+    uint32_t wait_calls;
+    bool invalid_wait_delay;
+} mock_broker_convergence_ctx_t;
+
+static esp_err_t mock_broker_observe(
+    void *ctx, argus_mqtt_broker_lifecycle_obs_t *out)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    if (mock->observation_error != ESP_OK) {
+        return mock->observation_error;
+    }
+    size_t index = mock->observation_index;
+    if (index >= mock->observation_count) {
+        index = mock->observation_count - 1;
+    }
+    *out = mock->observations[index];
+    mock->observation_index++;
+    return ESP_OK;
+}
+
+static esp_err_t mock_broker_stop_request(void *ctx)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    mock->stop_calls++;
+    return mock->stop_result;
+}
+
+static void mock_broker_wait(void *ctx, uint32_t delay_ms)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    if (delay_ms != 50) {
+        mock->invalid_wait_delay = true;
+    }
+    mock->wait_calls++;
+}
+
+static argus_mqtt_broker_convergence_ops_t mock_broker_convergence_ops(
+    mock_broker_convergence_ctx_t *ctx)
+{
+    return (argus_mqtt_broker_convergence_ops_t) {
+        .observe = mock_broker_observe,
+        .stop = mock_broker_stop_request,
+        .wait = mock_broker_wait,
+        .ctx = ctx,
+    };
+}
+
+static esp_err_t test_4b3a_broker_production_convergence_decisions(void)
+{
+    const argus_mqtt_broker_lifecycle_obs_t cases[] = {
+        {.state = BROKER_STATE_STOPPED},
+        {.state = BROKER_STATE_STOPPED, .has_server_task = true},
+        {.state = BROKER_STATE_STOPPED, .has_listener = true},
+        {.state = BROKER_STATE_STOPPED, .active_client_count = 1},
+        {.state = BROKER_STATE_STARTING, .has_server_task = true},
+        {.state = BROKER_STATE_RUNNING, .active_client_count = 2,
+         .has_server_task = true, .has_listener = true},
+        {.state = BROKER_STATE_RUNNING, .has_server_task = true},
+        {.state = BROKER_STATE_STOPPING},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        mock_broker_convergence_ctx_t ctx = {
+            .observations = {cases[i]},
+            .observation_count = 1,
+            .stop_result = ESP_ERR_TIMEOUT,
+        };
+        argus_mqtt_broker_convergence_ops_t ops =
+            mock_broker_convergence_ops(&ctx);
+        esp_err_t err = argus_mqtt_broker_request_stop_converged(&ops);
+        if (i == 0) {
+            TEST_ASSERT(err == ESP_OK && ctx.stop_calls == 0,
+                        "Fully converged STOPPED did not return idempotent success");
+        } else {
+            TEST_ASSERT(err == ESP_ERR_TIMEOUT && ctx.stop_calls == 1,
+                        "Non-converged broker skipped stop or lost its exact error");
+        }
+    }
+
+    TEST_ASSERT(argus_mqtt_broker_observation_is_running(&cases[5]),
+                "Coherent RUNNING observation was not operational");
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_running(&cases[6]) &&
+                    !argus_mqtt_broker_observation_is_running(&cases[4]) &&
+                    !argus_mqtt_broker_observation_is_running(&cases[7]),
+                "Incomplete RUNNING, STARTING, or STOPPING was reported operational");
+
+    mock_broker_convergence_ctx_t observation_failure = {
+        .observation_count = 1,
+        .observation_error = ESP_ERR_INVALID_STATE,
+        .stop_result = ESP_OK,
+    };
+    argus_mqtt_broker_convergence_ops_t ops =
+        mock_broker_convergence_ops(&observation_failure);
+    TEST_ASSERT(argus_mqtt_broker_request_stop_converged(&ops) ==
+                    ESP_ERR_INVALID_STATE && observation_failure.stop_calls == 0,
+                "Observation failure did not fail closed before stop decision");
+
+    mock_broker_convergence_ctx_t stop_then_converge = {
+        .observations = {{.state = BROKER_STATE_STARTING,
+                          .has_server_task = true}},
+        .observation_count = 1,
+        .stop_result = ESP_OK,
+    };
+    ops = mock_broker_convergence_ops(&stop_then_converge);
+    TEST_ASSERT(argus_mqtt_broker_request_stop_converged(&ops) == ESP_OK &&
+                    stop_then_converge.stop_calls == 1,
+                "Required stop request did not preserve successful stop result");
+    stop_then_converge.observations[0] =
+        (argus_mqtt_broker_lifecycle_obs_t) {
+            .state = BROKER_STATE_STOPPING, .has_server_task = true};
+    stop_then_converge.observations[1] =
+        (argus_mqtt_broker_lifecycle_obs_t) {.state = BROKER_STATE_STOPPED};
+    stop_then_converge.observation_count = 2;
+    stop_then_converge.observation_index = 0;
+    ops = mock_broker_convergence_ops(&stop_then_converge);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 2, 50) ==
+                    ESP_OK && stop_then_converge.wait_calls == 1,
+                "Successful stop request did not require subsequent full convergence");
+
+    mock_broker_convergence_ctx_t converging = {
+        .observations = {
+            {.state = BROKER_STATE_STOPPING, .has_server_task = true},
+            {.state = BROKER_STATE_STOPPED, .active_client_count = 1},
+            {.state = BROKER_STATE_STOPPED},
+        },
+        .observation_count = 3,
+    };
+    ops = mock_broker_convergence_ops(&converging);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 3, 50) ==
+                    ESP_OK && converging.wait_calls == 2 &&
+                    !converging.invalid_wait_delay,
+                "Verification did not wait through STOPPING and residual clients");
+
+    mock_broker_convergence_ctx_t timed_out = {
+        .observations = {{.state = BROKER_STATE_STOPPING}},
+        .observation_count = 1,
+    };
+    ops = mock_broker_convergence_ops(&timed_out);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 3, 50) ==
+                    ESP_ERR_TIMEOUT && timed_out.wait_calls == 2,
+                "Non-converged verification did not preserve timeout failure");
+
+    observation_failure.observation_index = 0;
+    ops = mock_broker_convergence_ops(&observation_failure);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 2, 50) ==
+                    ESP_ERR_INVALID_STATE,
+                "Verification observation failure did not remain operator-visible");
+    return ESP_OK;
+}
+
+typedef struct {
     bool retry_active;
     bool ip_active;
     esp_err_t retry_result;
@@ -4429,7 +4585,8 @@ static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
         argus_sta_state_t state = ARGUS_STA_RETRY_WAIT;
         bool started = true, connected = true, ip = true;
         argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_TRANSITION,
-                                         action, &state, &started, &connected, &ip);
+                                         success_events[i], action, &state,
+                                         &started, &connected, &ip);
         TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT && !started && !connected && !ip,
                     "Ignored transition event changed lifecycle state or retained stale physical flags");
 
@@ -4441,7 +4598,8 @@ static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
         state = ARGUS_STA_DISABLED;
         started = connected = ip = true;
         argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_AP_ONLY,
-                                         action, &state, &started, &connected, &ip);
+                                         success_events[i], action, &state,
+                                         &started, &connected, &ip);
         TEST_ASSERT(state == ARGUS_STA_DISABLED && !started && !connected && !ip,
                     "Ignored service event broke DISABLED or physical-absence invariants");
     }
@@ -4456,7 +4614,8 @@ static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
         argus_sta_state_t state = ARGUS_STA_RETRY_WAIT;
         bool started = true, connected = true, ip = true;
         argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_AP_ONLY,
-                                         action, &state, &started, &connected, &ip);
+                                         absence_events[i], action, &state,
+                                         &started, &connected, &ip);
         TEST_ASSERT(action == ARGUS_STA_EVENT_CONFIRM_DISABLED &&
                         state == ARGUS_STA_DISABLED && !started && !connected && !ip,
                     "Delayed disconnect/stop did not retain DISABLED service state");
@@ -4531,17 +4690,126 @@ static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
     argus_sta_state_t stale_state = ARGUS_STA_ACTION_REQUIRED;
     bool stale_started = true, stale_connected = true, stale_ip = true;
     argus_net_apply_sta_event_action(ARGUS_NET_MODE_AP_DISCOVERABLE,
-                                     stale_action, &stale_state, &stale_started,
+                                     ARGUS_STA_EVENT_IP_ACQUIRED, stale_action,
+                                     &stale_state, &stale_started,
                                      &stale_connected, &stale_ip);
-    TEST_ASSERT(stale_state == ARGUS_STA_ACTION_REQUIRED && !stale_started &&
-                    !stale_connected && !stale_ip,
-                "Ignored stale IP event retained optimistic physical flags");
+    TEST_ASSERT(stale_state == ARGUS_STA_ACTION_REQUIRED && stale_started &&
+                    stale_connected && stale_ip,
+                "Ignored stale IP event corrupted callback physical observations");
     TEST_ASSERT(evidence.reason == WIFI_REASON_AUTH_FAIL &&
                     evidence.consecutive_failures == 4 &&
                     last_error == ARGUS_NET_ERR_TIMER_COMMAND_FAILED &&
                     !broker_running && authority.mode == ARGUS_AUTHORITY_NONE &&
                     authority.owner == ARGUS_AUTH_OWNER_NONE && authority.generation == 33,
                 "Ignored events changed failure, error, broker, or authority evidence");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_stale_event_race_preserves_active_transaction(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    const uint32_t stale_generation = 120;
+    const uint32_t active_generation = 121;
+
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(
+                    &txn, active_generation, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                    &state, false, &ops) == ESP_OK &&
+                    txn.active && txn.state == ARGUS_WIFI_APPLY_CONNECTING,
+                "Active generation did not begin its connect transaction");
+
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_AUTH_FAIL,
+        .category = ARGUS_DISCONNECT_CAT_AUTHENTICATION,
+        .consecutive_failures = 3,
+        .authentication_streak = 2,
+    };
+    argus_authority_snapshot_t authority = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 44,
+    };
+    bool broker_running = false;
+    uint32_t retry_count = 3;
+    uint32_t timer_generation = 81;
+    bool retry_timer_active = true;
+    bool ip_timer_active = true;
+
+    bool started = true, connected = false, ip = false;
+    argus_sta_event_action_t action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED,
+        stale_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE,
+                "Queued prior-generation disconnect was accepted");
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(started && !connected && !ip &&
+                    state == ARGUS_STA_CONNECTING,
+                "Rejected disconnect fabricated a stopped STA or changed lifecycle state");
+    TEST_ASSERT(txn.active && txn.generation == active_generation &&
+                    txn.state == ARGUS_WIFI_APPLY_CONNECTING &&
+                    evidence.reason == WIFI_REASON_AUTH_FAIL &&
+                    evidence.category == ARGUS_DISCONNECT_CAT_AUTHENTICATION &&
+                    evidence.consecutive_failures == 3 &&
+                    evidence.authentication_streak == 2 &&
+                    authority.mode == ARGUS_AUTHORITY_NONE &&
+                    authority.owner == ARGUS_AUTH_OWNER_NONE &&
+                    authority.generation == 44 && !broker_running &&
+                    retry_count == 3 && timer_generation == 81 &&
+                    retry_timer_active && ip_timer_active,
+                "Rejected disconnect altered transaction, evidence, authority, broker, counters, or timers");
+
+    connected = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_ASSOCIATED,
+        active_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_PROCESS,
+                "Active-generation association was rejected after stale disconnect");
+    state = ARGUS_STA_ASSOCIATED_WAITING_IP;
+
+    ip = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED,
+        active_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_PROCESS,
+                "Active-generation IP event was rejected after stale disconnect");
+    bool completed = false;
+    TEST_ASSERT(argus_wifi_transaction_handle_got_ip(
+                    &txn, active_generation, &completed) == ESP_OK && completed &&
+                    !txn.active && txn.state == ARGUS_WIFI_APPLY_COMPLETE,
+                "Active transaction did not reach its successful terminal path");
+
+    state = ARGUS_STA_CONNECTING;
+    started = connected = true;
+    ip = false;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_ASSOCIATED,
+        stale_generation, active_generation, started, connected, ip);
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_ASSOCIATED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE && started && connected && !ip,
+                "Ignored operational association corrupted callback observations");
+    ip = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_IP_ACQUIRED,
+        stale_generation, active_generation, started, connected, ip);
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_IP_ACQUIRED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE && started && connected && ip,
+                "Ignored operational IP event corrupted callback observations");
+
+    started = connected = ip = true;
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_STOPPED,
+        ARGUS_STA_EVENT_PROCESS, &state, &started, &connected, &ip);
+    TEST_ASSERT(!started && !connected && !ip,
+                "True STA-stop observation did not clear physical STA state");
     return ESP_OK;
 }
 
@@ -5009,10 +5277,12 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b3a_service_recovery_policy_contradictions);
     RUN_TEST(test_4b3a_service_recovery_invalid_authority_pairs);
     RUN_TEST(test_4b3a_broker_observable_stop_requires_convergence);
+    RUN_TEST(test_4b3a_broker_production_convergence_decisions);
     RUN_TEST(test_4b3a_service_rejection_preserves_recovery);
     RUN_TEST(test_4b3a_service_success_cancels_recovery);
     RUN_TEST(test_4b3a_service_cancel_failure_truthfulness);
     RUN_TEST(test_4b3a_service_delayed_events_suppressed);
+    RUN_TEST(test_4b3a_stale_event_race_preserves_active_transaction);
     RUN_TEST(test_4b3a_service_policy_api_dashboard_consistency);
     RUN_TEST(test_4b3a_service_retry_suppression);
     RUN_TEST(test_4b3a_ap_http_preservation);
@@ -5082,9 +5352,25 @@ esp_err_t argus_tests_4a_run_all(void)
     printf("  Network State         : %s (%s)\n",
            (snap_before.net_snap.mode == snap_after.net_snap.mode) ? "UNCHANGED" : "MUTATED",
            argus_net_mgr_get_mode_name(snap_after.net_snap.mode));
+    bool broker_unchanged =
+        snap_before.broker_obs_status == snap_after.broker_obs_status &&
+        snap_before.broker_obs.state == snap_after.broker_obs.state &&
+        snap_before.broker_obs.active_client_count ==
+            snap_after.broker_obs.active_client_count &&
+        snap_before.broker_obs.has_server_task ==
+            snap_after.broker_obs.has_server_task &&
+        snap_before.broker_obs.has_listener == snap_after.broker_obs.has_listener &&
+        snap_before.broker_obs.running == snap_after.broker_obs.running &&
+        snap_before.broker_obs.stopped == snap_after.broker_obs.stopped;
     printf("  MQTT Broker State     : %s (%s)\n",
-           (snap_before.net_snap.mqtt_broker_running == snap_after.net_snap.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
-           snap_after.net_snap.mqtt_broker_running ? "RUNNING" : "STOPPED");
+           broker_unchanged ? "UNCHANGED" : "MUTATED",
+           snap_after.broker_obs_status != ESP_OK
+               ? "UNOBSERVABLE"
+               : (snap_after.broker_obs.running
+                      ? "RUNNING"
+                      : (snap_after.broker_obs.stopped
+                             ? "STOPPED"
+                             : "NOT CONVERGED")));
     printf("  Machine State         : %s (%s)\n",
            (snap_before.state.machine_state == snap_after.state.machine_state) ? "UNCHANGED" : "MUTATED",
            argus_state_mgr_get_state_name(snap_after.state.machine_state));

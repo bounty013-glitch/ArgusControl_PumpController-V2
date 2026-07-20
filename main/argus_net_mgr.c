@@ -231,20 +231,31 @@ argus_sta_event_action_t argus_net_decide_sta_event(
 }
 
 void argus_net_apply_sta_event_action(argus_network_mode_t mode,
+                                      argus_sta_lifecycle_event_t event,
                                       argus_sta_event_action_t action,
                                       argus_sta_state_t *sta_state,
                                       bool *sta_started,
                                       bool *sta_connected,
                                       bool *sta_ip_acquired)
 {
-    if (!sta_state || !sta_started || !sta_connected || !sta_ip_acquired ||
-        action == ARGUS_STA_EVENT_PROCESS) {
+    if (!sta_state || !sta_started || !sta_connected || !sta_ip_acquired) {
         return;
     }
-    if (action == ARGUS_STA_EVENT_IGNORE ||
-        mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
-        mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+
+    bool service_mode = mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
+                        mode == ARGUS_NET_MODE_SERVICE_AP_ONLY;
+    if (service_mode && action != ARGUS_STA_EVENT_PROCESS) {
         *sta_started = false;
+        *sta_connected = false;
+        *sta_ip_acquired = false;
+    } else if (action == ARGUS_STA_EVENT_PROCESS &&
+               event == ARGUS_STA_EVENT_STOPPED) {
+        *sta_started = false;
+        *sta_connected = false;
+        *sta_ip_acquired = false;
+    } else if (action == ARGUS_STA_EVENT_PROCESS &&
+               (event == ARGUS_STA_EVENT_DISCONNECTED ||
+                event == ARGUS_STA_EVENT_IP_TIMEOUT)) {
         *sta_connected = false;
         *sta_ip_acquired = false;
     }
@@ -412,13 +423,14 @@ static esp_err_t argus_net_mgr_request_service_internal(
     argus_authority_owner_t requested_owner,
     const argus_service_entry_fingerprint_t *expected_preflight);
 
-static void apply_sta_event_action_locked(argus_sta_event_action_t action)
+static void apply_sta_event_action_locked(argus_sta_lifecycle_event_t event,
+                                          argus_sta_event_action_t action)
 {
     argus_sta_state_t state = s_sta_state;
     bool started = atomic_load(&s_sta_started);
     bool connected = atomic_load(&s_sta_connected);
     bool ip_acquired = atomic_load(&s_sta_ip_acquired);
-    argus_net_apply_sta_event_action(s_net_mode, action, &state, &started,
+    argus_net_apply_sta_event_action(s_net_mode, event, action, &state, &started,
                                      &connected, &ip_acquired);
     s_sta_state = state;
     atomic_store(&s_sta_started, started);
@@ -505,7 +517,8 @@ static void net_mgr_task(void *pvParameters)
                             ESP_LOGE(TAG, "Failed to schedule STA IP timeout");
                         }
                     } else {
-                        apply_sta_event_action_locked(assoc_action);
+                        apply_sta_event_action_locked(ARGUS_STA_EVENT_ASSOCIATED,
+                                                      assoc_action);
                         ESP_LOGW(TAG, "Ignored delayed STA association in mode %s",
                                  argus_net_mgr_get_mode_name(s_net_mode));
                     }
@@ -521,7 +534,8 @@ static void net_mgr_task(void *pvParameters)
                         atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
                         atomic_load(&s_sta_ip_acquired));
                     if (ip_action != ARGUS_STA_EVENT_PROCESS) {
-                        apply_sta_event_action_locked(ip_action);
+                        apply_sta_event_action_locked(ARGUS_STA_EVENT_IP_ACQUIRED,
+                                                      ip_action);
                         ESP_LOGW(TAG, "Ignored delayed STA IP acquisition in mode %s",
                                  argus_net_mgr_get_mode_name(s_net_mode));
                         xSemaphoreGive(s_net_mutex);
@@ -587,12 +601,19 @@ static void net_mgr_task(void *pvParameters)
                         atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
                         atomic_load(&s_sta_ip_acquired));
                     if (disconnect_action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
-                        apply_sta_event_action_locked(disconnect_action);
+                        apply_sta_event_action_locked(
+                            is_ip_timeout ? ARGUS_STA_EVENT_IP_TIMEOUT
+                                          : ARGUS_STA_EVENT_DISCONNECTED,
+                            disconnect_action);
                         ESP_LOGI(TAG, "Delayed STA disconnect confirmed disabled service state");
                         xSemaphoreGive(s_net_mutex);
                         break;
                     }
                     if (disconnect_action == ARGUS_STA_EVENT_IGNORE) {
+                        apply_sta_event_action_locked(
+                            is_ip_timeout ? ARGUS_STA_EVENT_IP_TIMEOUT
+                                          : ARGUS_STA_EVENT_DISCONNECTED,
+                            disconnect_action);
                         ESP_LOGW(TAG, "Ignored delayed STA disconnect in mode %s",
                                  argus_net_mgr_get_mode_name(s_net_mode));
                         xSemaphoreGive(s_net_mutex);
@@ -639,7 +660,12 @@ static void net_mgr_task(void *pvParameters)
                         s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
                         ESP_LOGW(TAG, "STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.");
                         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
-                        argus_mqtt_broker_stop();
+                        esp_err_t broker_stop_err = argus_mqtt_broker_stop();
+                        if (broker_stop_err != ESP_OK) {
+                            s_last_error = ARGUS_NET_ERR_STOP_TIMEOUT;
+                            ESP_LOGE(TAG, "Broker stop did not converge after STA disconnect: %s",
+                                     esp_err_to_name(broker_stop_err));
+                        }
 
                         s_last_disconnect_reason = evt.disconnect_reason;
                         const char *reason_name;
@@ -727,13 +753,19 @@ static void net_mgr_task(void *pvParameters)
                         atomic_load(&s_sta_started), atomic_load(&s_sta_connected),
                         atomic_load(&s_sta_ip_acquired));
                     if (stop_action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
-                        apply_sta_event_action_locked(stop_action);
+                        apply_sta_event_action_locked(ARGUS_STA_EVENT_STOPPED,
+                                                      stop_action);
                         ESP_LOGI(TAG, "STA stop confirmed disabled service state");
                     } else if (stop_action == ARGUS_STA_EVENT_PROCESS) {
                         s_sta_state = ARGUS_STA_DISABLED;
                         argus_authority_mgr_set_mode(
                             ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
-                        argus_mqtt_broker_stop();
+                        esp_err_t broker_stop_err = argus_mqtt_broker_stop();
+                        if (broker_stop_err != ESP_OK) {
+                            s_last_error = ARGUS_NET_ERR_STOP_TIMEOUT;
+                            ESP_LOGE(TAG, "Broker stop did not converge after STA stop: %s",
+                                     esp_err_to_name(broker_stop_err));
+                        }
                         set_net_mode(ARGUS_NET_MODE_NETWORK_FAULT);
                         s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
                         ESP_LOGE(TAG, "Unexpected operational STA stop; entered NETWORK_FAULT");
@@ -1144,23 +1176,41 @@ static esp_err_t prod_verify_stopped(void *ctx) {
     return ESP_ERR_TIMEOUT;
 }
 
+static esp_err_t observe_broker_lifecycle(void *ctx,
+                                         argus_mqtt_broker_lifecycle_obs_t *out) {
+    (void)ctx;
+    return argus_mqtt_broker_get_lifecycle_obs(out);
+}
+
+static esp_err_t stop_broker_lifecycle(void *ctx) {
+    (void)ctx;
+    return argus_mqtt_broker_stop();
+}
+
+static void wait_broker_lifecycle(void *ctx, uint32_t delay_ms) {
+    (void)ctx;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+}
+
+static argus_mqtt_broker_convergence_ops_t broker_convergence_ops(void) {
+    return (argus_mqtt_broker_convergence_ops_t) {
+        .observe = observe_broker_lifecycle,
+        .stop = stop_broker_lifecycle,
+        .wait = wait_broker_lifecycle,
+        .ctx = NULL,
+    };
+}
+
 static esp_err_t prod_stop_broker(void *ctx) {
     (void)ctx;
-    if (!argus_mqtt_broker_is_running()) {
-        return ESP_OK; // Already stopped
-    }
-    return argus_mqtt_broker_stop();
+    argus_mqtt_broker_convergence_ops_t ops = broker_convergence_ops();
+    return argus_mqtt_broker_request_stop_converged(&ops);
 }
 
 static esp_err_t prod_verify_broker_stopped(void *ctx) {
     (void)ctx;
-    int timeout_ms = 2000;
-    while (timeout_ms > 0) {
-        if (!argus_mqtt_broker_is_running()) return ESP_OK;
-        vTaskDelay(pdMS_TO_TICKS(50));
-        timeout_ms -= 50;
-    }
-    return argus_mqtt_broker_is_running() ? ESP_ERR_TIMEOUT : ESP_OK;
+    argus_mqtt_broker_convergence_ops_t ops = broker_convergence_ops();
+    return argus_mqtt_broker_verify_stopped_converged(&ops, 41, 50);
 }
 
 esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed)
@@ -1678,11 +1728,15 @@ static esp_err_t wifi_apply_revoke_supervisory(void *ctx) {
 }
 
 static esp_err_t wifi_apply_stop_broker(void *ctx) {
-    return argus_mqtt_broker_stop();
+    (void)ctx;
+    argus_mqtt_broker_convergence_ops_t ops = broker_convergence_ops();
+    return argus_mqtt_broker_request_stop_converged(&ops);
 }
 
 static esp_err_t wifi_apply_verify_broker_stopped(void *ctx) {
-    return argus_mqtt_broker_is_running() ? ESP_ERR_INVALID_STATE : ESP_OK;
+    (void)ctx;
+    argus_mqtt_broker_convergence_ops_t ops = broker_convergence_ops();
+    return argus_mqtt_broker_verify_stopped_converged(&ops, 41, 50);
 }
 
 static esp_err_t wifi_apply_load_config(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) {

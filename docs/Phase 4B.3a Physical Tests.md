@@ -96,3 +96,9 @@ Actual: `[PENDING]`
 ## Acceptance note
 
 All ten physical tests, including corrected Test 8, remain pending. No physical acceptance has occurred. Any source-derived registration count is provisional until diagnostic option `t` executes on hardware.
+
+## Post-`5daab467` review note
+
+Source review after `5daab467` found two composition-level blockers before flashing: ignored stale operational events could overwrite callback-established STA flags and falsely clear `sta_started`, and production broker wrappers could treat any state other than coherent `RUNNING` as stopped without proving task/listener/client convergence. The event application seam and broker production decisions have been corrected and covered by pure tests, including the exact old-generation disconnect followed by current-generation association/IP race and contradictory broker lifecycle observations.
+
+The source-derived inventory is now 142 `RUN_TEST(...)` registrations, including 48 Phase 4B.3a registrations. These are provisional source counts only. Diagnostic option `t` has not executed on hardware, so no runtime distinct/execution/pass/fail count is established. All ten physical tests remain pending, and this note does not authorize flashing or claim physical readiness or acceptance.

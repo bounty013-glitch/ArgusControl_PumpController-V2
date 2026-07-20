@@ -108,6 +108,18 @@ The final source was full-clean built and sized with ESP-IDF v5.5.3:
 
 These facts supersede only the prior candidate size and source-registration checkpoint. They do not claim diagnostic-suite execution, physical readiness, or acceptance; all ten physical tests remain pending.
 
+### Post-`5daab467` composition correction
+
+Review after `5daab467` found that the event decision was correct but its application seam was not. Every ignored event cleared all three physical STA flags. In operational modes, a queued prior-generation disconnect could therefore clear `sta_started` after a new generation had begun connecting, contradicting the Wi-Fi callback's immediate physical observation and preventing current-generation association/IP events from completing the transaction. The application seam now receives the lifecycle event type. Ignored operational events preserve callback-established physical flags; service transition and AP-only modes may still force physical absence; and only a processed STA-stop observation clears `sta_started` in operational modes.
+
+The same review found that several production paths treated "not `RUNNING`" as equivalent to convergently stopped. They now consume one authoritative lifecycle observation: stopped means `STOPPED`, no server task, no listener, and zero clients. `STARTING`, `STOPPING`, contradictory `STOPPED`, incomplete `RUNNING`, and observation failure all fail closed. Stop is idempotently successful only for the full stopped predicate; otherwise the real stop operation runs and its exact error propagates. Running remains `RUNNING` plus server task plus listener; client count is irrelevant to that running predicate. Diagnostic status now distinguishes `STOPPED`, `NOT CONVERGED`, and `UNOBSERVABLE`.
+
+Two pure tests were added. The stale-event race test advances the active transaction generation, rejects a queued old-generation disconnect without clearing `sta_started` or changing evidence/authority/broker/counters/timers, accepts current association and IP, completes the transaction, preserves ignored operational association/IP callback observations, suppresses delayed service events, and proves a true stop may clear started. The broker production-decision test covers converged and contradictory `STOPPED`, `STARTING`, coherent and incomplete `RUNNING`, `STOPPING`, observation failure, exact stop failure propagation, successful post-stop convergence, and verification timeout. Existing service-entry and Wi-Fi-apply orchestration tests continue to prove that a broker-verification failure stops the callback chain.
+
+The source now has 142 actual `RUN_TEST(...)` registrations, including 48 Phase 4B.3a registrations. These are source-derived provisional counts, not runtime results. No runtime count is final until diagnostic option `t` executes on hardware. All ten physical tests remain pending; this correction does not claim readiness to flash, physical readiness, or acceptance.
+
+This correction was full-clean built and sized with ESP-IDF v5.5.3 using the host-stable serial method: `CMAKE_BUILD_PARALLEL_LEVEL=1`, `--no-ccache`, `CMAKE_JOB_POOLS=compile_pool=1`, and `CMAKE_JOB_POOL_COMPILE=compile_pool`. The build completed 1,096 commands with zero compiler warnings, zero compiler errors, and zero failed commands. The application image is `0xfab10` bytes in the `0x300000`-byte smallest app partition, leaving `0x2054f0` bytes (67%) OTA headroom. All four extracted embedded JavaScript blocks passed Node.js syntax validation. These are static/build facts only.
+
 ## Remaining acceptance
 
 1. Complete an independent read-only source review.
