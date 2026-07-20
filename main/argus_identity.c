@@ -54,9 +54,11 @@ esp_err_t argus_identity_init(void)
 
     const esp_app_desc_t *app_desc = esp_app_get_description();
     if (app_desc && app_desc->version[0] != '\0') {
-        snprintf(s_identity.fw_version, sizeof(s_identity.fw_version), "v2-phase4b.3-dev [%s]", app_desc->version);
+        strlcpy(s_identity.fw_version, app_desc->version,
+                sizeof(s_identity.fw_version));
     } else {
-        snprintf(s_identity.fw_version, sizeof(s_identity.fw_version), "v2-phase4b.3-dev");
+        strlcpy(s_identity.fw_version, "v2-phase4b.3a-dev",
+                sizeof(s_identity.fw_version));
     }
 
     s_initialized = true;
