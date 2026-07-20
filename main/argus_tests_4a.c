@@ -3092,6 +3092,8 @@ esp_err_t argus_tests_4a_run_all(void)
 
     int passed_executions = 0;
     int failed_executions = 0;
+    int distinct_test_cases = 0;
+    const int repeat_passes = 3;
 
     static argus_prod_snapshot_t snap_before, snap_after;
     esp_err_t snap_err = capture_prod_snapshot(&snap_before);
@@ -3117,6 +3119,7 @@ esp_err_t argus_tests_4a_run_all(void)
 
 #define RUN_TEST(test_fn) \
     do { \
+        if (run == 1) distinct_test_cases++; \
         printf("Running %-55s ... ", #test_fn); \
         esp_err_t err = test_fn(); \
         if (err == ESP_OK) { \
@@ -3128,8 +3131,8 @@ esp_err_t argus_tests_4a_run_all(void)
         } \
     } while (0)
 
-    for (int run = 1; run <= 3; run++) {
-        printf("\n--- Executing Phase 4A Test Pass %d of 3 ---\n", run);
+    for (int run = 1; run <= repeat_passes; run++) {
+        printf("\n--- Executing Test Pass %d of %d ---\n", run, repeat_passes);
         RUN_TEST(test_identity_mac_uid_derivation);
         RUN_TEST(test_identity_field_sanitization);
         RUN_TEST(test_nvs_schema_validation);
@@ -3225,6 +3228,23 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_exit_eligible);
         RUN_TEST(test_service_policy_exit_rejected);
     }
+
+    int total_executions = passed_executions + failed_executions;
+    int expected_executions = distinct_test_cases * repeat_passes;
+
+    if (total_executions != expected_executions) {
+        printf("\n[ERROR] Execution count mismatch! Expected %d (%d distinct * %d passes), got %d passed + %d failed = %d\n",
+               expected_executions, distinct_test_cases, repeat_passes, passed_executions, failed_executions, total_executions);
+        return ESP_FAIL;
+    }
+
+    printf("\nTest Execution Summary:\n");
+    printf("  Distinct Tests : %d\n", distinct_test_cases);
+    printf("  Repeat Passes  : %d\n", repeat_passes);
+    printf("  Total Executed : %d\n", total_executions);
+    printf("  Total Passed   : %d\n", passed_executions);
+    printf("  Total Failed   : %d\n", failed_executions);
+
 
     esp_err_t post_err = capture_prod_snapshot(&snap_after);
     if (post_err != ESP_OK) {

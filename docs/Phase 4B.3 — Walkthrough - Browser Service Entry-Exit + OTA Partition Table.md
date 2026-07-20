@@ -110,13 +110,14 @@ The production NVS driver returns `ESP_ERR_NVS_NOT_FOUND` when the configuration
 | 1 | Full build | 1096 objects, zero errors, zero warnings |
 | 2 | Binary size | 968,736 bytes (0xec820) |
 | 3 | Partition free | 69% (2,176,992 bytes on 3MB) |
-| 4 | Test count | 89 distinct, 89 RUN_TEST |
+| 4 | Test count | 89 distinct cases (267 total executions) |
 | 5 | sdkconfig.defaults | `PARTITION_TABLE_CUSTOM=y`, `partitions.csv` |
 | 6 | Partition table parsed | Confirmed by build output |
 | 7 | OTA data partition | Generated `ota_data_initial.bin` |
 | 8 | Flash command | Includes `ota_data_initial.bin` at 0xF000 |
-| 9 | **Physical flash** | **Pending operator** |
-| 10 | **Service entry/exit** | **Pending operator browser test** |
+| 9 | **Physical test execution** | **Confirmed by operator** (267/267 passed, 0 failed, 3 repeat passes) |
+| 10 | **Production isolation** | **Confirmed by operator** (Authority generation=2, Network=UNCOMMISSIONED_AP, Broker=STOPPED, Machine=UNLOCKED, Task count=14) |
+| 11 | **Service entry/exit** | **Pending operator browser test** |
 
 > [!IMPORTANT]
 > **Flashing note:** The new partition table requires a full erase flash.
