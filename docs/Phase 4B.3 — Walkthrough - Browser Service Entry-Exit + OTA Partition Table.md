@@ -1,7 +1,7 @@
 # Phase 4B.3 — Browser Service Entry/Exit + OTA Partition Table
 
-**Source-correction baseline:** `f0f3b0e` on `phase4b-config-portal`  
-**Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)  
+**Source-correction baseline:** `f0f3b0e` on `phase4b-config-portal`
+**Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)
 **Build:** ESP-IDF 5.5.1 incremental build — 992,149 bytes (68% free on 3MB partition)
 
 ---
@@ -30,7 +30,7 @@ Migrated from the default 1MB single-app partition (6% free, dangerously tight) 
 
 ### 2. Service Entry/Exit HTTP Handlers
 
-Two new POST endpoints wire the browser portal to the existing service orchestration. The pure policy seam is exercised by stack-local tests covering eligible entry pairings, authority mismatches, idempotency, transition-in-progress, exit eligibility, exit rejection, and event construction. 
+Two new POST endpoints wire the browser portal to the existing service orchestration. The pure policy seam is exercised by stack-local tests covering eligible entry pairings, authority mismatches, idempotency, transition-in-progress, exit eligibility, exit rejection, and event construction.
 
 #### `POST /api/service/enter`
 
