@@ -258,6 +258,29 @@
 
 ---
 
+## DHR-014 — Deferred Wi-Fi Connection Observability and Manual Reconnection
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-20 |
+| **System Area** | Network Manager / API |
+| **Phase Introduced** | Phase 4B.3a (Reverted) |
+| **Status** | OPEN |
+| **Target Phase** | Phase 4B.4 (or later standalone micro-phase) |
+| **Operator Decision** | 2026-07-20 |
+
+**Limitation:** The device currently connects to Wi-Fi automatically. If the connection drops or fails due to an authentication error, there is no operator visibility into the failure reason (e.g., bad password, AP out of range), no classification of error types, no bounded retry logic preventing infinite loops on authentication failure, and no HTTP API for the operator to manually request a connection retry without a system restart.
+
+**Rationale:** The Phase 4B.3a implementation introduced `argus_sta_state_t` classification, bounded retries with timer-based backoffs, and a `/api/network/reconnect` endpoint. This feature was deferred (reverted) to maintain the purity and focus of the Phase 4B.3 acceptance sequence, which primarily targeted Identity Provisioning and NVS Driver Seam corrections.
+
+**Deferred items:**
+- Network failure classification and translation (`wifi_event_sta_disconnected_t` reasons to operator-friendly strings)
+- Bounded connection retry logic with backoff timers
+- Status portal telemetry indicating the exact Wi-Fi state and operator guidance
+- `POST /api/network/reconnect` API endpoint to force a manual connection attempt
+
+**Decision criteria:** This feature should be re-introduced as a distinct, focused micro-phase (e.g., Phase 4B.4) to finalize the robustness and operator experience of the Wi-Fi connection lifecycle.
+
 ## Register Maintenance
 
 This register is maintained as a living document. New entries are appended as limitations are identified. Entries are closed when the limitation is resolved, with closure evidence documenting the specific change, test, or audit that addressed the item.
