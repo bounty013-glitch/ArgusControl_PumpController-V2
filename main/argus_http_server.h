@@ -2,8 +2,8 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1+4B.2: Status, identity, configuration, credential-management
- * API with embedded mobile portal.
+ * Phase 4B.1 through 4B.3a status, identity, configuration, service,
+ * credential-management, and Wi-Fi recovery API with embedded mobile portal.
  *
  * Lifecycle:
  *   argus_http_server_init() — One-time creation of lifecycle objects.
@@ -30,9 +30,10 @@
  *   - GET /config/wifi: WiFi configuration page.
  *   - POST /api/restart: Coordinated restart (motion safety checked).
  *
- *   Not yet implemented:
- *   - Motion-control POST endpoints (Phase 4B.3).
- *   - Service entry via HTTP (Phase 4B.3).
+ *   Phase 4B.3/4B.3a:
+ *   - Authenticated service entry/exit POST endpoints.
+ *   - Authenticated manual Wi-Fi reconnect POST endpoint.
+ *   - Motion-control POST endpoints remain outside the current portal scope.
  *
  * Access control:
  *   The portal is reachable through all interfaces on which the HTTP server

@@ -39,10 +39,20 @@ typedef enum {
 
 typedef enum {
     ARGUS_WIFI_APPLY_IDLE = 0,
+    ARGUS_WIFI_APPLY_PREPARING,
     ARGUS_WIFI_APPLY_WAITING_DISCONNECT,
+    ARGUS_WIFI_APPLY_APPLYING_CONFIG,
     ARGUS_WIFI_APPLY_CONNECTING,
-    ARGUS_WIFI_APPLY_FAILED
+    ARGUS_WIFI_APPLY_COMPLETE,
+    ARGUS_WIFI_APPLY_FAILED,
+    ARGUS_WIFI_APPLY_CANCELLED
 } argus_wifi_apply_state_t;
+
+typedef enum {
+    ARGUS_WIFI_TXN_NONE = 0,
+    ARGUS_WIFI_TXN_APPLY_CONFIG,
+    ARGUS_WIFI_TXN_MANUAL_RECONNECT
+} argus_wifi_transaction_kind_t;
 
 typedef enum {
     ARGUS_DISCONNECT_CAT_NONE = 0,
@@ -68,7 +78,9 @@ typedef enum {
     ARGUS_NET_ERR_AUTHORITY_VIOLATION,
     ARGUS_NET_ERR_OWNER_VIOLATION,
     ARGUS_NET_ERR_RESET_FAILED,
-    ARGUS_NET_ERR_REBOOT_PREP_FAILED
+    ARGUS_NET_ERR_REBOOT_PREP_FAILED,
+    ARGUS_NET_ERR_TIMER_COMMAND_FAILED,
+    ARGUS_NET_ERR_WIFI_TRANSACTION_FAILED
 } argus_net_err_t;
 
 typedef enum {
@@ -88,7 +100,13 @@ typedef enum {
 /* Pure helpers for classification and retry decisions */
 argus_disconnect_category_t argus_net_classify_disconnect(uint8_t reason, const char **out_name);
 argus_sta_state_t argus_net_evaluate_retry(argus_disconnect_category_t cat, uint32_t consecutive_failures);
-bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode, argus_sta_state_t sta_state);
+bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode,
+                                    argus_sta_state_t sta_state,
+                                    bool has_valid_commissioned_config);
+esp_err_t argus_net_event_post_status(bool queued);
+bool argus_net_timer_generation_is_current(uint32_t event_generation,
+                                           uint32_t active_generation);
+esp_err_t argus_net_timer_command_status(bool command_queued);
 
 
 typedef struct {
@@ -96,6 +114,7 @@ typedef struct {
     argus_authority_owner_t requested_owner;
     uint8_t disconnect_reason;             /**< Captured from WIFI_EVENT_STA_DISCONNECTED */
     uint32_t timer_generation;
+    uint32_t transaction_generation;
 } argus_net_event_t;
 
 /**
@@ -140,6 +159,7 @@ argus_sta_state_t argus_net_mgr_get_sta_state(void);
  * @brief Get human-readable string for STA lifecycle state.
  */
 const char *argus_net_mgr_get_sta_state_name(argus_sta_state_t state);
+const char *argus_net_mgr_get_wifi_apply_state_name(argus_wifi_apply_state_t state);
 
 /**
  * @brief Get the numeric reason code of the last STA disconnection.
@@ -181,18 +201,78 @@ typedef struct {
     esp_err_t (*stop_timers)(void *ctx);
     esp_err_t (*revoke_supervisory)(void *ctx);
     esp_err_t (*stop_broker)(void *ctx);
+    esp_err_t (*verify_broker_stopped)(void *ctx);
     esp_err_t (*load_config)(void *ctx, wifi_config_t *out_cfg, bool *has_cfg);
+    esp_err_t (*validate_config)(void *ctx, const wifi_config_t *cfg, bool has_cfg);
     esp_err_t (*disconnect_sta)(void *ctx);
     esp_err_t (*apply_sta_config)(void *ctx, const wifi_config_t *cfg);
     esp_err_t (*connect_sta)(void *ctx);
     void *ctx;
 } argus_wifi_apply_ops_t;
 
-esp_err_t argus_net_mgr_orchestrate_wifi_apply(
-    argus_network_mode_t *net_mode,
-    argus_sta_state_t *sta_state,
-    bool sta_connected,
-    const argus_wifi_apply_ops_t *ops);
+typedef struct {
+    argus_wifi_apply_state_t state;
+    argus_wifi_transaction_kind_t kind;
+    uint32_t generation;
+    bool active;
+    bool intentional_disconnect_requested;
+    bool config_staged;
+    bool authority_revoked;
+    bool broker_stopped;
+    bool config_applied;
+    esp_err_t last_error;
+    wifi_config_t pending_config;
+} argus_wifi_transaction_t;
+
+void argus_wifi_transaction_init(argus_wifi_transaction_t *txn);
+esp_err_t argus_wifi_transaction_begin_apply(argus_wifi_transaction_t *txn,
+                                             uint32_t generation,
+                                             argus_network_mode_t net_mode,
+                                             argus_sta_state_t *sta_state,
+                                             bool sta_connected,
+                                             const argus_wifi_apply_ops_t *ops);
+esp_err_t argus_wifi_transaction_begin_reconnect(argus_wifi_transaction_t *txn,
+                                                 uint32_t generation,
+                                                 argus_network_mode_t net_mode,
+                                                 argus_sta_state_t *sta_state,
+                                                 bool sta_connected,
+                                                 const argus_wifi_apply_ops_t *ops);
+esp_err_t argus_wifi_transaction_handle_disconnect(argus_wifi_transaction_t *txn,
+                                                   uint32_t event_generation,
+                                                   argus_sta_state_t *sta_state,
+                                                   const argus_wifi_apply_ops_t *ops,
+                                                   bool *out_handled);
+esp_err_t argus_wifi_transaction_handle_got_ip(argus_wifi_transaction_t *txn,
+                                               uint32_t event_generation,
+                                               bool *out_completed);
+esp_err_t argus_wifi_transaction_handle_connection_failure(
+    argus_wifi_transaction_t *txn,
+    uint32_t event_generation,
+    esp_err_t connection_error,
+    bool *out_failed);
+void argus_wifi_transaction_cancel(argus_wifi_transaction_t *txn);
+bool argus_wifi_transaction_event_matches(const argus_wifi_transaction_t *txn,
+                                          uint32_t event_generation);
+
+/* Compatibility entry point for existing pure tests; production owns a
+ * persistent argus_wifi_transaction_t and uses the transaction API above. */
+esp_err_t argus_net_mgr_orchestrate_wifi_apply(argus_network_mode_t *net_mode,
+                                               argus_sta_state_t *sta_state,
+                                               bool sta_connected,
+                                               const argus_wifi_apply_ops_t *ops);
+
+typedef struct {
+    uint8_t reason;
+    argus_disconnect_category_t category;
+    uint32_t consecutive_failures;
+    uint32_t authentication_streak;
+} argus_wifi_failure_evidence_t;
+
+void argus_net_failure_evidence_record(argus_wifi_failure_evidence_t *evidence,
+                                       uint8_t reason,
+                                       argus_disconnect_category_t category);
+void argus_net_failure_evidence_clear(argus_wifi_failure_evidence_t *evidence);
+uint32_t argus_net_retry_countdown_seconds(uint32_t remaining_ms);
 
 typedef struct {
     esp_err_t (*request_normal_stop)(void *ctx);

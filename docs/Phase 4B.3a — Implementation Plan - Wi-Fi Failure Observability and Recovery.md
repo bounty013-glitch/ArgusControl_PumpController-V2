@@ -1,55 +1,38 @@
-# Phase 4B.3a — Implementation Plan: Wi-Fi Failure Observability and Recovery
+# Phase 4B.3a - Implementation Plan: Wi-Fi Failure Observability and Recovery
 
-The goal of this micro-phase is to add detailed Wi-Fi failure classification, bounded automatic retries, and a manual reconnection API to the network manager (`argus_net_mgr`), and to expose this state on the controller dashboard (`argus_http_server`).
+## Objective
 
-## Open Questions
-- Should the `/api/network/reconnect` endpoint be available immediately upon entering the `ACTION_REQUIRED` state, or should it be bounded by a rate-limit (e.g. no more than 1 request per 5 seconds) to prevent operator spamming?
-- Do you want to expose a separate HTTP endpoint like `GET /api/network/status` to poll network state specifically, or should the existing `GET /api/status` endpoint carry the new Wi-Fi telemetry? (Assuming we will append to `GET /api/status` to avoid adding another polling request).
+Provide truthful Wi-Fi failure telemetry and recovery while preserving the always-on Service AP, exclusive authority, nonblocking event handling, pure-test isolation, and operator evidence until recovery is proven.
 
-## Proposed Changes
+## Runtime transaction
 
-### Network Manager
+Configuration apply and manual reconnect share a caller-owned, generation-tagged transaction core. Production owns one transaction instance; pure tests own stack-local instances with injected operations.
 
-#### [MODIFY] [argus_net_mgr.h](../main/argus_net_mgr.h)
-- Introduce `argus_sta_state_t` enum (`DISABLED`, `IDLE`, `CONNECTING`, `ASSOCIATED`, `CONNECTED`, `WAIT_RETRY`, `ACTION_REQUIRED`).
-- Introduce `argus_wifi_failure_t` enum (`NONE`, `AUTH_FAILED`, `AP_NOT_FOUND`, `IP_TIMEOUT`, `UNKNOWN`).
-- Add `sta_state`, `last_wifi_failure`, `consecutive_failures`, `retry_countdown_s`, and `operator_action_required` to `argus_net_snapshot_t`.
-- Expose a new API `argus_net_mgr_request_reconnect()` to queue a manual reconnect event.
-- Add `ARGUS_NET_EVT_WIFI_RETRY` and `ARGUS_NET_EVT_MANUAL_RECONNECT` to the event queue.
+The apply sequence is:
 
-#### [MODIFY] [argus_net_mgr.c](../main/argus_net_mgr.c)
-- Modify Wi-Fi event handlers to classify disconnect reasons (e.g., `WIFI_REASON_AUTH_EXPIRE`, `WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT`, `WIFI_REASON_NO_AP_FOUND`).
-- Create an internal bounded timer (`s_wifi_retry_timer`) triggered by disconnects or IP timeouts.
-- Implement the retry logic: 15s retry for transient/unknown/not-found. Max 3 attempts for Auth failures, then transition to `ACTION_REQUIRED` and suppress the timer.
-- Allow `ARGUS_NET_EVT_MANUAL_RECONNECT` to bypass the `ACTION_REQUIRED` state and immediately trigger a reconnection attempt.
-- Ensure all timers are properly stopped and state is reset upon entering Local Service or transitioning to AP-only mode.
-- Maintain existing authority integrity: MQTT broker and Authority are only granted when IP is fully acquired, and immediately revoked on disconnect.
+1. Reject a duplicate active transaction.
+2. Stop retry and IP-timeout timers and invalidate old generations.
+3. Revoke authority to `NONE/NONE`.
+4. Stop the MQTT broker and verify it stopped.
+5. Load and validate commissioned configuration, including identity invariants, SSID bounds, WPA2 password bounds, and mask-sentinel rejection.
+6. If connected, stage the validated configuration, mark the disconnect intentional, request disconnect, and return to the event loop.
+7. Resume only from a generation-matched disconnect event.
+8. Apply STA configuration, erase staged password material, and request connection.
+9. Complete only after a generation-matched IP-acquisition event.
+10. On every failure or cancellation, report the originating error and erase staged secrets.
 
-### HTTP Server & Dashboard
+## Manual reconnect policy
 
-#### [MODIFY] [argus_http_server.c](../main/argus_http_server.c)
-- **API `GET /api/status`**: Append `sta_state`, `sta_failure_reason`, `retry_in_s`, `action_req`, and consecutive failure count to the JSON response.
-- **API `POST /api/network/reconnect`**: Add a new authenticated endpoint returning `202 Accepted` if a reconnect event is successfully queued, `409 Conflict` if already connected or in local service, and `503 Service Unavailable` if the queue is full.
-- **`PORTAL_HTML`**: Expand the Network rows to show human-readable connection status, failure reasons, countdowns, and an actionable "Reconnect Wi-Fi" button that calls the new POST endpoint.
+Manual reconnect is allowed in `ACTION_REQUIRED`, `RETRY_WAIT`, and `IDLE` when valid commissioned credentials exist and the network mode is `COMMISSIONED_STA`, `AP_DISCOVERABLE`, or `NETWORK_FAULT`. It is rejected in `DISABLED`, `CONNECTING`, `ASSOCIATED_WAITING_IP`, `CONNECTED`, `SERVICE_TRANSITION`, and `SERVICE_AP_ONLY`.
 
-### Pure Testing
+For permitted states the STA is already disconnected, so the transaction connects without issuing a redundant disconnect. It does not reapply credentials. Previous failure reason, category, counts, and guidance remain visible while recovery is pending and clear only after IP acquisition.
 
-#### [MODIFY] [argus_tests_4a.c](../main/argus_tests_4a.c)
-- Add new test cases to explicitly verify:
-  - Disconnect reason classification sets the correct internal failure enum.
-  - 15-second retry timer is initialized and triggers correctly.
-  - 3-attempt limit for authentication failures properly enters the `ACTION_REQUIRED` state and stops the timer.
-  - Manual reconnect API transitions state back to `CONNECTING` and resets counters.
-  - Retry logic is correctly suppressed during Local Service (`SERVICE_AP_ONLY`).
-  - Authority and Broker state remain safely decoupled until IP acquisition.
+## Timer policy
 
-## Verification Plan
+Each timer captures the active generation when scheduled. Callback events carry that captured value, and consumers reject stale values. Apply, reconnect, service entry, successful connection, and cancellation invalidate prior generations. Timer command failures are observable and a retry state is not claimed if scheduling fails.
 
-### Automated Tests
-- Build with ESP-IDF v5.5.3 (`idf.py fullclean`, `idf.py build`, `idf.py size`).
-- Execute `idf.py size` to confirm footprint bounds and OTA-slot headroom.
-- Ensure the pure-test suite remains fully green, with dynamically derived test counts, verifying all new state transitions and timer boundaries without mutating production state.
+## Pure verification
 
-### Manual Verification
-- Produce `docs/Phase 4B.3a Physical Tests.md` specifying the 10 manual verification steps.
-- Present implementation for physical acceptance (providing the commit SHA, no rewriting of history, and awaiting explicit operator confirmation before completing).
+All Phase 4B.3a tests use caller-owned authority, transaction, evidence, and callback-trace state. Tests must cover valid/invalid authority pairs, asynchronous apply ordering, stale events, all required callback failures, configuration validation, secret clearing, successful completion, duplicate requests, reconnect policy, evidence retention, mixed failure streaks, countdown boundaries, queue truthfulness, service cancellation, and AP/HTTP preservation.
+
+Every test is registered through `RUN_TEST()`. The source registration count remains provisional until diagnostic option `t` executes on hardware. Compilation does not establish a runtime pass.

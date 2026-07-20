@@ -37,7 +37,9 @@
  * 6. SECURITY BASELINE
  *    - No permissive CORS (no Access-Control-Allow-Origin header).
  *    - Cache-Control: no-store on all API responses.
- *    - Only GET methods accepted (405 for others).
+ *    - Registered GET endpoints are read-only; state-changing operations use
+ *      explicitly registered, authenticated POST handlers with method and
+ *      content-type enforcement. Unregistered methods are rejected.
  *    - Content-Type: application/json on all API responses.
  *    - No Internet/CDN dependency — all assets embedded.
  *
@@ -410,7 +412,12 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
 
     const char *operator_guidance = "No network issues detected.";
-    if (net_snap.action_required) {
+    if (net_snap.apply_state == ARGUS_WIFI_APPLY_PREPARING ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_WAITING_DISCONNECT ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_APPLYING_CONFIG ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_CONNECTING) {
+        operator_guidance = "Wi-Fi recovery in progress; previous failure is retained until recovery succeeds.";
+    } else if (net_snap.action_required) {
         operator_guidance = "Operator action required: Check Wi-Fi SSID and password.";
     } else if (net_snap.sta_state == ARGUS_STA_RETRY_WAIT) {
         operator_guidance = "Connection lost. Retrying automatically...";
@@ -445,6 +452,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"ap_started\":%s,"
         "\"sta_ip_address\":\"%s\","
         "\"sta_state\":\"%s\","
+        "\"recovery_state\":\"%s\","
         "\"last_error_category\":\"%s\","
         "\"last_disconnect_reason_name\":\"%s\","
         "\"last_disconnect_reason_code\":%" PRIu8 ","
@@ -473,6 +481,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.ap_started ? "true" : "false",
         net_snap.sta_ip_address,
         argus_net_mgr_get_sta_state_name(net_snap.sta_state),
+        argus_net_mgr_get_wifi_apply_state_name(net_snap.apply_state),
         category_str,
         reason_name,
         net_snap.last_disconnect_reason,
@@ -682,6 +691,7 @@ static const char PORTAL_HTML[] =
     "document.getElementById('network-rows').innerHTML=\n"
     "row('Mode',nmode,nc(nmode))+\n"
     "row('STA State',nsta,nc(nsta))+\n"
+    "row('Recovery',n.recovery_state||'IDLE',nc(n.recovery_state||'IDLE'))+\n"
     "row('STA Connected',n.sta_connected?'Yes':'No',n.sta_connected?'badge-ok':'badge-off')+\n"
     "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+\n"
     "(n.sta_ip_acquired?row('STA IP',n.sta_ip_address||'UNKNOWN','badge-ok'):'')+\n"
@@ -1343,6 +1353,10 @@ static esp_err_t config_save_handler(httpd_req_t *req)
     }
 
     if (scope == ARGUS_CONFIG_SCOPE_WIFI) {
+        if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false,\"message\":\"Wi-Fi configuration saved. Runtime apply is suppressed during Local Service; exit service to restart with the new configuration.\"}");
+            return ESP_OK;
+        }
         argus_net_event_t evt = { .type = ARGUS_NET_EVT_APPLY_WIFI_CONFIG };
         esp_err_t post_err = argus_net_mgr_post_event(&evt);
         if (post_err == ESP_OK) {
@@ -1867,7 +1881,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + 2 (4B.3) + headroom */
+    config.max_uri_handlers   = 16;  /* 14 registered handlers + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;

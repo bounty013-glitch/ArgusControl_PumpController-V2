@@ -73,6 +73,11 @@ esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus
 {
     if (!s_initialized) argus_authority_mgr_init();
 
+    esp_err_t pair_err = argus_authority_validate_pair(new_mode, new_owner);
+    if (pair_err != ESP_OK) {
+        return pair_err;
+    }
+
     xSemaphoreTake(s_auth_mutex, portMAX_DELAY);
     argus_control_authority_t old_mode = s_authority.mode;
     argus_authority_owner_t old_owner = s_authority.owner;
@@ -90,6 +95,30 @@ esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus
     }
 
     return ESP_OK;
+}
+
+esp_err_t argus_authority_validate_pair(argus_control_authority_t mode,
+                                        argus_authority_owner_t owner)
+{
+    switch (mode) {
+        case ARGUS_AUTHORITY_NONE:
+            return owner == ARGUS_AUTH_OWNER_NONE ? ESP_OK : ESP_ERR_INVALID_ARG;
+
+        case ARGUS_AUTHORITY_SUPERVISORY:
+            return owner == ARGUS_AUTH_OWNER_MQTT ? ESP_OK : ESP_ERR_INVALID_ARG;
+
+        case ARGUS_AUTHORITY_SERVICE_TRANSITION:
+            return owner == ARGUS_AUTH_OWNER_NONE ? ESP_OK : ESP_ERR_INVALID_ARG;
+
+        case ARGUS_AUTHORITY_LOCAL_SERVICE:
+            return (owner == ARGUS_AUTH_OWNER_BROWSER ||
+                    owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI)
+                       ? ESP_OK
+                       : ESP_ERR_INVALID_ARG;
+
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
 }
 
 static esp_err_t prod_prepare_transition(void *ctx) {
@@ -126,9 +155,15 @@ esp_err_t argus_authority_core_set_mode(argus_authority_core_t *core,
                                        argus_authority_owner_t new_owner)
 {
     if (!core) return ESP_ERR_INVALID_ARG;
+    esp_err_t pair_err = argus_authority_validate_pair(new_mode, new_owner);
+    if (pair_err != ESP_OK) {
+        core->last_error = pair_err;
+        return pair_err;
+    }
     core->mode = new_mode;
     core->owner = new_owner;
     core->generation++;
+    core->last_error = ESP_OK;
     return ESP_OK;
 }
 
