@@ -65,6 +65,9 @@ static argus_sta_state_t s_sta_state = ARGUS_STA_DISABLED;
 static uint8_t s_last_disconnect_reason = 0;
 static argus_disconnect_category_t s_last_disconnect_category = ARGUS_DISCONNECT_CAT_NONE;
 static uint32_t s_consecutive_failures = 0;
+static argus_wifi_apply_state_t s_wifi_apply_state = ARGUS_WIFI_APPLY_IDLE;
+static argus_wifi_apply_ops_t s_wifi_apply_ops;
+static uint32_t s_timer_generation = 0;
 static uint32_t s_auth_failures = 0;
 static TimerHandle_t s_auto_retry_timer = NULL;
 static TimerHandle_t s_ip_timeout_timer = NULL;
@@ -141,14 +144,14 @@ bool argus_net_can_manual_reconnect(argus_network_mode_t net_mode, argus_sta_sta
 
 static void auto_retry_timer_cb(TimerHandle_t xTimer)
 {
-    argus_net_event_t evt = { .type = ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP };
+    argus_net_event_t evt = { .type = ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP, .timer_generation = s_timer_generation };
     argus_net_mgr_post_event(&evt);
 }
 
 static void ip_timeout_timer_cb(TimerHandle_t xTimer)
 {
     /* Fake a disconnect reason 0 for IP timeout */
-    argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED, .disconnect_reason = 0 };
+    argus_net_event_t evt = { .type = ARGUS_NET_EVT_STA_DISCONNECTED, .disconnect_reason = 0, .timer_generation = s_timer_generation };
     argus_net_mgr_post_event(&evt);
 }
 static argus_net_mgr_mqtt_broker_start_fn_t s_broker_start_cb = NULL;
@@ -351,21 +354,20 @@ static void net_mgr_task(void *pvParameters)
                 case ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED:
                     break;
 
-                case ARGUS_NET_EVT_APPLY_WIFI_CONFIG: {
-                    ESP_LOGI(TAG, "Applying new Wi-Fi credentials dynamically...");
-                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+              case ARGUS_NET_EVT_APPLY_WIFI_CONFIG: {
+        ESP_LOGI(TAG, "Applying new Wi-Fi credentials dynamically...");
+        xSemaphoreTake(s_net_mutex, portMAX_DELAY);
 
-                    argus_wifi_apply_ops_t apply_ops;
-                    argus_wifi_apply_get_production_ops(&apply_ops);
+        argus_wifi_apply_get_production_ops(&s_wifi_apply_ops);
 
-                    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&s_net_mode, &s_sta_state, s_sta_connected, &apply_ops);
-                    if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "Wi-Fi config apply failed: %d", err);
-                    }
+        esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&s_net_mode, &s_sta_state, s_sta_connected, &s_wifi_apply_ops);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi config apply failed: %d", err);
+        }
 
-                    xSemaphoreGive(s_net_mutex);
-                    break;
-                }
+        xSemaphoreGive(s_net_mutex);
+        break;
+    }
 
                 case ARGUS_NET_EVT_RESTART_REQUEST: {
                     ESP_LOGI(TAG, "Restart request received. Executing restart transaction...");
@@ -401,6 +403,11 @@ esp_err_t argus_net_mgr_init(void)
     s_auto_retry_timer = xTimerCreate("auto_reconnect", pdMS_TO_TICKS(15000), pdFALSE, NULL, auto_retry_timer_cb);
     s_ip_timeout_timer = xTimerCreate("ip_timeout", pdMS_TO_TICKS(10000), pdFALSE, NULL, ip_timeout_timer_cb);
 
+    if (s_auto_retry_timer == NULL || s_ip_timeout_timer == NULL || s_event_queue == NULL || s_net_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create network manager primitives");
+        return ESP_ERR_NO_MEM;
+    }
+
     // Validate build service credential
     if (!validate_build_service_credential()) {
         s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
@@ -434,6 +441,7 @@ esp_err_t argus_net_mgr_init(void)
     if (!commissioned) {
         // Uncommissioned AP-only mode
         s_net_mode = ARGUS_NET_MODE_UNCOMMISSIONED_AP;
+        s_sta_state = ARGUS_STA_DISABLED;
         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
 
         wifi_config_t ap_config = {0};
@@ -491,7 +499,10 @@ esp_err_t argus_net_mgr_init(void)
         }
     }
 
-    xTaskCreate(net_mgr_task, "argus_net_mgr", 4096, NULL, 4, NULL);
+    if (xTaskCreate(net_mgr_task, "argus_net_mgr", 4096, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create network manager task");
+        return ESP_ERR_NO_MEM;
+    }
     s_initialized = true;
     return ESP_OK;
 }
@@ -956,55 +967,62 @@ esp_err_t argus_net_mgr_orchestrate_wifi_apply(
     const argus_wifi_apply_ops_t *ops)
 {
     if (ops == NULL || net_mode == NULL || sta_state == NULL) return ESP_ERR_INVALID_ARG;
-    if (*net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE &&
-        *net_mode != ARGUS_NET_MODE_COMMISSIONED_STA &&
+    if (ops->stop_timers == NULL || ops->revoke_supervisory == NULL || ops->stop_broker == NULL || 
+        ops->load_config == NULL || ops->disconnect_sta == NULL || ops->apply_sta_config == NULL || 
+        ops->connect_sta == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (*net_mode != ARGUS_NET_MODE_AP_DISCOVERABLE && 
+        *net_mode != ARGUS_NET_MODE_COMMISSIONED_STA && 
         *net_mode != ARGUS_NET_MODE_NETWORK_FAULT) {
         return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t err;
 
-    if (ops->stop_timers) {
-        ops->stop_timers(ops->ctx);
-    }
-    if (ops->revoke_supervisory) {
-        ops->revoke_supervisory(ops->ctx);
-    }
-    if (ops->stop_broker) {
-        ops->stop_broker(ops->ctx);
-    }
+    err = ops->stop_timers(ops->ctx);
+    if (err != ESP_OK) return err;
+    
+    s_timer_generation++; // Invalidate pending retry events
+
+    err = ops->revoke_supervisory(ops->ctx);
+    if (err != ESP_OK) return err;
+
+    err = ops->stop_broker(ops->ctx);
+    if (err != ESP_OK) return err;
 
     wifi_config_t cfg = {0};
     bool has_cfg = false;
-    if (ops->load_config) {
-        err = ops->load_config(ops->ctx, &cfg, &has_cfg);
-        if (err != ESP_OK || !has_cfg) {
-            return ESP_ERR_NOT_FOUND;
-        }
+    err = ops->load_config(ops->ctx, &cfg, &has_cfg);
+    if (err != ESP_OK || !has_cfg) {
+        memset(cfg.sta.password, 0, sizeof(cfg.sta.password));
+        return ESP_ERR_NOT_FOUND;
     }
 
     if (sta_connected) {
-        if (ops->disconnect_sta) {
-            err = ops->disconnect_sta(ops->ctx);
-            if (err != ESP_OK) {
-                return err;
-            }
-        }
-    }
-
-    if (ops->apply_sta_config) {
-        err = ops->apply_sta_config(ops->ctx, &cfg);
+        s_wifi_apply_state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+        err = ops->disconnect_sta(ops->ctx);
+        memset(cfg.sta.password, 0, sizeof(cfg.sta.password));
         if (err != ESP_OK) {
+            s_wifi_apply_state = ARGUS_WIFI_APPLY_FAILED;
             return err;
         }
-    }
+    } else {
+        s_wifi_apply_state = ARGUS_WIFI_APPLY_IDLE;
+        err = ops->apply_sta_config(ops->ctx, &cfg);
+        memset(cfg.sta.password, 0, sizeof(cfg.sta.password));
+        if (err != ESP_OK) {
+            s_wifi_apply_state = ARGUS_WIFI_APPLY_FAILED;
+            return err;
+        }
 
-    if (ops->connect_sta) {
         err = ops->connect_sta(ops->ctx);
         if (err == ESP_OK) {
             *sta_state = ARGUS_STA_CONNECTING;
+            s_wifi_apply_state = ARGUS_WIFI_APPLY_CONNECTING;
         } else {
             *sta_state = ARGUS_STA_IDLE;
+            s_wifi_apply_state = ARGUS_WIFI_APPLY_FAILED;
             return err;
         }
     }
@@ -1022,8 +1040,7 @@ static esp_err_t wifi_apply_stop_timers(void *ctx) {
 }
 
 static esp_err_t wifi_apply_revoke_supervisory(void *ctx) {
-    argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_NONE);
-    return ESP_OK;
+    return argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
 }
 
 static esp_err_t wifi_apply_stop_broker(void *ctx) {
@@ -1199,6 +1216,8 @@ esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap)
     out_snap->seconds_until_retry = argus_net_mgr_get_retry_seconds();
     out_snap->action_required = argus_net_mgr_is_action_required();
     out_snap->manual_reconnect_permitted = argus_net_can_manual_reconnect(s_net_mode, s_sta_state);
+    out_snap->apply_state = s_wifi_apply_state;
+    out_snap->timer_generation = s_timer_generation;
 
     out_snap->sta_ip_address[0] = '\0';
     if (out_snap->sta_ip_acquired && s_netif_sta) {

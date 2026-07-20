@@ -1346,12 +1346,12 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         argus_net_event_t evt = { .type = ARGUS_NET_EVT_APPLY_WIFI_CONFIG };
         esp_err_t post_err = argus_net_mgr_post_event(&evt);
         if (post_err == ESP_OK) {
-            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":false,\"message\":\"Wi-Fi configuration saved. Reconnection has started. Remain connected to the Service AP and refresh the dashboard to observe progress.\"}");
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":false,\"apply_queued\":true,\"message\":\"Wi-Fi configuration saved. Reconnection has started. Remain connected to the Service AP and refresh the dashboard to observe progress.\"}");
         } else {
-            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"message\":\"Configuration saved but runtime apply failed (queue full). Restart required.\"}");
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false,\"message\":\"Configuration saved but runtime apply failed (queue full). Restart required.\"}");
         }
     } else {
-        httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
+        httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false}");
     }
     return ESP_OK;
 }

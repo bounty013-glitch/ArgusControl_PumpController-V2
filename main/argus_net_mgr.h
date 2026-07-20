@@ -36,6 +36,14 @@ typedef enum {
     ARGUS_STA_ACTION_REQUIRED
 } argus_sta_state_t;
 
+
+typedef enum {
+    ARGUS_WIFI_APPLY_IDLE = 0,
+    ARGUS_WIFI_APPLY_WAITING_DISCONNECT,
+    ARGUS_WIFI_APPLY_CONNECTING,
+    ARGUS_WIFI_APPLY_FAILED
+} argus_wifi_apply_state_t;
+
 typedef enum {
     ARGUS_DISCONNECT_CAT_NONE = 0,
     ARGUS_DISCONNECT_CAT_AUTHENTICATION,
@@ -87,6 +95,7 @@ typedef struct {
     argus_net_event_type_t type;
     argus_authority_owner_t requested_owner;
     uint8_t disconnect_reason;             /**< Captured from WIFI_EVENT_STA_DISCONNECTED */
+    uint32_t timer_generation;
 } argus_net_event_t;
 
 /**
@@ -270,6 +279,8 @@ typedef struct {
     bool action_required;
     bool manual_reconnect_permitted;
     char sta_ip_address[16];
+    argus_wifi_apply_state_t apply_state;
+    uint32_t timer_generation;
 } argus_net_snapshot_t;
 
 esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap);
