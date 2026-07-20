@@ -2,7 +2,7 @@
 
 **Source-correction baseline:** `f0f3b0e` on `phase4b-config-portal`
 **Board:** Waveshare ESP32-S3-RS485-CAN (16MB flash)
-**Build:** ESP-IDF 5.5.1 incremental build — 992,149 bytes (68% free on 3MB partition)
+**Build:** ESP-IDF 5.5.3 incremental build — 992,149 bytes (68% free on 3MB partition)
 
 ---
 
