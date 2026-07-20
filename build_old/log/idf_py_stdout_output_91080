@@ -1,0 +1,8 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Users\bount\.espressif\python_env\idf5.5_py3.13_env\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=1 C:\Users\bount\Dev\Argus\ArgusControl_PumpController-V2
+-- Minimal build - OFF
+-- ccache will be used for faster recompilation
+-- Building ESP-IDF components for target esp32s3
+-- Project sdkconfig file C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/sdkconfig
+Loading defaults file C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/sdkconfig.defaults...
+-- Compiler supported targets: xtensa-esp-elf
+-- Configuring incomplete, errors occurred!

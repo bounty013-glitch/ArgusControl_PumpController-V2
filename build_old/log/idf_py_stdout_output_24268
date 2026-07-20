@@ -1,0 +1,8 @@
+Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Espressif\tools\python\v5.5.3\venv\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=0 C:\Users\bount\Dev\Argus\ArgusControl_PumpController-V2
+-- Minimal build - OFF
+-- Building ESP-IDF components for target esp32s3
+-- ESP-TEE is currently supported only on the esp32c6;esp32h2;esp32c5 SoCs
+-- Project sdkconfig file C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/sdkconfig
+Loading defaults file C:/Users/bount/Dev/Argus/ArgusControl_PumpController-V2/sdkconfig.defaults...
+-- Compiler supported targets: xtensa-esp-elf
+-- Configuring incomplete, errors occurred!
