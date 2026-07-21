@@ -2,7 +2,7 @@
 
 ## Acceptance status
 
-Phase 4B.3a is implemented on `phase4b3a-wifi-observability` and is awaiting an independent source review followed by physical runtime verification. A clean compile is not runtime-test evidence. This document does not claim readiness to flash, physical acceptance, or a final passing test count.
+Phase 4B.3a is COMPLETE AND ACCEPTED as of July 21, 2026. Acceptance applies to runtime firmware commit `87eff30f36c9d264351ee939ff4061116c0dd128`; the later screenshot commit `62674ad26312cab040cbe6f72661b7d6f1593db5` contains evidence only, and accepted feature-branch record head `4766d96d3845483828dfbfc1aa83eb77a72dd52e` contains the final physical-test record. See [Phase 4B.3 and 4B.3a - Final Acceptance](Phase%204B.3%20and%204B.3a%20-%20Final%20Acceptance.md).
 
 ## Runtime design
 
@@ -122,10 +122,8 @@ The source now has 142 actual `RUN_TEST(...)` registrations, including 48 Phase 
 
 This correction was full-clean built and sized with ESP-IDF v5.5.3 using the host-stable serial method: `CMAKE_BUILD_PARALLEL_LEVEL=1`, `--no-ccache`, `CMAKE_JOB_POOLS=compile_pool=1`, and `CMAKE_JOB_POOL_COMPILE=compile_pool`. The build completed 1,096 commands with zero compiler warnings, zero compiler errors, and zero failed commands. The application image is `0xfab10` bytes in the `0x300000`-byte smallest app partition, leaving `0x2054f0` bytes (67%) OTA headroom. All four extracted embedded JavaScript blocks passed Node.js syntax validation. These are static/build facts only.
 
-## Remaining acceptance
+## Final acceptance
 
-1. Complete an independent read-only source review.
-2. Flash only after that review authorizes physical testing.
-3. Run diagnostic option `t` and record the runtime-derived distinct/execution/pass/fail counts.
-4. Execute the physical checklist and preserve serial/dashboard evidence.
-5. Claim acceptance only after the physical results are reviewed.
+The remaining gates listed during correction were subsequently completed. Both hardware executions of diagnostic option `t` reported 142 distinct tests repeated three times, for 426 passed and 0 failed executions per run. Boot identity, pure-suite preflight, Physical Tests 1-9, and the final pure-suite/isolation proof (Test 10) all passed. The observed Test 3 wording differed from the planned wording but remained truthful, understandable, actionable, and acceptable; it was not a runtime defect or acceptance exception.
+
+Phase 4B.3a was physically accepted on July 21, 2026, with no known acceptance-blocking defects. Historical pending statements above describe earlier review checkpoints and are retained as correction history; they do not describe the final disposition.

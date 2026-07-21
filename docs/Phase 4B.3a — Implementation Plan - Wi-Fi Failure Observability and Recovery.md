@@ -1,5 +1,7 @@
 # Phase 4B.3a - Implementation Plan: Wi-Fi Failure Observability and Recovery
 
+**Final status:** COMPLETE AND ACCEPTED on July 21, 2026. Historical pending statements below record the state at specific correction checkpoints and are superseded by the final acceptance record at the end of this document.
+
 ## Objective
 
 Provide truthful Wi-Fi failure telemetry and recovery while preserving the always-on Service AP, exclusive authority, nonblocking event handling, pure-test isolation, and operator evidence until recovery is proven.
@@ -83,3 +85,7 @@ Broker shutdown decisions now distinguish "not `RUNNING`" from observably stoppe
 The corrective pure coverage includes the exact prior-generation disconnect/current-generation association-IP race and production-consumed broker stop/verification decisions for converged `STOPPED`, residual resources, `STARTING`, coherent/incomplete `RUNNING`, `STOPPING`, observation failure, successful post-stop convergence, and exact timeout/failure propagation. Service-entry and Wi-Fi-apply orchestration remain fail-closed at broker verification. The source contains 142 actual registrations, including 48 Phase 4B.3a registrations, for an expected 426 executions across three passes. Every source-derived or eventual runtime count remains provisional until diagnostic option `t` executes on hardware. All physical checks remain pending; no readiness or acceptance is claimed.
 
 Final static verification used ESP-IDF v5.5.3 and the proven serial, ccache-disabled clean-build method: `CMAKE_BUILD_PARALLEL_LEVEL=1`, `--no-ccache`, `CMAKE_JOB_POOLS=compile_pool=1`, and `CMAKE_JOB_POOL_COMPILE=compile_pool`. `fullclean`, the 1,096-command build, and `size` succeeded. The log contains zero compiler warnings, zero compiler errors, and zero failed commands. The image is `0xfab10` bytes with `0x2054f0` bytes (67%) free in the `0x300000`-byte smallest application partition. Four of four extracted embedded JavaScript blocks passed Node.js syntax validation. These results do not establish diagnostic runtime or physical acceptance.
+
+## Final acceptance record
+
+The review and physical gates were completed after the static checkpoints above. Runtime firmware commit `87eff30f36c9d264351ee939ff4061116c0dd128` passed both hardware executions of diagnostic option `t`: 142 distinct tests, three repetitions, 426 passed, and 0 failed per execution. Boot identity, preflight, Physical Tests 1-9, and the final pure-suite/isolation proof all passed. Phase 4B.3a was accepted on July 21, 2026, with no known acceptance-blocking defects. Screenshot commit `62674ad26312cab040cbe6f72661b7d6f1593db5` is evidence-only; accepted feature-branch record head `4766d96d3845483828dfbfc1aa83eb77a72dd52e` contains the reviewed acceptance documentation.

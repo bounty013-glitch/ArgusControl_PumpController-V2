@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status: **4B.1 COMPLETE — OPERATOR ACCEPTED****
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 is next; functional implementation has not begun.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -651,6 +651,8 @@ reboots successfully from phone browser.
 
 ### 4B.3 — Explicit Browser Service-Entry and Authority Ownership
 
+**Status:** COMPLETE AND ACCEPTED on July 21, 2026, including the Phase 4B.3a Wi-Fi observability and recovery close-out. See [Phase 4B.3 and 4B.3a - Final Acceptance](Phase%204B.3%20and%204B.3a%20-%20Final%20Acceptance.md).
+
 **Scope:** Implement `POST /api/service/enter` and
 `POST /api/service/exit`.
 
@@ -676,6 +678,8 @@ Authority snapshot confirms `LOCAL_SERVICE/BROWSER`.
 ---
 
 ### 4B.4 — Browser-Local Motion Command API
+
+**Status:** NEXT PHASE - identity establishment only; functional implementation has not begun.
 
 **Scope:** Implement `POST /api/command`. Parse JSON, construct
 `argus_command_envelope_t` with `source=LOCAL_SERVICE_PORTAL`, dispatch

@@ -272,8 +272,8 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-20 |
 | **System Area** | Network Manager / API |
-| **Phase Introduced** | Phase 4B.3a (initial pass reverted; corrected implementation active on feature branch) |
-| **Status** | IMPLEMENTED — SOURCE REVIEW AND PHYSICAL ACCEPTANCE PENDING |
+| **Phase Introduced** | Phase 4B.3a (initial pass reverted; corrected implementation accepted) |
+| **Status** | CLOSED - COMPLETE AND PHYSICALLY ACCEPTED JULY 21, 2026 |
 | **Target Phase** | Phase 4B.3a |
 | **Operator Decision** | 2026-07-20 |
 
@@ -289,7 +289,7 @@
 - Failure-evidence preservation until successful IP acquisition
 - Pure authority-pair validation and isolated transaction tests
 
-**Remaining acceptance:** Independent read-only source review, diagnostic `t` execution on hardware, and the Phase 4B.3a physical checklist. A clean build is not closure evidence for these remaining items.
+**Final acceptance:** Independent source review and the physical checklist were completed. Two hardware executions of diagnostic `t` each produced 142 distinct tests repeated three times, 426 passed, and 0 failed. Physical Tests 1-10 passed. Runtime acceptance applies to firmware commit `87eff30f36c9d264351ee939ff4061116c0dd128`; screenshot commit `62674ad26312cab040cbe6f72661b7d6f1593db5` is evidence-only; accepted feature-branch record head `4766d96d3845483828dfbfc1aa83eb77a72dd52e` contains the reviewed record. The Test 3 wording difference was non-blocking and remained truthful, understandable, and actionable.
 
 ---
 
