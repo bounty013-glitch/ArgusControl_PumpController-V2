@@ -15,7 +15,7 @@ For every test, record the initial condition, operator action, relevant serial/d
 
 **Result:** `[PENDING]`
 
-Record distinct tests, repeat passes, total executions, passed, failed, and before/after production-isolation state. The inherited Step 0 baseline is 142 distinct tests and 426 executions across three passes; this is not the expected final Phase 4B.4 count.
+Record distinct tests, repeat passes, total executions, passed, failed, and before/after production-isolation state. Step 1 registers 151 distinct tests for 453 expected executions across three passes. These are source-derived counts, not runtime results, and may increase during later Phase 4B.4 steps.
 
 ## Command API physical tests
 

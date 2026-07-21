@@ -1,6 +1,6 @@
 # Phase 4B.4 - Implementation Plan: Browser-Local Motion Command API
 
-**Status:** STEP 0 IDENTITY ESTABLISHED - FUNCTIONAL IMPLEMENTATION NOT STARTED
+**Status:** STEP 1 STRICT REQUEST CONTRACT AND PURE DECODER IMPLEMENTED - RUNTIME EXECUTION PENDING
 
 ## Objective
 
@@ -30,7 +30,30 @@ The command vocabulary will cover:
 - Reset E-stop
 - Recovery
 
-The exact request and response schema will be fixed during implementation review before the handler is registered.
+The request contract is frozen as follows. The response schema remains future work and will be fixed before the handler is registered.
+
+Commands without arguments accept exactly one field:
+
+```json
+{"command":"start"}
+{"command":"stop"}
+{"command":"unlock"}
+{"command":"estop"}
+{"command":"reset_estop"}
+{"command":"recover"}
+```
+
+Set-target accepts exactly three fields, in any order:
+
+```json
+{"command":"set_target","target_rpm_milli":8000,"forward":true}
+```
+
+`target_rpm_milli` is a JSON integer from 0 through 200000 inclusive, matching the authoritative state-manager range. Fractional, exponent-form, quoted, negative, and overflowing values are rejected. `forward` is a genuine JSON Boolean. Keys and command names use JSON string semantics and command names remain case-sensitive.
+
+The decoder requires one complete top-level object; rejects missing, duplicate, unknown, extra, malformed, nested, array, null, and wrong-type values; detects escaped-key equivalence; and rejects trailing data. Leading and trailing JSON whitespace are accepted. Input is length-aware, capped at 192 bytes, and need not be NUL-terminated.
+
+The browser must not provide source, authority generation, `pump_id`, `channel_id`, axis, or routing information. The future live admission layer owns `ARGUS_CMD_SRC_LOCAL_SERVICE_PORTAL` and the current authority generation. This remains a single-controller-per-pump architecture.
 
 ## Required pure verification
 
@@ -48,14 +71,24 @@ Before physical testing, pure tests must cover:
 - Proof that the HTTP layer performs no direct motion-state mutation
 - Production-state isolation for all pure tests
 
-The Phase 4B.4 test count is not established yet. The inherited baseline remains 142 distinct tests repeated three times, 426 executions, pending the first Phase 4B.4 test additions.
+Step 1 adds nine distinct decoder tests to the inherited 142-test baseline. The registered suite now contains 151 distinct tests repeated three times, for 453 expected executions. Runtime results remain pending until diagnostic option `t` executes on the controller.
 
 ## Implementation boundary
 
-This Step 0 commit changes identity and planning records only. It does not add or register `POST /api/command`, parse motion requests, construct command envelopes, dispatch browser commands, or claim Phase 4B.4 functional, runtime-suite, physical, or acceptance results.
+Step 1 adds only the frozen request contract, pure decoder, and pure tests. It does not add or register `POST /api/command`, read live authority or network state, attach source or generation, construct a production envelope, dispatch a command, call the state manager, or mutate motor, trajectory, timer, GPIO, network, or production singleton state.
+
+Remaining Phase 4B.4 work includes the admission gate, authentication integration, server-owned source and generation attachment, envelope construction, exclusive router dispatch, HTTP handler and registration, browser integration, runtime suite execution, and physical acceptance.
 
 ## Step 0 static verification
 
 The identity-only candidate was full-clean built and sized with ESP-IDF v5.5.3. All 1,096 build commands completed with zero compiler warnings, zero compiler errors, and zero failed commands. The application image is `0xfab30` bytes in the `0x300000`-byte smallest application partition, leaving `0x2054d0` bytes (67%) OTA headroom.
 
 This build verifies only the Phase 4B.4 identity baseline. Diagnostic option `t` has not been executed for this identity candidate, no Phase 4B.4 functional tests exist yet, and no physical or acceptance result is claimed.
+
+## Step 1 static verification
+
+The final Step 1 source was full-clean built and sized with ESP-IDF v5.5.3 using the serial, ccache-disabled build method. All 1,098 build commands completed with zero compiler warnings, zero compiler errors, and zero failed commands. The application image is `0xfce20` bytes in the `0x300000`-byte smallest application partition, leaving `0x2031e0` bytes (67%) OTA headroom. `idf.py size` reported a total image size of 1,035,685 bytes.
+
+Source registration reports 151 distinct tests and 453 expected executions across three passes. The decoder object has unresolved references only to `memcmp`, `memset`, and `strcmp`; the decoder-test object references only the decoder plus standard memory/string routines. Source and object audits found no HTTP, authority, router, state-manager, FreeRTOS, network, motor, trajectory, timer, or GPIO dependency, and no `/api/command` endpoint registration exists.
+
+Because this step explicitly prohibits flashing, the updated on-device diagnostic suite and production-isolation snapshot have not yet executed for the Step 1 binary. The inherited 142-test baseline remains physically verified, but 151/151 and 453/453 are not claimed. Runtime execution remains a required gate before physical acceptance.

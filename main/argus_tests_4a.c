@@ -18,6 +18,7 @@
 #include "argus_config_overlay.h"
 #include "argus_json.h"
 #include "argus_service_policy.h"
+#include "argus_tests_4b4.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5104,7 +5105,7 @@ static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4B.4 Baseline: Phase 4A+4B.1+4B.2+4B.3+4B.3a Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4 Step 1 Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -5297,6 +5298,16 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b3a_uncommissioned_apply_is_supported);
     RUN_TEST(test_4b3a_manual_reconnect_preserves_evidence_and_order);
     RUN_TEST(test_4b3a_every_failure_stops_callback_chain);
+    /* Phase 4B.4 Step 1 strict browser-command decoder tests */
+    RUN_TEST(test_4b4_decode_argument_free_commands);
+    RUN_TEST(test_4b4_decode_set_target_success);
+    RUN_TEST(test_4b4_decode_malformed_and_top_level);
+    RUN_TEST(test_4b4_decode_command_rejections);
+    RUN_TEST(test_4b4_decode_field_contract_rejections);
+    RUN_TEST(test_4b4_decode_target_rejections);
+    RUN_TEST(test_4b4_decode_forward_rejections);
+    RUN_TEST(test_4b4_decode_length_trailing_and_nul);
+    RUN_TEST(test_4b4_decode_output_reuse_and_routing_rejections);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -5338,7 +5349,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4B.4 Baseline (through Phase 4B.3a) Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4 Step 1 Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -5381,7 +5392,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4B.4 BASELINE (THROUGH PHASE 4B.3a) PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4B.4 STEP 1 PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
