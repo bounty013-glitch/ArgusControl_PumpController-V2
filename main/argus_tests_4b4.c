@@ -122,6 +122,7 @@ esp_err_t test_4b4_decode_malformed_and_top_level(void)
         {"\"start\"", ARGUS_BROWSER_CMD_DECODE_TOP_LEVEL_NOT_OBJECT},
         {"{", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
         {"{\"command\"", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
+        /* End-of-input where the command value is required. */
         {"{\"command\":", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
         {"{\"command\":\"start\"", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
         {"{\"command\":\"start}", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
@@ -185,6 +186,8 @@ esp_err_t test_4b4_decode_field_contract_rejections(void)
 esp_err_t test_4b4_decode_target_rejections(void)
 {
     static const decode_failure_case_t cases[] = {
+        {"{\"command\":\"set_target\",\"target_rpm_milli\":", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
+        {"{\"command\":\"set_target\",\"target_rpm_milli\":-", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":-1,\"forward\":true}", ARGUS_BROWSER_CMD_DECODE_VALUE_OUT_OF_RANGE},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":-0,\"forward\":true}", ARGUS_BROWSER_CMD_DECODE_VALUE_OUT_OF_RANGE},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":200001,\"forward\":true}", ARGUS_BROWSER_CMD_DECODE_VALUE_OUT_OF_RANGE},
@@ -208,6 +211,7 @@ esp_err_t test_4b4_decode_target_rejections(void)
 esp_err_t test_4b4_decode_forward_rejections(void)
 {
     static const decode_failure_case_t cases[] = {
+        {"{\"command\":\"set_target\",\"target_rpm_milli\":500,\"forward\":", ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":500,\"forward\":0}", ARGUS_BROWSER_CMD_DECODE_INVALID_TYPE},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":500,\"forward\":1}", ARGUS_BROWSER_CMD_DECODE_INVALID_TYPE},
         {"{\"command\":\"set_target\",\"target_rpm_milli\":500,\"forward\":\"true\"}", ARGUS_BROWSER_CMD_DECODE_INVALID_TYPE},

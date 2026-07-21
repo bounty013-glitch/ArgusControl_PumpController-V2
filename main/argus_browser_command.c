@@ -255,7 +255,10 @@ static argus_browser_command_decode_result_t parse_command_value(
     argus_browser_json_parser_t *parser,
     argus_cmd_type_t *out_type)
 {
-    if (parser->pos >= parser->len || parser->body[parser->pos] != '"') {
+    if (parser->pos >= parser->len) {
+        return ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON;
+    }
+    if (parser->body[parser->pos] != '"') {
         return ARGUS_BROWSER_CMD_DECODE_INVALID_TYPE;
     }
 
@@ -283,8 +286,10 @@ static argus_browser_command_decode_result_t parse_target_value(
         parser->pos++;
     }
 
-    if (parser->pos >= parser->len ||
-        parser->body[parser->pos] < '0' || parser->body[parser->pos] > '9') {
+    if (parser->pos >= parser->len) {
+        return ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON;
+    }
+    if (parser->body[parser->pos] < '0' || parser->body[parser->pos] > '9') {
         return ARGUS_BROWSER_CMD_DECODE_INVALID_TYPE;
     }
 
@@ -329,6 +334,10 @@ static argus_browser_command_decode_result_t parse_forward_value(
 {
     static const uint8_t true_value[] = {'t', 'r', 'u', 'e'};
     static const uint8_t false_value[] = {'f', 'a', 'l', 's', 'e'};
+
+    if (parser->pos >= parser->len) {
+        return ARGUS_BROWSER_CMD_DECODE_MALFORMED_JSON;
+    }
 
     if (parser->len - parser->pos >= sizeof(true_value) &&
         memcmp(parser->body + parser->pos, true_value, sizeof(true_value)) == 0) {
