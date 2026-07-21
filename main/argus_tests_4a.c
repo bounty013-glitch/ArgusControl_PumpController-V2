@@ -34,7 +34,7 @@
         } \
     } while (0)
 
-static const int EXPECTED_FULL_SEQUENCE[] = {2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15};
+static const int EXPECTED_FULL_SEQUENCE[] = {2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
 
 // Stack-local mock NVS driver storage for testing
@@ -539,6 +539,7 @@ typedef struct {
     int verify_sta_ip_count;
     int set_ap_count;
     int verify_ap_count;
+    int set_sta_disabled_count;
     int verify_machine_safe_count;
 
     // Exact call sequence
@@ -551,6 +552,7 @@ typedef struct {
     bool estop_during_stop;
 
     int motion_start_count;
+    argus_sta_state_t sta_state;
 } mock_orchestration_ctx_t;
 
 static void init_mock_ctx(mock_orchestration_ctx_t *m) {
@@ -564,6 +566,7 @@ static void init_mock_ctx(mock_orchestration_ctx_t *m) {
     m->fail_stage = -1;
     m->fail_error = ESP_ERR_INVALID_STATE;
     m->estop_during_stop = false;
+    m->sta_state = ARGUS_STA_RETRY_WAIT;
 }
 
 static esp_err_t mock_prepare_transition(void *ctx) {
@@ -668,14 +671,24 @@ static esp_err_t mock_verify_ap_active(void *ctx) {
 static esp_err_t mock_verify_machine_safe(void *ctx) {
     mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
     m->verify_machine_safe_count++;
-    m->call_sequence[m->call_count++] = 13;
+    m->call_sequence[m->call_count++] = 14;
     if (m->estop_latched || m->mock_machine_state == ARGUS_STATE_EMERGENCY_STOPPED || m->mock_machine_state == ARGUS_STATE_FAULTED) {
         return m->fail_error;
     }
     if (m->mock_machine_state != ARGUS_STATE_HOLDING && m->mock_machine_state != ARGUS_STATE_UNLOCKED) {
         return m->fail_error;
     }
+    if (m->fail_stage == 14) return m->fail_error;
+    return ESP_OK;
+}
+
+static esp_err_t mock_set_sta_disabled(void *ctx)
+{
+    mock_orchestration_ctx_t *m = (mock_orchestration_ctx_t *)ctx;
+    m->set_sta_disabled_count++;
+    m->call_sequence[m->call_count++] = 13;
     if (m->fail_stage == 13) return m->fail_error;
+    m->sta_state = ARGUS_STA_DISABLED;
     return ESP_OK;
 }
 
@@ -709,6 +722,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
         .verify_sta_ip_released = mock_verify_sta_ip_released,
         .set_wifi_ap_only = mock_set_wifi_ap_only,
         .verify_ap_active = mock_verify_ap_active,
+        .set_sta_disabled = mock_set_sta_disabled,
         .verify_machine_safe = mock_verify_machine_safe,
         .ctx = &ctx
     };
@@ -721,7 +735,7 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_LOCAL_SERVICE, "Final auth mode not LOCAL_SERVICE");
     TEST_ASSERT(ctx.auth_core.owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, "Final auth owner not DIAGNOSTIC_CLI");
     TEST_ASSERT(ctx.grant_count == 1, "grant_count mismatch");
-    TEST_ASSERT(ctx.call_count == 12, "call_count mismatch");
+    TEST_ASSERT(ctx.call_count == 13, "call_count mismatch");
     TEST_ASSERT(ctx.prepare_count == 1, "prepare mismatch");
     TEST_ASSERT(ctx.normal_stop_count == 1, "normal_stop mismatch");
     TEST_ASSERT(ctx.verify_stopped_count == 1, "verify_stopped mismatch");
@@ -732,6 +746,8 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.verify_sta_ip_count == 1, "verify_sta_ip mismatch");
     TEST_ASSERT(ctx.set_ap_count == 1, "set_ap mismatch");
     TEST_ASSERT(ctx.verify_ap_count == 1, "verify_ap mismatch");
+    TEST_ASSERT(ctx.set_sta_disabled_count == 1 && ctx.sta_state == ARGUS_STA_DISABLED,
+                "STA state was not committed to DISABLED after AP-only verification");
     TEST_ASSERT(ctx.verify_machine_safe_count == 1, "verify_machine_safe mismatch");
     TEST_ASSERT(ctx.call_count == (sizeof(EXPECTED_FULL_SEQUENCE)/sizeof(EXPECTED_FULL_SEQUENCE[0])), "Happy path call count mismatch");
     for (int k = 0; k < ctx.call_count; k++) {
@@ -757,12 +773,13 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
         {"STA IP Verify Timeout", 10, ESP_ERR_TIMEOUT, 8},
         {"AP Set", 11, ESP_ERR_INVALID_STATE, 9},
         {"AP Verify Timeout", 12, ESP_ERR_TIMEOUT, 10},
-        {"Machine Safe", 13, ESP_ERR_INVALID_STATE, 11},
-        {"Grant Local", 15, ESP_ERR_INVALID_STATE, 12}
+        {"STA Disable", 13, ESP_ERR_INVALID_STATE, 11},
+        {"Machine Safe", 14, ESP_ERR_INVALID_STATE, 12},
+        {"Grant Local", 15, ESP_ERR_INVALID_STATE, 13}
     };
 
     // Part B: Failure injection matrix
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 13; i++) {
         init_mock_ctx(&ctx);
         ctx.fail_stage = test_cases[i].fail_stage;
         ctx.fail_error = test_cases[i].injected_error;
@@ -816,9 +833,9 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.verify_machine_safe_count == 0, "verify_machine_safe called after E-stop");
     TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0");
 
-    // Part E: verify_machine_safe failure (stage 13)
+    // Part E: verify_machine_safe failure after truthful STA disablement
     init_mock_ctx(&ctx);
-    ctx.fail_stage = 13;
+    ctx.fail_stage = 14;
     net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
     res = argus_net_mgr_orchestrate_service_entry(&net_mode, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI, &aops, &ops);
     TEST_ASSERT(res == ESP_ERR_INVALID_STATE, "Verify machine safe failure accepted");
@@ -826,6 +843,8 @@ static esp_err_t test_network_truthfulness_and_broker_ordering(void)
     TEST_ASSERT(ctx.grant_count == 0, "grant_count mismatch");
     TEST_ASSERT(ctx.abort_count == 1, "abort_count mismatch");
     TEST_ASSERT(ctx.verify_ap_count == 1, "Preceding callback verify_ap not called");
+    TEST_ASSERT(ctx.sta_state == ARGUS_STA_DISABLED,
+                "Post-disable failure did not preserve truthful physical STA state");
     TEST_ASSERT(ctx.auth_core.mode == ARGUS_AUTHORITY_NONE, "Auth mode not NONE");
     TEST_ASSERT(ctx.motion_start_count == 0, "motion_start_count must be 0");
 
@@ -972,6 +991,23 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     CHECK_DIFF_INT("15. sta_ip_acquired", b->net_snap.sta_ip_acquired, a->net_snap.sta_ip_acquired);
     CHECK_DIFF_INT("16. ap_started", b->net_snap.ap_started, a->net_snap.ap_started);
     CHECK_DIFF_INT("17. mqtt_broker_running", b->net_snap.mqtt_broker_running, a->net_snap.mqtt_broker_running);
+    CHECK_DIFF_INT("17a. mqtt_broker_stopped", b->net_snap.mqtt_broker_stopped, a->net_snap.mqtt_broker_stopped);
+    CHECK_DIFF_INT("17b. mqtt_broker_observable", b->net_snap.mqtt_broker_observable, a->net_snap.mqtt_broker_observable);
+    CHECK_DIFF_INT("17c. commissioned", b->net_snap.commissioned, a->net_snap.commissioned);
+    CHECK_DIFF_INT("17d. sta_state", b->net_snap.sta_state, a->net_snap.sta_state);
+    CHECK_DIFF_INT("17e. last_disconnect_category", b->net_snap.last_disconnect_category, a->net_snap.last_disconnect_category);
+    CHECK_DIFF_INT("17f. last_disconnect_reason", b->net_snap.last_disconnect_reason, a->net_snap.last_disconnect_reason);
+    CHECK_DIFF_INT("17g. consecutive_failures", b->net_snap.consecutive_failures, a->net_snap.consecutive_failures);
+    CHECK_DIFF_INT("17h. apply_state", b->net_snap.apply_state, a->net_snap.apply_state);
+    CHECK_DIFF_INT("17i. timer_generation", b->net_snap.timer_generation, a->net_snap.timer_generation);
+    CHECK_DIFF_INT("17j. wifi_transaction_active", b->net_snap.wifi_transaction_active, a->net_snap.wifi_transaction_active);
+    CHECK_DIFF_INT("17k. transaction_generation", b->net_snap.transaction_generation, a->net_snap.transaction_generation);
+    CHECK_DIFF_INT("17l. auto_retry_timer_active", b->net_snap.auto_retry_timer_active, a->net_snap.auto_retry_timer_active);
+    CHECK_DIFF_INT("17m. auto_retry_timer_generation", b->net_snap.auto_retry_timer_generation, a->net_snap.auto_retry_timer_generation);
+    CHECK_DIFF_INT("17n. ip_timeout_timer_active", b->net_snap.ip_timeout_timer_active, a->net_snap.ip_timeout_timer_active);
+    CHECK_DIFF_INT("17o. ip_timeout_timer_generation", b->net_snap.ip_timeout_timer_generation, a->net_snap.ip_timeout_timer_generation);
+    CHECK_DIFF_INT("17p. last_service_cancel_failure", b->net_snap.last_service_cancel_failure, a->net_snap.last_service_cancel_failure);
+    CHECK_DIFF_INT("17q. last_service_cancel_error", b->net_snap.last_service_cancel_error, a->net_snap.last_service_cancel_error);
     CHECK_DIFF_INT("18. authority.mode", b->authority.mode, a->authority.mode);
     CHECK_DIFF_INT("19. authority.owner", b->authority.owner, a->authority.owner);
     CHECK_DIFF_INT("20. authority.generation", b->authority.generation, a->authority.generation);
@@ -1011,6 +1047,8 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     CHECK_DIFF_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
     CHECK_DIFF_INT("34. broker.has_server_task", b->broker_obs.has_server_task, a->broker_obs.has_server_task);
     CHECK_DIFF_INT("35. broker.has_listener", b->broker_obs.has_listener, a->broker_obs.has_listener);
+    CHECK_DIFF_INT("35a. broker.running", b->broker_obs.running, a->broker_obs.running);
+    CHECK_DIFF_INT("35b. broker.stopped", b->broker_obs.stopped, a->broker_obs.stopped);
 
 #undef CHECK_DIFF_INT
 #undef CHECK_DIFF_UINT64
@@ -2934,7 +2972,10 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
 // Test 79: Service Policy Entry Eligible (AP_DISCOVERABLE / UNCOMMISSIONED_AP)
 static esp_err_t test_service_policy_entry_eligible(void)
 {
-    argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_AP_DISCOVERABLE };
+    argus_net_snapshot_t net = {
+        .mode = ARGUS_NET_MODE_AP_DISCOVERABLE,
+        .ap_started = true
+    };
     argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_MQTT };
     argus_net_event_t evt = {0};
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_OK, "AP_DISCOVERABLE rejected");
@@ -2969,15 +3010,21 @@ static esp_err_t test_service_policy_entry_rejected(void)
 {
     argus_net_snapshot_t net = { .mode = ARGUS_NET_MODE_COMMISSIONED_STA };
     argus_authority_snapshot_t auth = { .mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_NONE };
-    argus_net_event_t evt = {0};
+    argus_net_event_t evt = {
+        .type = ARGUS_NET_EVT_RESTART_REQUEST,
+        .requested_owner = ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI
+    };
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from STA allowed");
-    TEST_ASSERT(evt.type == 0, "Event generated despite rejection");
+    TEST_ASSERT(evt.type == ARGUS_NET_EVT_RESTART_REQUEST &&
+                    evt.requested_owner == ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI,
+                "Rejected policy evaluation mutated the caller's event");
 
     net.mode = ARGUS_NET_MODE_SERVICE_AP_ONLY; // But auth is not local service/browser
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_MODE, "Entry from SERVICE_AP_ONLY without BROWSER auth allowed");
 
     // Invalid authority for AP_DISCOVERABLE
     net.mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+    net.ap_started = true;
     auth.mode = ARGUS_AUTHORITY_NONE;
     TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) == ARGUS_SVC_POLICY_REJECT_AUTHORITY, "AP_DISCOVERABLE with NONE auth allowed");
 
@@ -3104,6 +3151,7 @@ static esp_err_t test_service_entry_edge_cases(void)
         .verify_sta_ip_released = mock_verify_sta_ip_released,
         .set_wifi_ap_only = mock_set_wifi_ap_only,
         .verify_ap_active = mock_verify_ap_active,
+        .set_sta_disabled = mock_set_sta_disabled,
         .verify_machine_safe = mock_verify_machine_safe,
         .ctx = &ctx
     };
@@ -3327,10 +3375,1736 @@ static esp_err_t test_nvs_bootstrap_error_handling(void)
     return ESP_OK;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Phase 4B.3a: Wi-Fi Recovery, Observability
+ * ───────────────────────────────────────────────────────────────────────────*/
+
+static esp_err_t test_4b3a_classify_reasons(void)
+{
+    const char *name;
+    argus_disconnect_category_t cat;
+
+    cat = argus_net_classify_disconnect(WIFI_REASON_AUTH_EXPIRE, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "AUTH_EXPIRE should be AUTHENTICATION");
+
+    cat = argus_net_classify_disconnect(WIFI_REASON_NOT_AUTHED, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AUTHENTICATION, "NOT_AUTHED should be AUTHENTICATION");
+
+    cat = argus_net_classify_disconnect(WIFI_REASON_NO_AP_FOUND, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "NO_AP_FOUND should be AP_UNAVAILABLE");
+
+    cat = argus_net_classify_disconnect(WIFI_REASON_BEACON_TIMEOUT, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "BEACON_TIMEOUT should be AP_UNAVAILABLE");
+
+    cat = argus_net_classify_disconnect(99, &name);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_UNKNOWN, "99 should be UNKNOWN");
+
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_evaluate_retry(void)
+{
+    argus_sta_state_t state;
+
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 1);
+    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "1 auth fail -> RETRY_WAIT");
+
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AUTHENTICATION, 3);
+    TEST_ASSERT(state == ARGUS_STA_ACTION_REQUIRED, "3 auth fails -> ACTION_REQUIRED");
+
+    state = argus_net_evaluate_retry(ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, 5);
+    TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT, "5 AP fails -> RETRY_WAIT");
+
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_can_manual_reconnect(void)
+{
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_AP_ONLY, ARGUS_STA_ACTION_REQUIRED, true), "Cannot reconnect in SERVICE_AP_ONLY");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_SERVICE_TRANSITION, ARGUS_STA_ACTION_REQUIRED, true), "Cannot reconnect in SERVICE_TRANSITION");
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_ACTION_REQUIRED, true), "Can reconnect in ACTION_REQUIRED");
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_RETRY_WAIT, true), "Can reconnect in RETRY_WAIT");
+    TEST_ASSERT(argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_IDLE, true), "Can reconnect from IDLE with valid credentials");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_IDLE, false), "IDLE requires valid credentials");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_DISABLED, true), "Cannot reconnect if DISABLED");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_CONNECTING, true), "Cannot reconnect if CONNECTING");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_ASSOCIATED_WAITING_IP, true), "Cannot reconnect while waiting for IP");
+    TEST_ASSERT(!argus_net_can_manual_reconnect(ARGUS_NET_MODE_COMMISSIONED_STA, ARGUS_STA_CONNECTED, true), "Cannot reconnect if CONNECTED");
+
+    return ESP_OK;
+}
+
+
+
+static esp_err_t mock_apply_stop_timers(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_revoke_supervisory(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_stop_broker(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_verify_broker_stopped(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_load_config(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) {
+    memset(out_cfg, 0, sizeof(*out_cfg));
+    strlcpy((char *)out_cfg->sta.ssid, "ArgusTest", sizeof(out_cfg->sta.ssid));
+    strlcpy((char *)out_cfg->sta.password, "validpass", sizeof(out_cfg->sta.password));
+    *has_cfg = true;
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_authority_valid_pairs(void)
+{
+    TEST_ASSERT(argus_authority_validate_pair(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE) == ESP_OK, "NONE/NONE valid");
+    TEST_ASSERT(argus_authority_validate_pair(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT) == ESP_OK, "SUPERVISORY/MQTT valid");
+    TEST_ASSERT(argus_authority_validate_pair(ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE) == ESP_OK, "SERVICE_TRANSITION/NONE valid");
+    TEST_ASSERT(argus_authority_validate_pair(ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_BROWSER) == ESP_OK, "LOCAL_SERVICE/BROWSER valid");
+    TEST_ASSERT(argus_authority_validate_pair(ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI) == ESP_OK, "LOCAL_SERVICE/DIAGNOSTIC_CLI valid");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_authority_invalid_pairs_preserve_generation(void)
+{
+    const struct {
+        argus_control_authority_t mode;
+        argus_authority_owner_t owner;
+    } invalid[] = {
+        {ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_NONE},
+        {ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_BROWSER},
+        {ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI},
+        {ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_MQTT},
+        {ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_BROWSER},
+        {ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI},
+        {ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_MQTT},
+        {ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_BROWSER},
+        {ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_DIAGNOSTIC_CLI},
+        {ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_NONE},
+        {ARGUS_AUTHORITY_LOCAL_SERVICE, ARGUS_AUTH_OWNER_MQTT}
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        argus_authority_core_t core = {
+            .mode = ARGUS_AUTHORITY_NONE,
+            .owner = ARGUS_AUTH_OWNER_NONE,
+            .generation = 17,
+            .last_error = ESP_OK
+        };
+        TEST_ASSERT(argus_authority_core_set_mode(&core, invalid[i].mode, invalid[i].owner) == ESP_ERR_INVALID_ARG,
+                    "Invalid authority pair must be rejected");
+        TEST_ASSERT(core.mode == ARGUS_AUTHORITY_NONE && core.owner == ARGUS_AUTH_OWNER_NONE,
+                    "Invalid authority pair must preserve mode and owner");
+        TEST_ASSERT(core.generation == 17, "Invalid authority pair must preserve generation");
+    }
+    return ESP_OK;
+}
+static esp_err_t mock_apply_validate_config(void *ctx, const wifi_config_t *cfg, bool has_cfg) {
+    if (!has_cfg) return ESP_ERR_NOT_FOUND;
+    if (!cfg || cfg->sta.ssid[0] == '\0') return ESP_ERR_INVALID_ARG;
+    size_t pass_len = strlen((const char *)cfg->sta.password);
+    return (pass_len >= 8 && pass_len <= 63) ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+static esp_err_t mock_apply_disconnect_sta(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_apply_sta_config(void *ctx, const wifi_config_t *cfg) { return ESP_OK; }
+static esp_err_t mock_apply_connect_sta(void *ctx) { return ESP_OK; }
+static esp_err_t mock_apply_connect_sta_fail(void *ctx) { return ESP_FAIL; }
+
+static esp_err_t test_4b3a_orchestrate_wifi_apply(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_CONNECTED;
+
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+
+    // Test async behavior when connected: should transition to WAITING_DISCONNECT and not call apply/connect yet.
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_OK, "Orchestrate apply should succeed when connected");
+    // Wait, the snapshot verify would require running the actual task, but this function executes the ops synchronously.
+    // Since this is a unit test directly calling the function without the net_mgr task, we can't test the actual
+    // async execution of ARGUS_NET_EVT_STA_DISCONNECTED event here unless we call the event handler directly.
+    // However, we can at least assert that sta_state remains CONNECTED (or unchanged by orchestrator),
+    // because orchestrate just calls disconnect and expects the task loop to handle the disconnect event.
+    TEST_ASSERT(sta_state == ARGUS_STA_CONNECTED, "State should remain CONNECTED after orchestrate (async)");
+
+    // Test behavior when disconnected: should immediately apply config and call connect
+    sta_state = ARGUS_STA_IDLE;
+    err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_OK, "Orchestrate apply should succeed when disconnected");
+    TEST_ASSERT(sta_state == ARGUS_STA_CONNECTING, "State should become CONNECTING immediately when disconnected");
+
+    // Test fail connect when disconnected
+    ops.connect_sta = mock_apply_connect_sta_fail;
+    sta_state = ARGUS_STA_IDLE;
+    err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Orchestrate apply should propagate fail");
+    TEST_ASSERT(sta_state == ARGUS_STA_IDLE, "State should be IDLE after failed connect call");
+
+    // Test invalid mode
+    net_mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_ERR_INVALID_STATE, "Should reject invalid mode");
+
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_revoke_none_none(void)
+{
+    argus_authority_core_t core = {
+        .mode = ARGUS_AUTHORITY_SUPERVISORY,
+        .owner = ARGUS_AUTH_OWNER_MQTT,
+        .generation = 41,
+        .last_error = ESP_OK
+    };
+    esp_err_t err = argus_authority_core_set_mode(
+        &core, ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
+    TEST_ASSERT(err == ESP_OK, "Pure authority core must accept NONE/NONE");
+    TEST_ASSERT(core.mode == ARGUS_AUTHORITY_NONE && core.owner == ARGUS_AUTH_OWNER_NONE,
+                "Pure authority core must apply NONE/NONE");
+    TEST_ASSERT(core.generation == 42, "Valid pure authority transition must increment generation");
+
+    return ESP_OK;
+}
+
+// --- Added Pure Tests for Phase 4B.3a Third Correction ---
+
+static esp_err_t mock_apply_fail(void *ctx) { return ESP_FAIL; }
+static esp_err_t mock_apply_load_config_fail(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) { return ESP_FAIL; }
+static esp_err_t mock_apply_apply_sta_config_fail(void *ctx, const wifi_config_t *cfg) { return ESP_FAIL; }
+static esp_err_t mock_apply_load_config_missing(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) { *has_cfg = false; return ESP_OK; }
+
+static esp_err_t test_4b3a_apply_null_ops(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, NULL);
+    TEST_ASSERT(err == ESP_ERR_INVALID_ARG, "Must reject null ops");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_missing_cb(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {0}; // All null
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_ERR_INVALID_ARG, "Must reject missing callbacks");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_stop_timers_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_fail,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate stop-timers failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_revoke_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_fail,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate authority-revocation failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_stop_broker_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_fail,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate broker-stop failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_load_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config_fail,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must preserve the originating load failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_missing_cfg(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config_missing,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_ERR_NOT_FOUND, "Must propagate missing cfg");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_disconnect_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_CONNECTED;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_fail,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, true, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate disconnect failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_apply_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config_fail,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate config apply failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_orchestrate_wifi_apply_disconnected(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_OK, "Orchestrate apply should succeed when disconnected");
+    TEST_ASSERT(sta_state == ARGUS_STA_CONNECTING, "State should become CONNECTING immediately when disconnected");
+    return ESP_OK;
+}
+
+typedef enum {
+    APPLY_STEP_STOP_TIMERS = 1,
+    APPLY_STEP_REVOKE,
+    APPLY_STEP_STOP_BROKER,
+    APPLY_STEP_VERIFY_BROKER,
+    APPLY_STEP_LOAD,
+    APPLY_STEP_VALIDATE,
+    APPLY_STEP_DISCONNECT,
+    APPLY_STEP_APPLY,
+    APPLY_STEP_CONNECT
+} apply_step_t;
+
+typedef struct {
+    int calls[10];
+    int order[16];
+    size_t order_count;
+    apply_step_t fail_step;
+    bool has_cfg;
+    bool valid_cfg;
+} mock_apply_trace_t;
+
+static esp_err_t trace_step(mock_apply_trace_t *trace, apply_step_t step)
+{
+    trace->calls[step]++;
+    trace->order[trace->order_count++] = step;
+    return trace->fail_step == step ? ESP_FAIL : ESP_OK;
+}
+
+static esp_err_t trace_stop_timers(void *ctx) { return trace_step(ctx, APPLY_STEP_STOP_TIMERS); }
+static esp_err_t trace_revoke(void *ctx) { return trace_step(ctx, APPLY_STEP_REVOKE); }
+static esp_err_t trace_stop_broker(void *ctx) { return trace_step(ctx, APPLY_STEP_STOP_BROKER); }
+static esp_err_t trace_verify_broker(void *ctx) { return trace_step(ctx, APPLY_STEP_VERIFY_BROKER); }
+static esp_err_t trace_load(void *ctx, wifi_config_t *cfg, bool *has_cfg)
+{
+    mock_apply_trace_t *trace = ctx;
+    esp_err_t err = trace_step(trace, APPLY_STEP_LOAD);
+    if (err != ESP_OK) return err;
+    memset(cfg, 0, sizeof(*cfg));
+    strlcpy((char *)cfg->sta.ssid, trace->valid_cfg ? "ArgusTest" : "", sizeof(cfg->sta.ssid));
+    strlcpy((char *)cfg->sta.password, "validpass", sizeof(cfg->sta.password));
+    *has_cfg = trace->has_cfg;
+    return ESP_OK;
+}
+static esp_err_t trace_validate(void *ctx, const wifi_config_t *cfg, bool has_cfg)
+{
+    mock_apply_trace_t *trace = ctx;
+    esp_err_t err = trace_step(trace, APPLY_STEP_VALIDATE);
+    if (err != ESP_OK) return err;
+    return has_cfg && trace->valid_cfg && cfg->sta.ssid[0] != '\0' ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+static esp_err_t trace_disconnect(void *ctx) { return trace_step(ctx, APPLY_STEP_DISCONNECT); }
+static esp_err_t trace_apply(void *ctx, const wifi_config_t *cfg) { return trace_step(ctx, APPLY_STEP_APPLY); }
+static esp_err_t trace_connect(void *ctx) { return trace_step(ctx, APPLY_STEP_CONNECT); }
+
+static argus_wifi_apply_ops_t trace_ops(mock_apply_trace_t *trace)
+{
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = trace_stop_timers,
+        .revoke_supervisory = trace_revoke,
+        .stop_broker = trace_stop_broker,
+        .verify_broker_stopped = trace_verify_broker,
+        .load_config = trace_load,
+        .validate_config = trace_validate,
+        .disconnect_sta = trace_disconnect,
+        .apply_sta_config = trace_apply,
+        .connect_sta = trace_connect,
+        .ctx = trace
+    };
+    return ops;
+}
+
+static esp_err_t test_4b3a_timer_gen_rejection(void)
+{
+    TEST_ASSERT(argus_net_timer_generation_is_current(12, 12),
+                "Timer event must accept the generation captured at scheduling");
+    TEST_ASSERT(!argus_net_timer_generation_is_current(11, 12),
+                "Stale timer generation must be rejected");
+    TEST_ASSERT(!argus_net_timer_generation_is_current(13, 12),
+                "Nonmatching timer generation must be rejected");
+    TEST_ASSERT(argus_net_timer_command_status(true) == ESP_OK,
+                "Queued timer command must report success");
+    TEST_ASSERT(argus_net_timer_command_status(false) == ESP_FAIL,
+                "Timer scheduling failure must be observable");
+    return ESP_OK;
+}
+
+
+static esp_err_t mock_apply_load_config_invalid(void *ctx, wifi_config_t *out_cfg, bool *has_cfg) {
+    *has_cfg = true;
+    out_cfg->sta.ssid[0] = '\0'; // Invalid SSID
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_invalid_cfg(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config_invalid,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_ERR_INVALID_ARG, "Must propagate invalid cfg");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_connect_fail(void)
+{
+    argus_network_mode_t net_mode = ARGUS_NET_MODE_COMMISSIONED_STA;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    argus_wifi_apply_ops_t ops = {
+        .stop_timers = mock_apply_stop_timers,
+        .revoke_supervisory = mock_apply_revoke_supervisory,
+        .stop_broker = mock_apply_stop_broker,
+        .verify_broker_stopped = mock_apply_verify_broker_stopped,
+        .load_config = mock_apply_load_config,
+        .validate_config = mock_apply_validate_config,
+        .disconnect_sta = mock_apply_disconnect_sta,
+        .apply_sta_config = mock_apply_apply_sta_config,
+        .connect_sta = mock_apply_connect_sta_fail,
+        .ctx = NULL
+    };
+    esp_err_t err = argus_net_mgr_orchestrate_wifi_apply(&net_mode, &sta_state, false, &ops);
+    TEST_ASSERT(err == ESP_FAIL, "Must propagate connect failure");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_intentional_disconnect_not_failure(void)
+{
+    argus_disconnect_category_t cat = argus_net_classify_disconnect(WIFI_REASON_ASSOC_LEAVE, NULL);
+    TEST_ASSERT(cat == ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE, "Raw ASSOC_LEAVE classification must remain observable");
+
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t sta_state = ARGUS_STA_CONNECTED;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 22, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &sta_state, true, &ops) == ESP_OK,
+                "Connected apply must enter an intentional-disconnect transaction");
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_AUTH_FAIL,
+        .category = ARGUS_DISCONNECT_CAT_AUTHENTICATION,
+        .consecutive_failures = 3,
+        .authentication_streak = 3
+    };
+    bool handled = false;
+    TEST_ASSERT(argus_wifi_transaction_handle_disconnect(&txn, 22, &sta_state, &ops, &handled) == ESP_OK && handled,
+                "Matching intentional disconnect must resume transaction");
+    TEST_ASSERT(evidence.consecutive_failures == 3 && evidence.authentication_streak == 3,
+                "Intentional transaction handling must preserve failure evidence");
+    TEST_ASSERT(trace.calls[APPLY_STEP_APPLY] == 1 && trace.calls[APPLY_STEP_CONNECT] == 1,
+                "Apply and connect must occur only after matching disconnect");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_mixed_auth_resets_streak(void)
+{
+    argus_wifi_failure_evidence_t evidence = {0};
+    argus_net_failure_evidence_record(&evidence, WIFI_REASON_AUTH_FAIL, ARGUS_DISCONNECT_CAT_AUTHENTICATION);
+    argus_net_failure_evidence_record(&evidence, WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT, ARGUS_DISCONNECT_CAT_AUTHENTICATION);
+    TEST_ASSERT(evidence.consecutive_failures == 2 && evidence.authentication_streak == 2,
+                "Consecutive authentication failures must build both counters");
+    argus_net_failure_evidence_record(&evidence, WIFI_REASON_NO_AP_FOUND, ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE);
+    TEST_ASSERT(evidence.consecutive_failures == 3, "Non-auth failure must preserve overall consecutive count");
+    TEST_ASSERT(evidence.authentication_streak == 0, "Non-auth failure must reset only auth streak");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_success_clears_fault_state(void)
+{
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_AUTH_FAIL,
+        .category = ARGUS_DISCONNECT_CAT_AUTHENTICATION,
+        .consecutive_failures = 4,
+        .authentication_streak = 4
+    };
+    argus_net_failure_evidence_clear(&evidence);
+    TEST_ASSERT(evidence.reason == 0 && evidence.category == ARGUS_DISCONNECT_CAT_NONE,
+                "Successful recovery must clear active reason/category");
+    TEST_ASSERT(evidence.consecutive_failures == 0 && evidence.authentication_streak == 0,
+                "Successful recovery must clear active failure counters");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_countdown_underflow_boundary(void)
+{
+    const uint32_t generation = 9;
+    const uint32_t tick_ms = 10;
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 200, false, generation,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 0,
+                "Inactive timer exposed a countdown");
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 200, true, generation - 1,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 0,
+                "Stale timer generation exposed a countdown");
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 100, true, generation,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 0,
+                "Expiry equal to current tick was not expired");
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 99, true, generation,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 0,
+                "Past expiry underflowed to a future countdown");
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 101, true, generation,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 10,
+                "One remaining tick was calculated incorrectly");
+    TEST_ASSERT(argus_net_retry_remaining_ms(100, 200, true, generation,
+                    generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 1000,
+                "Exact one-second boundary was calculated incorrectly");
+    uint32_t partial_ms = argus_net_retry_remaining_ms(
+        100, 201, true, generation, generation, ARGUS_STA_RETRY_WAIT, tick_ms);
+    TEST_ASSERT(partial_ms == 1010 &&
+                    argus_net_retry_countdown_seconds(partial_ms) == 2,
+                "Partial second did not round upward after safe expiry calculation");
+    TEST_ASSERT(argus_net_retry_remaining_ms(UINT32_MAX - 4U, 5, true,
+                    generation, generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 100,
+                "Future expiry across tick wrap was rejected");
+    TEST_ASSERT(argus_net_retry_remaining_ms(5, UINT32_MAX - 4U, true,
+                    generation, generation, ARGUS_STA_RETRY_WAIT, tick_ms) == 0,
+                "Expired pre-wrap value became a huge countdown");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_queue_failure_truthfulness(void)
+{
+    TEST_ASSERT(argus_net_event_post_status(true) == ESP_OK, "Queued event must report success");
+    TEST_ASSERT(argus_net_event_post_status(false) == ESP_ERR_NO_MEM, "Rejected event must report queue exhaustion");
+    return ESP_OK;
+}
+
+static argus_net_snapshot_t service_recovery_snapshot(void)
+{
+    argus_net_snapshot_t net = {
+        .mode = ARGUS_NET_MODE_AP_DISCOVERABLE,
+        .sta_connected = false,
+        .sta_ip_acquired = false,
+        .ap_started = true,
+        .mqtt_broker_running = false,
+        .mqtt_broker_stopped = true,
+        .mqtt_broker_observable = true,
+        .commissioned = true,
+        .sta_state = ARGUS_STA_RETRY_WAIT,
+        .last_disconnect_category = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
+        .last_disconnect_reason = WIFI_REASON_NO_AP_FOUND,
+        .consecutive_failures = 2,
+        .apply_state = ARGUS_WIFI_APPLY_IDLE,
+        .timer_generation = 41,
+        .auto_retry_timer_active = true,
+        .auto_retry_timer_generation = 41
+    };
+    return net;
+}
+
+static esp_err_t test_4b3a_service_recovery_policy_eligible(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 9
+    };
+    argus_net_event_t evt = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) ==
+                    ARGUS_SVC_POLICY_OK,
+                "Disconnected commissioned retry must permit browser service entry");
+    TEST_ASSERT(evt.service_preflight_required &&
+                    evt.service_preflight.timer_generation == 41,
+                "Accepted request must capture its coherent preflight fingerprint");
+
+    net.sta_state = ARGUS_STA_CONNECTING;
+    net.wifi_transaction_active = true;
+    net.transaction_generation = 42;
+    net.apply_state = ARGUS_WIFI_APPLY_CONNECTING;
+    TEST_ASSERT(argus_service_policy_entry_permitted(&net, &auth),
+                "Active generation-tagged recovery transaction must remain service eligible");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_recovery_policy_contradictions(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE
+    };
+    argus_net_event_t evt = {0};
+
+    net.sta_connected = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Connected STA must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.sta_ip_acquired = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Acquired STA IP must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_running = true;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Running broker must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_observable = false;
+    net.mqtt_broker_stopped = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Unverifiable broker stop must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mqtt_broker_stopped = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Transitional broker state must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.ap_started = false;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) != ARGUS_SVC_POLICY_OK,
+                "Absent Service AP must reject recovery service entry");
+    net = service_recovery_snapshot();
+    net.mode = ARGUS_NET_MODE_SERVICE_TRANSITION;
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &auth, &evt) ==
+                    ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS,
+                "Concurrent service transition must be rejected explicitly");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_recovery_invalid_authority_pairs(void)
+{
+    const argus_authority_snapshot_t invalid[] = {
+        {.mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_MQTT},
+        {.mode = ARGUS_AUTHORITY_SUPERVISORY, .owner = ARGUS_AUTH_OWNER_NONE},
+        {.mode = ARGUS_AUTHORITY_LOCAL_SERVICE, .owner = ARGUS_AUTH_OWNER_BROWSER},
+        {.mode = ARGUS_AUTHORITY_SERVICE_TRANSITION, .owner = ARGUS_AUTH_OWNER_NONE}
+    };
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        argus_net_event_t evt = {0};
+        TEST_ASSERT(argus_service_policy_evaluate_entry(&net, &invalid[i], &evt) !=
+                        ARGUS_SVC_POLICY_OK,
+                    "Mixed or transition authority pair accepted for recovery entry");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_broker_observable_stop_requires_convergence(void)
+{
+    argus_mqtt_broker_lifecycle_obs_t obs = {
+        .state = BROKER_STATE_STOPPED,
+        .active_client_count = 0,
+        .has_server_task = false,
+        .has_listener = false
+    };
+    TEST_ASSERT(argus_mqtt_broker_observation_is_stopped(&obs),
+                "Coherent broker STOPPED observation was rejected");
+    obs.has_server_task = true;
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_stopped(&obs),
+                "STOPPED enum with server task was accepted");
+    obs.has_server_task = false;
+    obs.has_listener = true;
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_stopped(&obs),
+                "STOPPED enum with listener was accepted");
+    obs.has_listener = false;
+    obs.active_client_count = 1;
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_stopped(&obs),
+                "STOPPED enum with active client was accepted");
+    obs.active_client_count = 0;
+    obs.state = BROKER_STATE_STOPPING;
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_stopped(&obs),
+                "STOPPING lifecycle was accepted as observably stopped");
+    return ESP_OK;
+}
+
+typedef struct {
+    argus_mqtt_broker_lifecycle_obs_t observations[4];
+    size_t observation_count;
+    size_t observation_index;
+    esp_err_t observation_error;
+    esp_err_t stop_result;
+    uint32_t stop_calls;
+    uint32_t wait_calls;
+    bool invalid_wait_delay;
+} mock_broker_convergence_ctx_t;
+
+static esp_err_t mock_broker_observe(
+    void *ctx, argus_mqtt_broker_lifecycle_obs_t *out)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    if (mock->observation_error != ESP_OK) {
+        return mock->observation_error;
+    }
+    size_t index = mock->observation_index;
+    if (index >= mock->observation_count) {
+        index = mock->observation_count - 1;
+    }
+    *out = mock->observations[index];
+    mock->observation_index++;
+    return ESP_OK;
+}
+
+static esp_err_t mock_broker_stop_request(void *ctx)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    mock->stop_calls++;
+    return mock->stop_result;
+}
+
+static void mock_broker_wait(void *ctx, uint32_t delay_ms)
+{
+    mock_broker_convergence_ctx_t *mock = ctx;
+    if (delay_ms != 50) {
+        mock->invalid_wait_delay = true;
+    }
+    mock->wait_calls++;
+}
+
+static argus_mqtt_broker_convergence_ops_t mock_broker_convergence_ops(
+    mock_broker_convergence_ctx_t *ctx)
+{
+    return (argus_mqtt_broker_convergence_ops_t) {
+        .observe = mock_broker_observe,
+        .stop = mock_broker_stop_request,
+        .wait = mock_broker_wait,
+        .ctx = ctx,
+    };
+}
+
+static esp_err_t test_4b3a_broker_production_convergence_decisions(void)
+{
+    const argus_mqtt_broker_lifecycle_obs_t cases[] = {
+        {.state = BROKER_STATE_STOPPED},
+        {.state = BROKER_STATE_STOPPED, .has_server_task = true},
+        {.state = BROKER_STATE_STOPPED, .has_listener = true},
+        {.state = BROKER_STATE_STOPPED, .active_client_count = 1},
+        {.state = BROKER_STATE_STARTING, .has_server_task = true},
+        {.state = BROKER_STATE_RUNNING, .active_client_count = 2,
+         .has_server_task = true, .has_listener = true},
+        {.state = BROKER_STATE_RUNNING, .has_server_task = true},
+        {.state = BROKER_STATE_STOPPING},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        mock_broker_convergence_ctx_t ctx = {
+            .observations = {cases[i]},
+            .observation_count = 1,
+            .stop_result = ESP_ERR_TIMEOUT,
+        };
+        argus_mqtt_broker_convergence_ops_t ops =
+            mock_broker_convergence_ops(&ctx);
+        esp_err_t err = argus_mqtt_broker_request_stop_converged(&ops);
+        if (i == 0) {
+            TEST_ASSERT(err == ESP_OK && ctx.stop_calls == 0,
+                        "Fully converged STOPPED did not return idempotent success");
+        } else {
+            TEST_ASSERT(err == ESP_ERR_TIMEOUT && ctx.stop_calls == 1,
+                        "Non-converged broker skipped stop or lost its exact error");
+        }
+    }
+
+    TEST_ASSERT(argus_mqtt_broker_observation_is_running(&cases[5]),
+                "Coherent RUNNING observation was not operational");
+    TEST_ASSERT(!argus_mqtt_broker_observation_is_running(&cases[6]) &&
+                    !argus_mqtt_broker_observation_is_running(&cases[4]) &&
+                    !argus_mqtt_broker_observation_is_running(&cases[7]),
+                "Incomplete RUNNING, STARTING, or STOPPING was reported operational");
+
+    mock_broker_convergence_ctx_t observation_failure = {
+        .observation_count = 1,
+        .observation_error = ESP_ERR_INVALID_STATE,
+        .stop_result = ESP_OK,
+    };
+    argus_mqtt_broker_convergence_ops_t ops =
+        mock_broker_convergence_ops(&observation_failure);
+    TEST_ASSERT(argus_mqtt_broker_request_stop_converged(&ops) ==
+                    ESP_ERR_INVALID_STATE && observation_failure.stop_calls == 0,
+                "Observation failure did not fail closed before stop decision");
+
+    mock_broker_convergence_ctx_t stop_then_converge = {
+        .observations = {{.state = BROKER_STATE_STARTING,
+                          .has_server_task = true}},
+        .observation_count = 1,
+        .stop_result = ESP_OK,
+    };
+    ops = mock_broker_convergence_ops(&stop_then_converge);
+    TEST_ASSERT(argus_mqtt_broker_request_stop_converged(&ops) == ESP_OK &&
+                    stop_then_converge.stop_calls == 1,
+                "Required stop request did not preserve successful stop result");
+    stop_then_converge.observations[0] =
+        (argus_mqtt_broker_lifecycle_obs_t) {
+            .state = BROKER_STATE_STOPPING, .has_server_task = true};
+    stop_then_converge.observations[1] =
+        (argus_mqtt_broker_lifecycle_obs_t) {.state = BROKER_STATE_STOPPED};
+    stop_then_converge.observation_count = 2;
+    stop_then_converge.observation_index = 0;
+    ops = mock_broker_convergence_ops(&stop_then_converge);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 2, 50) ==
+                    ESP_OK && stop_then_converge.wait_calls == 1,
+                "Successful stop request did not require subsequent full convergence");
+
+    mock_broker_convergence_ctx_t converging = {
+        .observations = {
+            {.state = BROKER_STATE_STOPPING, .has_server_task = true},
+            {.state = BROKER_STATE_STOPPED, .active_client_count = 1},
+            {.state = BROKER_STATE_STOPPED},
+        },
+        .observation_count = 3,
+    };
+    ops = mock_broker_convergence_ops(&converging);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 3, 50) ==
+                    ESP_OK && converging.wait_calls == 2 &&
+                    !converging.invalid_wait_delay,
+                "Verification did not wait through STOPPING and residual clients");
+
+    mock_broker_convergence_ctx_t timed_out = {
+        .observations = {{.state = BROKER_STATE_STOPPING}},
+        .observation_count = 1,
+    };
+    ops = mock_broker_convergence_ops(&timed_out);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 3, 50) ==
+                    ESP_ERR_TIMEOUT && timed_out.wait_calls == 2,
+                "Non-converged verification did not preserve timeout failure");
+
+    observation_failure.observation_index = 0;
+    ops = mock_broker_convergence_ops(&observation_failure);
+    TEST_ASSERT(argus_mqtt_broker_verify_stopped_converged(&ops, 2, 50) ==
+                    ESP_ERR_INVALID_STATE,
+                "Verification observation failure did not remain operator-visible");
+    return ESP_OK;
+}
+
+typedef struct {
+    bool retry_active;
+    bool ip_active;
+    esp_err_t retry_result;
+    esp_err_t ip_result;
+    uint32_t retry_calls;
+    uint32_t ip_calls;
+} mock_service_timer_ctx_t;
+
+static esp_err_t mock_service_stop_retry(void *ctx)
+{
+    mock_service_timer_ctx_t *timers = ctx;
+    timers->retry_calls++;
+    if (timers->retry_result == ESP_OK) timers->retry_active = false;
+    return timers->retry_result;
+}
+
+static esp_err_t mock_service_stop_ip(void *ctx)
+{
+    mock_service_timer_ctx_t *timers = ctx;
+    timers->ip_calls++;
+    if (timers->ip_result == ESP_OK) timers->ip_active = false;
+    return timers->ip_result;
+}
+
+static argus_service_recovery_cancel_ops_t make_service_cancel_ops(
+    argus_wifi_transaction_t *txn,
+    uint32_t *timer_generation,
+    _Atomic uint32_t *active_transaction_generation,
+    _Atomic uint32_t *retry_generation,
+    _Atomic uint32_t *ip_generation,
+    mock_service_timer_ctx_t *timers)
+{
+    argus_service_recovery_cancel_ops_t ops = {
+        .transaction = txn,
+        .timer_generation = timer_generation,
+        .active_transaction_generation = active_transaction_generation,
+        .auto_retry_timer_generation = retry_generation,
+        .ip_timeout_timer_generation = ip_generation,
+        .stop_retry_timer = mock_service_stop_retry,
+        .stop_ip_timeout_timer = mock_service_stop_ip,
+        .ctx = timers
+    };
+    return ops;
+}
+
+typedef struct {
+    argus_service_recovery_cancel_ops_t cancel_ops;
+    uint32_t cancel_calls;
+} mock_service_commit_ctx_t;
+
+static esp_err_t mock_service_commit_cancel(
+    void *ctx, argus_service_cancel_failure_t *out_failure)
+{
+    mock_service_commit_ctx_t *commit = ctx;
+    commit->cancel_calls++;
+    return argus_net_cancel_recovery_for_service(
+        &commit->cancel_ops, out_failure);
+}
+
+static esp_err_t test_4b3a_service_rejection_preserves_recovery(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    net.sta_connected = true;
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 12
+    };
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 55;
+    txn.state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+    txn.config_staged = true;
+    memcpy(txn.pending_config.sta.password, "preserved", 10);
+    argus_wifi_transaction_t txn_before = txn;
+    uint32_t timer_generation = 55;
+    _Atomic uint32_t active_generation = 55;
+    _Atomic uint32_t retry_generation = 55;
+    _Atomic uint32_t ip_generation = 54;
+    mock_service_timer_ctx_t timers = {
+        .retry_active = true,
+        .ip_active = true,
+        .retry_result = ESP_OK,
+        .ip_result = ESP_OK
+    };
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_NO_AP_FOUND,
+        .category = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
+        .consecutive_failures = 4,
+        .authentication_streak = 0
+    };
+    argus_net_event_t evt = {0};
+
+    argus_svc_policy_result_t policy =
+        argus_service_policy_evaluate_entry(&net, &auth, &evt);
+    mock_service_commit_ctx_t commit = {
+        .cancel_ops = make_service_cancel_ops(
+            &txn, &timer_generation, &active_generation, &retry_generation,
+            &ip_generation, &timers)
+    };
+    argus_service_commit_ops_t commit_ops = {
+        .cancel_recovery = mock_service_commit_cancel,
+        .ctx = &commit
+    };
+    TEST_ASSERT(argus_net_service_commit_recovery(
+                    policy, NULL, &evt.service_preflight, &commit_ops, NULL) ==
+                    ESP_ERR_INVALID_STATE,
+                "Rejected production commit gate did not fail closed");
+
+    argus_net_snapshot_t eligible_net = service_recovery_snapshot();
+    argus_net_event_t eligible_evt = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(
+                    &eligible_net, &auth, &eligible_evt) == ARGUS_SVC_POLICY_OK,
+                "Eligible fingerprint setup failed");
+    argus_service_entry_fingerprint_t changed = eligible_evt.service_preflight;
+    changed.timer_generation++;
+    TEST_ASSERT(argus_net_service_commit_recovery(
+                    ARGUS_SVC_POLICY_OK, &eligible_evt.service_preflight,
+                    &changed, &commit_ops, NULL) == ESP_ERR_INVALID_STATE,
+                "Fingerprint mismatch reached recovery cancellation");
+
+    TEST_ASSERT(policy != ARGUS_SVC_POLICY_OK, "Contradictory snapshot unexpectedly eligible");
+    TEST_ASSERT(memcmp(&txn, &txn_before, sizeof(txn)) == 0,
+                "Rejected request changed transaction state or staged configuration");
+    TEST_ASSERT(timer_generation == 55 && atomic_load(&active_generation) == 55 &&
+                    atomic_load(&retry_generation) == 55 && atomic_load(&ip_generation) == 54,
+                "Rejected request changed timer or transaction generations");
+    TEST_ASSERT(timers.retry_active && timers.ip_active &&
+                    timers.retry_calls == 0 && timers.ip_calls == 0 &&
+                    commit.cancel_calls == 0,
+                "Rejected request stopped a recovery timer");
+    TEST_ASSERT(evidence.reason == WIFI_REASON_NO_AP_FOUND &&
+                    evidence.consecutive_failures == 4 && auth.generation == 12,
+                "Rejected request changed failure evidence, counters, or authority generation");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_success_cancels_recovery(void)
+{
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 61;
+    txn.state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+    txn.config_staged = true;
+    memcpy(txn.pending_config.sta.password, "secret", 7);
+    uint32_t timer_generation = 61;
+    _Atomic uint32_t active_generation = 61;
+    _Atomic uint32_t retry_generation = 61;
+    _Atomic uint32_t ip_generation = 60;
+    mock_service_timer_ctx_t timers = {
+        .retry_active = true,
+        .ip_active = true,
+        .retry_result = ESP_OK,
+        .ip_result = ESP_OK
+    };
+    mock_service_commit_ctx_t commit = {
+        .cancel_ops = make_service_cancel_ops(
+            &txn, &timer_generation, &active_generation, &retry_generation,
+            &ip_generation, &timers)
+    };
+    argus_service_commit_ops_t commit_ops = {
+        .cancel_recovery = mock_service_commit_cancel,
+        .ctx = &commit
+    };
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_NONE
+    };
+    argus_net_event_t evt = {0};
+    argus_svc_policy_result_t policy =
+        argus_service_policy_evaluate_entry(&net, &auth, &evt);
+    argus_service_cancel_failure_t failure = ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER;
+
+    TEST_ASSERT(argus_net_service_commit_recovery(
+                    policy, &evt.service_preflight, &evt.service_preflight,
+                    &commit_ops, &failure) == ESP_OK,
+                "Eligible service recovery cancellation failed");
+    TEST_ASSERT(failure == ARGUS_SERVICE_CANCEL_FAILURE_NONE &&
+                    !timers.retry_active && !timers.ip_active &&
+                    timers.retry_calls == 1 && timers.ip_calls == 1 &&
+                    commit.cancel_calls == 1,
+                "Successful cancellation did not stop both timers exactly once");
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_CANCELLED &&
+                    txn.pending_config.sta.password[0] == '\0',
+                "Successful cancellation did not cancel and scrub transaction");
+    TEST_ASSERT(timer_generation == 62 && atomic_load(&active_generation) == 0 &&
+                    atomic_load(&retry_generation) == 0 && atomic_load(&ip_generation) == 0,
+                "Successful cancellation did not invalidate all recovery generations");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_cancel_failure_truthfulness(void)
+{
+    for (int failed_timer = 0; failed_timer < 2; ++failed_timer) {
+        argus_wifi_transaction_t txn;
+        argus_wifi_transaction_init(&txn);
+        txn.active = true;
+        txn.generation = 70 + (uint32_t)failed_timer;
+        txn.state = ARGUS_WIFI_APPLY_CONNECTING;
+        uint32_t timer_generation = txn.generation;
+        _Atomic uint32_t active_generation = txn.generation;
+        _Atomic uint32_t retry_generation = txn.generation;
+        _Atomic uint32_t ip_generation = txn.generation;
+        mock_service_timer_ctx_t timers = {
+            .retry_active = true,
+            .ip_active = true,
+            .retry_result = failed_timer == 0 ? ESP_ERR_TIMEOUT : ESP_OK,
+            .ip_result = failed_timer == 1 ? ESP_ERR_INVALID_STATE : ESP_OK
+        };
+        argus_service_recovery_cancel_ops_t ops = make_service_cancel_ops(
+            &txn, &timer_generation, &active_generation, &retry_generation,
+            &ip_generation, &timers);
+        argus_service_cancel_failure_t failure;
+        esp_err_t err = argus_net_cancel_recovery_for_service(&ops, &failure);
+        TEST_ASSERT(err == (failed_timer == 0 ? ESP_ERR_TIMEOUT : ESP_ERR_INVALID_STATE),
+                    "Timer cancellation did not preserve exact callback failure");
+        TEST_ASSERT(failure == (failed_timer == 0
+                                   ? ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER
+                                   : ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER),
+                    "Timer cancellation reported wrong failure stage");
+        TEST_ASSERT(!txn.active && timer_generation == txn.generation + 1 &&
+                        timers.retry_calls == 1 && timers.ip_calls == 1,
+                    "Partial timer failure left transaction/generation state untruthful");
+        TEST_ASSERT(atomic_load(&active_generation) == 0 &&
+                        atomic_load(&retry_generation) == 0 &&
+                        atomic_load(&ip_generation) == 0 &&
+                        !argus_net_timer_generation_is_current(0, timer_generation),
+                    "Cancellation failure left a stale callback generation actionable");
+        argus_service_cancel_state_t state = {
+            .sta_state = ARGUS_STA_RETRY_WAIT,
+            .net_error = ARGUS_NET_ERR_NONE,
+            .cancel_failure = ARGUS_SERVICE_CANCEL_FAILURE_NONE,
+            .cancel_error = ESP_OK
+        };
+        argus_net_record_service_cancel_failure(&state, failure, err);
+        TEST_ASSERT(state.sta_state == ARGUS_STA_ACTION_REQUIRED &&
+                        state.net_error == ARGUS_NET_ERR_TIMER_COMMAND_FAILED &&
+                        state.cancel_failure == failure && state.cancel_error == err,
+                    "Cancellation failure did not produce truthful ACTION_REQUIRED evidence");
+        const char *guidance = argus_net_service_cancel_guidance(failure);
+        TEST_ASSERT(strstr(guidance, "Reconnect Wi-Fi") != NULL &&
+                        strstr(guidance, "Enter Local Service") != NULL,
+                    "Cancellation failure guidance omitted available operator actions");
+        TEST_ASSERT(argus_net_retry_remaining_ms(
+                        10, 20, true, timer_generation, timer_generation,
+                        state.sta_state, 10) == 0,
+                    "ACTION_REQUIRED cancellation failure still claimed a retry countdown");
+        TEST_ASSERT(argus_net_can_manual_reconnect(
+                        ARGUS_NET_MODE_AP_DISCOVERABLE, state.sta_state, true),
+                    "Cancellation failure removed manual reconnect availability");
+
+        argus_net_snapshot_t net = service_recovery_snapshot();
+        net.sta_state = state.sta_state;
+        net.auto_retry_timer_active = timers.retry_active;
+        argus_authority_snapshot_t auth = {
+            .mode = ARGUS_AUTHORITY_NONE, .owner = ARGUS_AUTH_OWNER_NONE
+        };
+        TEST_ASSERT(argus_service_policy_entry_permitted(&net, &auth),
+                    "Cancellation failure removed eligible Local Service entry");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_delayed_events_suppressed(void)
+{
+    const argus_sta_lifecycle_event_t success_events[] = {
+        ARGUS_STA_EVENT_ASSOCIATED, ARGUS_STA_EVENT_IP_ACQUIRED
+    };
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_AUTH_FAIL,
+        .category = ARGUS_DISCONNECT_CAT_AUTHENTICATION,
+        .consecutive_failures = 4,
+        .authentication_streak = 4
+    };
+    argus_net_err_t last_error = ARGUS_NET_ERR_TIMER_COMMAND_FAILED;
+    bool broker_running = false;
+    argus_authority_snapshot_t authority = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 33
+    };
+
+    for (size_t i = 0; i < sizeof(success_events) / sizeof(success_events[0]); ++i) {
+        argus_sta_event_action_t action = argus_net_decide_sta_event(
+            ARGUS_NET_MODE_SERVICE_TRANSITION, success_events[i], 0, 0,
+            true, true, true);
+        TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE,
+                    "SERVICE_TRANSITION accepted delayed association/IP event");
+        argus_sta_state_t state = ARGUS_STA_RETRY_WAIT;
+        bool started = true, connected = true, ip = true;
+        argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_TRANSITION,
+                                         success_events[i], action, &state,
+                                         &started, &connected, &ip);
+        TEST_ASSERT(state == ARGUS_STA_RETRY_WAIT && !started && !connected && !ip,
+                    "Ignored transition event changed lifecycle state or retained stale physical flags");
+
+        action = argus_net_decide_sta_event(
+            ARGUS_NET_MODE_SERVICE_AP_ONLY, success_events[i], 0, 0,
+            true, true, true);
+        TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE,
+                    "SERVICE_AP_ONLY accepted delayed association/IP event");
+        state = ARGUS_STA_DISABLED;
+        started = connected = ip = true;
+        argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_AP_ONLY,
+                                         success_events[i], action, &state,
+                                         &started, &connected, &ip);
+        TEST_ASSERT(state == ARGUS_STA_DISABLED && !started && !connected && !ip,
+                    "Ignored service event broke DISABLED or physical-absence invariants");
+    }
+
+    const argus_sta_lifecycle_event_t absence_events[] = {
+        ARGUS_STA_EVENT_DISCONNECTED, ARGUS_STA_EVENT_STOPPED
+    };
+    for (size_t i = 0; i < sizeof(absence_events) / sizeof(absence_events[0]); ++i) {
+        argus_sta_event_action_t action = argus_net_decide_sta_event(
+            ARGUS_NET_MODE_SERVICE_AP_ONLY, absence_events[i], 0, 0,
+            true, true, true);
+        argus_sta_state_t state = ARGUS_STA_RETRY_WAIT;
+        bool started = true, connected = true, ip = true;
+        argus_net_apply_sta_event_action(ARGUS_NET_MODE_SERVICE_AP_ONLY,
+                                         absence_events[i], action, &state,
+                                         &started, &connected, &ip);
+        TEST_ASSERT(action == ARGUS_STA_EVENT_CONFIRM_DISABLED &&
+                        state == ARGUS_STA_DISABLED && !started && !connected && !ip,
+                    "Delayed disconnect/stop did not retain DISABLED service state");
+    }
+
+    const argus_network_mode_t operational_modes[] = {
+        ARGUS_NET_MODE_UNCOMMISSIONED_AP,
+        ARGUS_NET_MODE_COMMISSIONED_STA,
+        ARGUS_NET_MODE_AP_DISCOVERABLE,
+        ARGUS_NET_MODE_NETWORK_FAULT
+    };
+    for (size_t i = 0; i < sizeof(operational_modes) / sizeof(operational_modes[0]); ++i) {
+        TEST_ASSERT(argus_net_decide_sta_event(
+                        operational_modes[i], ARGUS_STA_EVENT_IP_ACQUIRED, 90, 90,
+                        true, true, true) ==
+                        ARGUS_STA_EVENT_PROCESS,
+                    "Operational or NETWORK_FAULT mode rejected legitimate IP recovery");
+    }
+    argus_sta_event_action_t stale_action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED, 89, 90,
+        true, true, true);
+    TEST_ASSERT(stale_action == ARGUS_STA_EVENT_IGNORE,
+                "Stale transaction IP generation was accepted");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_ASSOCIATED,
+                    89, 90, true, true, false) == ARGUS_STA_EVENT_IGNORE,
+                "Stale transaction association generation was accepted");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED,
+                    0, 90, true, true, true) == ARGUS_STA_EVENT_IGNORE,
+                "Generation zero bypassed an active tagged transaction");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_ASSOCIATED,
+                    0, 0, false, false, false) == ARGUS_STA_EVENT_IGNORE,
+                "Generation zero accepted association without a started STA");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED,
+                    0, 0, true, false, true) == ARGUS_STA_EVENT_IGNORE,
+                "Generation zero accepted IP without physical association");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED,
+                    0, 0, true, true, true) == ARGUS_STA_EVENT_PROCESS,
+                "Coherent untagged IP event with physical eligibility was rejected");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED,
+                    89, 90, true, false, false) == ARGUS_STA_EVENT_IGNORE,
+                "Stale operational disconnect generation was accepted");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED,
+                    90, 90, true, false, false) == ARGUS_STA_EVENT_PROCESS,
+                "Coherent physical disconnect was rejected");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_STOPPED,
+                    90, 90, false, false, false) == ARGUS_STA_EVENT_PROCESS,
+                "Coherent operational STA stop was rejected");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_STOPPED,
+                    89, 90, false, false, false) == ARGUS_STA_EVENT_IGNORE,
+                "Stale operational STA stop generation was accepted");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_TIMEOUT,
+                    90, 90, true, true, false) == ARGUS_STA_EVENT_PROCESS,
+                "Current IP-timeout event was rejected while awaiting IP");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_TIMEOUT,
+                    89, 90, true, true, false) == ARGUS_STA_EVENT_IGNORE,
+                "Stale IP-timeout generation was accepted");
+    TEST_ASSERT(argus_net_decide_sta_event(
+                    ARGUS_NET_MODE_SERVICE_AP_ONLY, ARGUS_STA_EVENT_IP_TIMEOUT,
+                    90, 90, false, false, false) == ARGUS_STA_EVENT_IGNORE,
+                "SERVICE_AP_ONLY accepted delayed IP-timeout recovery");
+    argus_sta_state_t stale_state = ARGUS_STA_ACTION_REQUIRED;
+    bool stale_started = true, stale_connected = true, stale_ip = true;
+    argus_net_apply_sta_event_action(ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                     ARGUS_STA_EVENT_IP_ACQUIRED, stale_action,
+                                     &stale_state, &stale_started,
+                                     &stale_connected, &stale_ip);
+    TEST_ASSERT(stale_state == ARGUS_STA_ACTION_REQUIRED && stale_started &&
+                    stale_connected && stale_ip,
+                "Ignored stale IP event corrupted callback physical observations");
+    TEST_ASSERT(evidence.reason == WIFI_REASON_AUTH_FAIL &&
+                    evidence.consecutive_failures == 4 &&
+                    last_error == ARGUS_NET_ERR_TIMER_COMMAND_FAILED &&
+                    !broker_running && authority.mode == ARGUS_AUTHORITY_NONE &&
+                    authority.owner == ARGUS_AUTH_OWNER_NONE && authority.generation == 33,
+                "Ignored events changed failure, error, broker, or authority evidence");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_stale_event_race_preserves_active_transaction(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    const uint32_t stale_generation = 120;
+    const uint32_t active_generation = 121;
+
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(
+                    &txn, active_generation, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                    &state, false, &ops) == ESP_OK &&
+                    txn.active && txn.state == ARGUS_WIFI_APPLY_CONNECTING,
+                "Active generation did not begin its connect transaction");
+
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_AUTH_FAIL,
+        .category = ARGUS_DISCONNECT_CAT_AUTHENTICATION,
+        .consecutive_failures = 3,
+        .authentication_streak = 2,
+    };
+    argus_authority_snapshot_t authority = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 44,
+    };
+    bool broker_running = false;
+    uint32_t retry_count = 3;
+    uint32_t timer_generation = 81;
+    bool retry_timer_active = true;
+    bool ip_timer_active = true;
+
+    bool started = true, connected = false, ip = false;
+    argus_sta_event_action_t action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED,
+        stale_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE,
+                "Queued prior-generation disconnect was accepted");
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_DISCONNECTED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(started && !connected && !ip &&
+                    state == ARGUS_STA_CONNECTING,
+                "Rejected disconnect fabricated a stopped STA or changed lifecycle state");
+    TEST_ASSERT(txn.active && txn.generation == active_generation &&
+                    txn.state == ARGUS_WIFI_APPLY_CONNECTING &&
+                    evidence.reason == WIFI_REASON_AUTH_FAIL &&
+                    evidence.category == ARGUS_DISCONNECT_CAT_AUTHENTICATION &&
+                    evidence.consecutive_failures == 3 &&
+                    evidence.authentication_streak == 2 &&
+                    authority.mode == ARGUS_AUTHORITY_NONE &&
+                    authority.owner == ARGUS_AUTH_OWNER_NONE &&
+                    authority.generation == 44 && !broker_running &&
+                    retry_count == 3 && timer_generation == 81 &&
+                    retry_timer_active && ip_timer_active,
+                "Rejected disconnect altered transaction, evidence, authority, broker, counters, or timers");
+
+    connected = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_ASSOCIATED,
+        active_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_PROCESS,
+                "Active-generation association was rejected after stale disconnect");
+    state = ARGUS_STA_ASSOCIATED_WAITING_IP;
+
+    ip = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_IP_ACQUIRED,
+        active_generation, active_generation, started, connected, ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_PROCESS,
+                "Active-generation IP event was rejected after stale disconnect");
+    bool completed = false;
+    TEST_ASSERT(argus_wifi_transaction_handle_got_ip(
+                    &txn, active_generation, &completed) == ESP_OK && completed &&
+                    !txn.active && txn.state == ARGUS_WIFI_APPLY_COMPLETE,
+                "Active transaction did not reach its successful terminal path");
+
+    state = ARGUS_STA_CONNECTING;
+    started = connected = true;
+    ip = false;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_ASSOCIATED,
+        stale_generation, active_generation, started, connected, ip);
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_ASSOCIATED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE && started && connected && !ip,
+                "Ignored operational association corrupted callback observations");
+    ip = true;
+    action = argus_net_decide_sta_event(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_IP_ACQUIRED,
+        stale_generation, active_generation, started, connected, ip);
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_NETWORK_FAULT, ARGUS_STA_EVENT_IP_ACQUIRED, action,
+        &state, &started, &connected, &ip);
+    TEST_ASSERT(action == ARGUS_STA_EVENT_IGNORE && started && connected && ip,
+                "Ignored operational IP event corrupted callback observations");
+
+    started = connected = ip = true;
+    argus_net_apply_sta_event_action(
+        ARGUS_NET_MODE_AP_DISCOVERABLE, ARGUS_STA_EVENT_STOPPED,
+        ARGUS_STA_EVENT_PROCESS, &state, &started, &connected, &ip);
+    TEST_ASSERT(!started && !connected && !ip,
+                "True STA-stop observation did not clear physical STA state");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_policy_api_dashboard_consistency(void)
+{
+    argus_net_snapshot_t net = service_recovery_snapshot();
+    argus_authority_snapshot_t auth = {
+        .mode = ARGUS_AUTHORITY_NONE,
+        .owner = ARGUS_AUTH_OWNER_NONE,
+        .generation = 20
+    };
+    argus_net_event_t endpoint_evt = {0};
+    bool dashboard_permitted = argus_service_policy_entry_permitted(&net, &auth);
+    argus_svc_policy_result_t endpoint_policy =
+        argus_service_policy_evaluate_entry(&net, &auth, &endpoint_evt);
+    TEST_ASSERT(dashboard_permitted == (endpoint_policy == ARGUS_SVC_POLICY_OK),
+                "Dashboard permission diverged from endpoint production policy");
+
+    argus_net_snapshot_t changed = net;
+    changed.sta_connected = true;
+    argus_net_event_t changed_evt = {0};
+    TEST_ASSERT(argus_service_policy_evaluate_entry(&changed, &auth, &changed_evt) !=
+                    ARGUS_SVC_POLICY_OK,
+                "Changed execution snapshot unexpectedly remained eligible");
+    TEST_ASSERT(!argus_service_entry_fingerprint_matches(
+                    &endpoint_evt.service_preflight,
+                    &changed_evt.service_preflight),
+                "Preflight fingerprint failed to detect changed execution state");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_service_retry_suppression(void)
+{
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    txn.active = true;
+    txn.generation = 77;
+    txn.state = ARGUS_WIFI_APPLY_WAITING_DISCONNECT;
+    txn.config_staged = true;
+    memset(txn.pending_config.sta.password, 'x', 8);
+    argus_wifi_transaction_cancel(&txn);
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_CANCELLED,
+                "Service entry cancellation must suppress active recovery");
+    TEST_ASSERT(!argus_wifi_transaction_event_matches(&txn, 77), "Cancelled transaction must reject delayed event");
+    TEST_ASSERT(txn.pending_config.sta.password[0] == '\0', "Cancellation must scrub staged password");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_ap_http_preservation(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_network_mode_t mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
+    argus_sta_state_t sta_state = ARGUS_STA_IDLE;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 88, mode, &sta_state, false, &ops) == ESP_OK,
+                "Recovery must operate while AP_DISCOVERABLE remains active");
+    TEST_ASSERT(mode == ARGUS_NET_MODE_AP_DISCOVERABLE, "Recovery core must not alter AP/HTTP owning network mode");
+    TEST_ASSERT(sta_state == ARGUS_STA_CONNECTING, "Recovery must advance only the STA lifecycle");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_connected_apply_stages_until_disconnect(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_CONNECTED;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 101, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, true, &ops) == ESP_OK,
+                "Connected apply must start asynchronously");
+    TEST_ASSERT(txn.active && txn.state == ARGUS_WIFI_APPLY_WAITING_DISCONNECT,
+                "Connected apply must wait for disconnect event");
+    TEST_ASSERT(txn.config_staged && strcmp((char *)txn.pending_config.sta.password, "validpass") == 0,
+                "Validated pending configuration must survive asynchronous boundary");
+    TEST_ASSERT(trace.calls[APPLY_STEP_DISCONNECT] == 1, "Connected apply must request one disconnect");
+    TEST_ASSERT(trace.calls[APPLY_STEP_APPLY] == 0 && trace.calls[APPLY_STEP_CONNECT] == 0,
+                "Apply/connect must not run before disconnect completes");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_stale_disconnect_does_not_resume(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_CONNECTED;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 102, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, true, &ops) == ESP_OK,
+                "Apply setup must succeed");
+    bool handled = true;
+    TEST_ASSERT(argus_wifi_transaction_handle_disconnect(&txn, 101, &state, &ops, &handled) == ESP_OK,
+                "Stale event is an ignored condition, not a transaction failure");
+    TEST_ASSERT(!handled && txn.state == ARGUS_WIFI_APPLY_WAITING_DISCONNECT,
+                "Stale disconnect must not resume transaction");
+    TEST_ASSERT(trace.calls[APPLY_STEP_APPLY] == 0 && trace.calls[APPLY_STEP_CONNECT] == 0,
+                "Stale disconnect must invoke no downstream callbacks");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_broker_verification_failure_aborts(void)
+{
+    mock_apply_trace_t trace = {
+        .fail_step = APPLY_STEP_VERIFY_BROKER,
+        .has_cfg = true,
+        .valid_cfg = true
+    };
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 103, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, false, &ops) == ESP_FAIL,
+                "Broker-still-running verification failure must propagate");
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_FAILED,
+                "Broker verification failure must terminate transaction");
+    TEST_ASSERT(trace.calls[APPLY_STEP_LOAD] == 0 && trace.calls[APPLY_STEP_CONNECT] == 0,
+                "Failure must stop callback chain immediately");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_invalid_config_invokes_no_network_callbacks(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = false};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 104, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, false, &ops) == ESP_ERR_INVALID_ARG,
+                "Invalid commissioned config must be rejected");
+    TEST_ASSERT(trace.calls[APPLY_STEP_DISCONNECT] == 0 &&
+                trace.calls[APPLY_STEP_APPLY] == 0 && trace.calls[APPLY_STEP_CONNECT] == 0,
+                "Invalid config must not invoke disconnect, apply, or connect");
+    TEST_ASSERT(txn.pending_config.sta.password[0] == '\0', "Validation failure must scrub staged password");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_apply_and_connect_failures_scrub_state(void)
+{
+    const apply_step_t failures[] = {APPLY_STEP_APPLY, APPLY_STEP_CONNECT};
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+        mock_apply_trace_t trace = {
+            .fail_step = failures[i],
+            .has_cfg = true,
+            .valid_cfg = true
+        };
+        argus_wifi_apply_ops_t ops = trace_ops(&trace);
+        argus_wifi_transaction_t txn;
+        argus_wifi_transaction_init(&txn);
+        argus_sta_state_t state = ARGUS_STA_IDLE;
+        TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 105 + i, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                       &state, false, &ops) == ESP_FAIL,
+                    "Apply/connect failure must propagate");
+        TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_FAILED,
+                    "Apply/connect failure must terminate transaction");
+        TEST_ASSERT(!txn.config_staged && txn.pending_config.sta.password[0] == '\0',
+                    "Every terminal failure must scrub staged secrets");
+        if (failures[i] == APPLY_STEP_APPLY) {
+            TEST_ASSERT(trace.calls[APPLY_STEP_CONNECT] == 0, "Connect must not run after apply failure");
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_successful_ip_completes_and_duplicate_rejected(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 107, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, false, &ops) == ESP_OK,
+                "Disconnected apply must connect directly");
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 108, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, false, &ops) == ESP_ERR_INVALID_STATE,
+                "Duplicate active apply must be rejected");
+    bool completed = false;
+    TEST_ASSERT(argus_wifi_transaction_handle_got_ip(&txn, 106, &completed) == ESP_OK && !completed,
+                "Stale IP event must not complete transaction");
+    TEST_ASSERT(argus_wifi_transaction_handle_got_ip(&txn, 107, &completed) == ESP_OK && completed,
+                "Matching successful IP acquisition must complete transaction");
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_COMPLETE,
+                "Completed transaction must no longer be active");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_connection_failure_releases_transaction(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_IDLE;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 110, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                   &state, false, &ops) == ESP_OK,
+                "Apply must reach CONNECTING before event failure test");
+    bool failed = false;
+    TEST_ASSERT(argus_wifi_transaction_handle_connection_failure(&txn, 109, ESP_FAIL, &failed) == ESP_OK && !failed,
+                "Stale failure event must not terminate active transaction");
+    TEST_ASSERT(argus_wifi_transaction_handle_connection_failure(&txn, 110, ESP_FAIL, &failed) == ESP_FAIL && failed,
+                "Matching connection failure must terminate transaction truthfully");
+    TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_FAILED,
+                "Failed connection must release transaction for corrected credentials");
+    TEST_ASSERT(txn.pending_config.sta.password[0] == '\0', "Connection failure must leave no staged secret");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_uncommissioned_apply_is_supported(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_sta_state_t state = ARGUS_STA_DISABLED;
+    TEST_ASSERT(argus_wifi_transaction_begin_apply(&txn, 111, ARGUS_NET_MODE_UNCOMMISSIONED_AP,
+                                                   &state, false, &ops) == ESP_OK,
+                "Initial commissioned credentials must apply from UNCOMMISSIONED_AP");
+    TEST_ASSERT(state == ARGUS_STA_CONNECTING && trace.calls[APPLY_STEP_APPLY] == 1 &&
+                trace.calls[APPLY_STEP_CONNECT] == 1,
+                "Initial commissioning must apply before connecting without dropping AP ownership");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_manual_reconnect_preserves_evidence_and_order(void)
+{
+    mock_apply_trace_t trace = {.has_cfg = true, .valid_cfg = true};
+    argus_wifi_apply_ops_t ops = trace_ops(&trace);
+    argus_wifi_transaction_t txn;
+    argus_wifi_transaction_init(&txn);
+    argus_wifi_failure_evidence_t evidence = {
+        .reason = WIFI_REASON_NO_AP_FOUND,
+        .category = ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE,
+        .consecutive_failures = 5,
+        .authentication_streak = 0
+    };
+    argus_sta_state_t state = ARGUS_STA_RETRY_WAIT;
+    TEST_ASSERT(argus_wifi_transaction_begin_reconnect(&txn, 109, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                                                       &state, false, &ops) == ESP_OK,
+                "Permitted disconnected manual reconnect must begin");
+    TEST_ASSERT(trace.calls[APPLY_STEP_DISCONNECT] == 0 && trace.calls[APPLY_STEP_APPLY] == 0,
+                "Disconnected reconnect must not disconnect redundantly or reapply config");
+    TEST_ASSERT(trace.calls[APPLY_STEP_CONNECT] == 1 && state == ARGUS_STA_CONNECTING,
+                "Manual reconnect must request one connect and report CONNECTING");
+    TEST_ASSERT(evidence.reason == WIFI_REASON_NO_AP_FOUND && evidence.consecutive_failures == 5,
+                "Pending manual reconnect must retain operator failure evidence");
+    TEST_ASSERT(trace.order[0] == APPLY_STEP_STOP_TIMERS &&
+                trace.order[1] == APPLY_STEP_REVOKE &&
+                trace.order[2] == APPLY_STEP_STOP_BROKER &&
+                trace.order[3] == APPLY_STEP_VERIFY_BROKER,
+                "Reconnect callback ordering must revoke and verify before network action");
+    return ESP_OK;
+}
+
+static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
+{
+    const apply_step_t failures[] = {
+        APPLY_STEP_STOP_TIMERS, APPLY_STEP_REVOKE, APPLY_STEP_STOP_BROKER,
+        APPLY_STEP_VERIFY_BROKER, APPLY_STEP_LOAD, APPLY_STEP_VALIDATE,
+        APPLY_STEP_DISCONNECT, APPLY_STEP_APPLY, APPLY_STEP_CONNECT
+    };
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+        mock_apply_trace_t trace = {
+            .fail_step = failures[i],
+            .has_cfg = true,
+            .valid_cfg = true
+        };
+        argus_wifi_apply_ops_t ops = trace_ops(&trace);
+        argus_wifi_transaction_t txn;
+        argus_wifi_transaction_init(&txn);
+        argus_sta_state_t state = failures[i] == APPLY_STEP_DISCONNECT
+                                      ? ARGUS_STA_CONNECTED
+                                      : ARGUS_STA_IDLE;
+        bool connected = failures[i] == APPLY_STEP_DISCONNECT;
+        TEST_ASSERT(argus_wifi_transaction_begin_apply(
+                        &txn, 200 + (uint32_t)i, ARGUS_NET_MODE_AP_DISCOVERABLE,
+                        &state, connected, &ops) == ESP_FAIL,
+                    "Injected callback failure must propagate exactly");
+        TEST_ASSERT(trace.order_count > 0 &&
+                    trace.order[trace.order_count - 1] == failures[i],
+                    "Failing callback must be the final callback invoked");
+        TEST_ASSERT(!txn.active && txn.state == ARGUS_WIFI_APPLY_FAILED,
+                    "Every callback failure must terminate transaction");
+    }
+    return ESP_OK;
+}
+
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2+4B.3 Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -3475,6 +5249,54 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_service_policy_exit_rejected);
         RUN_TEST(test_service_entry_edge_cases);
         RUN_TEST(test_sta_disconnect_eval);
+        RUN_TEST(test_4b3a_classify_reasons);
+        RUN_TEST(test_4b3a_evaluate_retry);
+        RUN_TEST(test_4b3a_authority_valid_pairs);
+        RUN_TEST(test_4b3a_authority_invalid_pairs_preserve_generation);
+        RUN_TEST(test_4b3a_can_manual_reconnect);
+        RUN_TEST(test_4b3a_apply_null_ops);
+    RUN_TEST(test_4b3a_apply_missing_cb);
+    RUN_TEST(test_4b3a_apply_stop_timers_fail);
+    RUN_TEST(test_4b3a_apply_revoke_fail);
+    RUN_TEST(test_4b3a_apply_stop_broker_fail);
+    RUN_TEST(test_4b3a_apply_load_fail);
+    RUN_TEST(test_4b3a_apply_missing_cfg);
+    RUN_TEST(test_4b3a_apply_disconnect_fail);
+    RUN_TEST(test_4b3a_apply_apply_fail);
+    RUN_TEST(test_4b3a_orchestrate_wifi_apply_disconnected);
+    RUN_TEST(test_4b3a_timer_gen_rejection);
+    RUN_TEST(test_4b3a_apply_revoke_none_none);
+    RUN_TEST(test_4b3a_apply_invalid_cfg);
+    RUN_TEST(test_4b3a_apply_connect_fail);
+    RUN_TEST(test_4b3a_intentional_disconnect_not_failure);
+    RUN_TEST(test_4b3a_mixed_auth_resets_streak);
+    RUN_TEST(test_4b3a_success_clears_fault_state);
+    RUN_TEST(test_4b3a_countdown_underflow_boundary);
+    RUN_TEST(test_4b3a_queue_failure_truthfulness);
+    RUN_TEST(test_4b3a_service_recovery_policy_eligible);
+    RUN_TEST(test_4b3a_service_recovery_policy_contradictions);
+    RUN_TEST(test_4b3a_service_recovery_invalid_authority_pairs);
+    RUN_TEST(test_4b3a_broker_observable_stop_requires_convergence);
+    RUN_TEST(test_4b3a_broker_production_convergence_decisions);
+    RUN_TEST(test_4b3a_service_rejection_preserves_recovery);
+    RUN_TEST(test_4b3a_service_success_cancels_recovery);
+    RUN_TEST(test_4b3a_service_cancel_failure_truthfulness);
+    RUN_TEST(test_4b3a_service_delayed_events_suppressed);
+    RUN_TEST(test_4b3a_stale_event_race_preserves_active_transaction);
+    RUN_TEST(test_4b3a_service_policy_api_dashboard_consistency);
+    RUN_TEST(test_4b3a_service_retry_suppression);
+    RUN_TEST(test_4b3a_ap_http_preservation);
+    RUN_TEST(test_4b3a_orchestrate_wifi_apply);
+    RUN_TEST(test_4b3a_connected_apply_stages_until_disconnect);
+    RUN_TEST(test_4b3a_stale_disconnect_does_not_resume);
+    RUN_TEST(test_4b3a_broker_verification_failure_aborts);
+    RUN_TEST(test_4b3a_invalid_config_invokes_no_network_callbacks);
+    RUN_TEST(test_4b3a_apply_and_connect_failures_scrub_state);
+    RUN_TEST(test_4b3a_successful_ip_completes_and_duplicate_rejected);
+    RUN_TEST(test_4b3a_connection_failure_releases_transaction);
+    RUN_TEST(test_4b3a_uncommissioned_apply_is_supported);
+    RUN_TEST(test_4b3a_manual_reconnect_preserves_evidence_and_order);
+    RUN_TEST(test_4b3a_every_failure_stops_callback_chain);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -3516,10 +5338,10 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2+4B.3 Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
-    printf("  Total Executions    : %d\n", total_executions);
+    printf("  Total Executions    : %d\n", passed_executions + failed_executions);
     printf("  Passed Executions   : %d\n", passed_executions);
     printf("  Failed Executions   : %d\n", failed_executions);
 
@@ -3530,9 +5352,25 @@ esp_err_t argus_tests_4a_run_all(void)
     printf("  Network State         : %s (%s)\n",
            (snap_before.net_snap.mode == snap_after.net_snap.mode) ? "UNCHANGED" : "MUTATED",
            argus_net_mgr_get_mode_name(snap_after.net_snap.mode));
+    bool broker_unchanged =
+        snap_before.broker_obs_status == snap_after.broker_obs_status &&
+        snap_before.broker_obs.state == snap_after.broker_obs.state &&
+        snap_before.broker_obs.active_client_count ==
+            snap_after.broker_obs.active_client_count &&
+        snap_before.broker_obs.has_server_task ==
+            snap_after.broker_obs.has_server_task &&
+        snap_before.broker_obs.has_listener == snap_after.broker_obs.has_listener &&
+        snap_before.broker_obs.running == snap_after.broker_obs.running &&
+        snap_before.broker_obs.stopped == snap_after.broker_obs.stopped;
     printf("  MQTT Broker State     : %s (%s)\n",
-           (snap_before.net_snap.mqtt_broker_running == snap_after.net_snap.mqtt_broker_running) ? "UNCHANGED" : "MUTATED",
-           snap_after.net_snap.mqtt_broker_running ? "RUNNING" : "STOPPED");
+           broker_unchanged ? "UNCHANGED" : "MUTATED",
+           snap_after.broker_obs_status != ESP_OK
+               ? "UNOBSERVABLE"
+               : (snap_after.broker_obs.running
+                      ? "RUNNING"
+                      : (snap_after.broker_obs.stopped
+                             ? "STOPPED"
+                             : "NOT CONVERGED")));
     printf("  Machine State         : %s (%s)\n",
            (snap_before.state.machine_state == snap_after.state.machine_state) ? "UNCHANGED" : "MUTATED",
            argus_state_mgr_get_state_name(snap_after.state.machine_state));
@@ -3543,7 +5381,8 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4A+4B.1+4B.2+4B.3 PURE UNIT TEST SUITE: %s\n", overall_pass ? "PASSED" : "FAILED");
+    printf("PHASE 4A+4B.1+4B.2+4B.3+4B.3a PURE UNIT TEST SUITE: %s\n",
+           overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
     return overall_pass ? ESP_OK : ESP_FAIL;

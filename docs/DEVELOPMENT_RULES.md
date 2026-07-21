@@ -4,6 +4,10 @@ This document defines the development principles used throughout Argus projects.
 These rules exist to improve reliability, maintainability, portability, and long-term project success.
 When in doubt, follow these rules before introducing new complexity.
 
+## Phase Identity Establishment (Step 0)
+
+> Phase Identity Establishment is Step 0 of every new phase or subphase. Before functional implementation begins, update the project version, firmware identity, runtime phase labels, test-suite labels, and active evidence-document identifiers.
+
 ## Rule #1: Verify Before Concluding
 
 The most dangerous assumptions are subconscious assumptions.

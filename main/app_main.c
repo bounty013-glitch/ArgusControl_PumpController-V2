@@ -416,7 +416,17 @@ static void argus_phase4a_acceptance_menu(void)
                 printf("Wi-Fi Driver Mode   : %s\n", argus_net_mgr_get_wifi_driver_mode_name());
                 printf("STA Status          : %s\n", argus_net_mgr_is_sta_ip_acquired() ? "CONNECTED (IP Acquired)" : (argus_net_mgr_is_sta_connected() ? "ASSOCIATED" : "DISABLED"));
                 printf("Service AP Status   : %s\n", argus_net_mgr_is_ap_started() ? "ENABLED" : "DISABLED");
-                printf("MQTT Broker Status  : %s\n", argus_mqtt_broker_is_running() ? "READY" : "STOPPED");
+                argus_mqtt_broker_lifecycle_obs_t broker_obs = {0};
+                esp_err_t broker_obs_err =
+                    argus_mqtt_broker_get_lifecycle_obs(&broker_obs);
+                const char *broker_status = broker_obs_err != ESP_OK
+                                                ? "UNOBSERVABLE"
+                                                : (broker_obs.running
+                                                       ? "READY"
+                                                       : (broker_obs.stopped
+                                                              ? "STOPPED"
+                                                              : "NOT CONVERGED"));
+                printf("MQTT Broker Status  : %s\n", broker_status);
                 printf("Authority Mode      : %s (%d)\n", argus_authority_mgr_get_mode_name(auth_snap.mode), (int)auth_snap.mode);
                 printf("Authority Owner     : %s (%d)\n", argus_authority_mgr_get_owner_name(auth_snap.owner), (int)auth_snap.owner);
                 printf("Authority Generation: %lu\n", (unsigned long)auth_snap.generation);
@@ -859,7 +869,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4B.3)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4B.3a)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -917,5 +927,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4B.3 startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4B.3a startup completed successfully.");
 }

@@ -37,11 +37,42 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
  */
 bool argus_mqtt_broker_is_running(void);
 
+typedef enum {
+    BROKER_STATE_STOPPED = 0,
+    BROKER_STATE_STARTING,
+    BROKER_STATE_RUNNING,
+    BROKER_STATE_STOPPING
+} argus_broker_state_t;
+
 typedef struct {
-    int state;           // argus_broker_state_t cast to int
+    argus_broker_state_t state;
     int32_t active_client_count;
     bool has_server_task;
     bool has_listener;
+    bool running;
+    bool stopped;
 } argus_mqtt_broker_lifecycle_obs_t;
 
+typedef esp_err_t (*argus_mqtt_broker_observe_fn_t)(
+    void *ctx, argus_mqtt_broker_lifecycle_obs_t *out);
+typedef esp_err_t (*argus_mqtt_broker_stop_fn_t)(void *ctx);
+typedef void (*argus_mqtt_broker_wait_fn_t)(void *ctx, uint32_t delay_ms);
+
+typedef struct {
+    argus_mqtt_broker_observe_fn_t observe;
+    argus_mqtt_broker_stop_fn_t stop;
+    argus_mqtt_broker_wait_fn_t wait;
+    void *ctx;
+} argus_mqtt_broker_convergence_ops_t;
+
+bool argus_mqtt_broker_observation_is_stopped(
+    const argus_mqtt_broker_lifecycle_obs_t *obs);
+bool argus_mqtt_broker_observation_is_running(
+    const argus_mqtt_broker_lifecycle_obs_t *obs);
 esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t *out);
+esp_err_t argus_mqtt_broker_request_stop_converged(
+    const argus_mqtt_broker_convergence_ops_t *ops);
+esp_err_t argus_mqtt_broker_verify_stopped_converged(
+    const argus_mqtt_broker_convergence_ops_t *ops,
+    uint32_t observation_attempts,
+    uint32_t delay_ms);

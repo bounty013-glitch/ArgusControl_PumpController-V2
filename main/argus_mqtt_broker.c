@@ -36,13 +36,6 @@ static const char *TAG = "argus_mqtt_broker";
 /* ---------------------------------------------------------------------------
  * Broker state machine
  * -----------------------------------------------------------------------*/
-typedef enum {
-    BROKER_STATE_STOPPED = 0,
-    BROKER_STATE_STARTING,
-    BROKER_STATE_RUNNING,
-    BROKER_STATE_STOPPING,
-} argus_broker_state_t;
-
 typedef struct {
     bool in_use;
     int sock;
@@ -917,13 +910,8 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
 
 bool argus_mqtt_broker_is_running(void)
 {
-    if (s_broker.lifecycle_mutex == NULL) {
-        return false;
-    }
-    xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-    bool running = (s_broker.state == BROKER_STATE_RUNNING);
-    xSemaphoreGive(s_broker.lifecycle_mutex);
-    return running;
+    argus_mqtt_broker_lifecycle_obs_t obs = {0};
+    return argus_mqtt_broker_get_lifecycle_obs(&obs) == ESP_OK && obs.running;
 }
 
 esp_err_t argus_mqtt_broker_stop(void)
@@ -933,7 +921,13 @@ esp_err_t argus_mqtt_broker_stop(void)
 
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
 
-    if (s_broker.state == BROKER_STATE_STOPPED) {
+    argus_mqtt_broker_lifecycle_obs_t initial = {
+        .state = s_broker.state,
+        .active_client_count = atomic_load(&s_broker.active_client_count),
+        .has_server_task = s_broker.server_task_handle != NULL,
+        .has_listener = s_broker.listen_sock >= 0,
+    };
+    if (argus_mqtt_broker_observation_is_stopped(&initial)) {
         xSemaphoreGive(s_broker.lifecycle_mutex);
         return ESP_OK;
     }
@@ -942,6 +936,7 @@ esp_err_t argus_mqtt_broker_stop(void)
     xEventGroupClearBits(s_broker.lifecycle_event_group, BROKER_EVT_STARTED | BROKER_EVT_STOPPED | BROKER_EVT_CLIENTS_EXITED);
 
     s_broker.state = BROKER_STATE_STOPPING;
+    bool wait_for_server_task = s_broker.server_task_handle != NULL;
 
     /* Close the listener socket to break accept(). */
     if (s_broker.listen_sock >= 0) {
@@ -964,17 +959,17 @@ esp_err_t argus_mqtt_broker_stop(void)
     xSemaphoreGive(s_broker.client_lock);
 
     /* --- Wait for the server task to exit (bounded 2 s) ---------------- */
-    EventBits_t bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
-                                           BROKER_EVT_STOPPED,
-                                           pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(2000));
+    EventBits_t bits = 0;
+    if (wait_for_server_task) {
+        bits = xEventGroupWaitBits(s_broker.lifecycle_event_group,
+                                   BROKER_EVT_STOPPED,
+                                   pdFALSE, pdFALSE,
+                                   pdMS_TO_TICKS(2000));
 
-    if (!(bits & BROKER_EVT_STOPPED)) {
-        ESP_LOGW(TAG, "server task did not exit within 2000 ms");
-        xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-        /* Remain in STOPPING -- do not force to STOPPED. */
-        xSemaphoreGive(s_broker.lifecycle_mutex);
-        return ESP_ERR_TIMEOUT;
+        if (!(bits & BROKER_EVT_STOPPED)) {
+            ESP_LOGW(TAG, "server task did not exit within 2000 ms");
+            return ESP_ERR_TIMEOUT;
+        }
     }
 
     /* --- Wait for all client tasks to drain (bounded 2 s) -------------- */
@@ -991,10 +986,20 @@ esp_err_t argus_mqtt_broker_stop(void)
         }
     }
 
-    /* All tasks have exited. Transition to STOPPED. */
+    /* Publish STOPPED only after every lifecycle resource has converged. */
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-    s_broker.state = BROKER_STATE_STOPPED;
+    bool resources_absent = s_broker.server_task_handle == NULL &&
+                            s_broker.listen_sock < 0 &&
+                            atomic_load(&s_broker.active_client_count) == 0;
+    if (resources_absent) {
+        s_broker.state = BROKER_STATE_STOPPED;
+    }
     xSemaphoreGive(s_broker.lifecycle_mutex);
+
+    if (!resources_absent) {
+        ESP_LOGW(TAG, "broker stop did not reach full lifecycle convergence");
+        return ESP_ERR_TIMEOUT;
+    }
 
     ESP_LOGI(TAG, "local MQTT broker stopped cleanly");
     return ESP_OK;
@@ -1009,10 +1014,70 @@ esp_err_t argus_mqtt_broker_get_lifecycle_obs(argus_mqtt_broker_lifecycle_obs_t 
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
-    out->state = (int)s_broker.state;
+    out->state = s_broker.state;
     out->active_client_count = atomic_load(&s_broker.active_client_count);
     out->has_server_task = (s_broker.server_task_handle != NULL);
     out->has_listener = (s_broker.listen_sock >= 0);
+    out->running = argus_mqtt_broker_observation_is_running(out);
+    out->stopped = argus_mqtt_broker_observation_is_stopped(out);
     xSemaphoreGive(s_broker.lifecycle_mutex);
     return ESP_OK;
+}
+
+bool argus_mqtt_broker_observation_is_stopped(
+    const argus_mqtt_broker_lifecycle_obs_t *obs)
+{
+    return obs && obs->state == BROKER_STATE_STOPPED &&
+           !obs->has_server_task && !obs->has_listener &&
+           obs->active_client_count == 0;
+}
+
+bool argus_mqtt_broker_observation_is_running(
+    const argus_mqtt_broker_lifecycle_obs_t *obs)
+{
+    return obs && obs->state == BROKER_STATE_RUNNING &&
+           obs->has_server_task && obs->has_listener;
+}
+
+esp_err_t argus_mqtt_broker_request_stop_converged(
+    const argus_mqtt_broker_convergence_ops_t *ops)
+{
+    if (!ops || !ops->observe || !ops->stop) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    argus_mqtt_broker_lifecycle_obs_t obs = {0};
+    esp_err_t err = ops->observe(ops->ctx, &obs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (argus_mqtt_broker_observation_is_stopped(&obs)) {
+        return ESP_OK;
+    }
+    return ops->stop(ops->ctx);
+}
+
+esp_err_t argus_mqtt_broker_verify_stopped_converged(
+    const argus_mqtt_broker_convergence_ops_t *ops,
+    uint32_t observation_attempts,
+    uint32_t delay_ms)
+{
+    if (!ops || !ops->observe || observation_attempts == 0 ||
+        (observation_attempts > 1 && delay_ms > 0 && !ops->wait)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (uint32_t attempt = 0; attempt < observation_attempts; ++attempt) {
+        argus_mqtt_broker_lifecycle_obs_t obs = {0};
+        esp_err_t err = ops->observe(ops->ctx, &obs);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (argus_mqtt_broker_observation_is_stopped(&obs)) {
+            return ESP_OK;
+        }
+        if (attempt + 1 < observation_attempts && delay_ms > 0) {
+            ops->wait(ops->ctx, delay_ms);
+        }
+    }
+    return ESP_ERR_TIMEOUT;
 }

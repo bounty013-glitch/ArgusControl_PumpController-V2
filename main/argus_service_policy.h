@@ -7,14 +7,6 @@
 extern "C" {
 #endif
 
-typedef enum {
-    ARGUS_SVC_POLICY_OK = 0,
-    ARGUS_SVC_POLICY_IDEMPOTENT,
-    ARGUS_SVC_POLICY_REJECT_MODE,
-    ARGUS_SVC_POLICY_REJECT_AUTHORITY,
-    ARGUS_SVC_POLICY_TRANSITION_IN_PROGRESS
-} argus_svc_policy_result_t;
-
 /**
  * @brief Policy seam for HTTP /api/service/enter requests
  *
@@ -26,6 +18,23 @@ argus_svc_policy_result_t argus_service_policy_evaluate_entry(
     const argus_net_snapshot_t *net,
     const argus_authority_snapshot_t *auth,
     argus_net_event_t *out_evt
+);
+
+argus_svc_policy_result_t argus_service_policy_evaluate_entry_for_owner(
+    const argus_net_snapshot_t *net,
+    const argus_authority_snapshot_t *auth,
+    argus_authority_owner_t requested_owner,
+    argus_net_event_t *out_evt
+);
+
+bool argus_service_entry_fingerprint_matches(
+    const argus_service_entry_fingerprint_t *expected,
+    const argus_service_entry_fingerprint_t *actual
+);
+
+bool argus_service_policy_entry_permitted(
+    const argus_net_snapshot_t *net,
+    const argus_authority_snapshot_t *auth
 );
 
 /**

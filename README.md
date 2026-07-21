@@ -4,7 +4,7 @@ Argus V2 Peristaltic Pump Controller firmware for ESP32-S3.
 
 This repository implements the V2 architecture for precision motor control, featuring exact fixed-point Bresenham GPTimer pulse generation, a 20 ms linear trajectory profile engine, verified common-anode active-low hardware integration, an embedded local MQTT broker, and open-loop safety doctrine.
 
-**Current Status**: Phase 4A COMPLETE WITHIN REVISED SCOPE. Phase 4B (Browser Portal) PLANNING.
+**Current Status**: Phase 4B.1 through Phase 4B.3, including the Phase 4B.3a Wi-Fi observability and recovery close-out, are complete and physically accepted. Phase 4B.4 browser-local motion command API is next and has not begun functional implementation.
 
 ---
 
@@ -54,7 +54,7 @@ An interactive serial CLI menu (`app_main.c`) provides comprehensive hardware di
 *   `[s]`: Normal soft-stop (ramps applied speed to 0, retains holding torque).
 *   `[u]`: Unlock driver (halts pulses, drives ENA HIGH to release shaft).
 *   `[r]`: Diagnostic Recovery (halts pulses, forces STEP inactive, drives ENA HIGH, waits 500 ms, leaves unlocked without requiring MCU reboot).
-*   `[t]`: Run pure unit test suite (Phase 3B + Phase 4A, 18 distinct tests × 3 passes).
+*   `[t]`: Manually run the complete pure non-motion suite. The suite derives and reports its registration/execution counts at runtime; compilation is not test-pass evidence.
 *   `[N]`: Phase 4A Network & Authority acceptance submenu.
 
 ---
@@ -80,8 +80,8 @@ The control node hosts a local MQTT broker listening on port `1883` on both its 
 Built with ESP-IDF `v5.5.3` for ESP32-S3:
 
 ```powershell
-# Activate ESP-IDF environment
-. C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1
+# Activate the verified ESP-IDF environment
+. C:\esp\v5.5.3\esp-idf\export.ps1
 
 # Build the project
 idf.py build

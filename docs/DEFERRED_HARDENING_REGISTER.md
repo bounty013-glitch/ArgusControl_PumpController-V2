@@ -266,28 +266,48 @@
 
 ---
 
-## DHR-014 — Deferred Wi-Fi Connection Observability and Manual Reconnection
+## DHR-014 — Wi-Fi Connection Observability and Manual Reconnection
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-20 |
 | **System Area** | Network Manager / API |
-| **Phase Introduced** | Phase 4B.3a (Reverted) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Target Phase | Phase 4B.3a |
+| **Phase Introduced** | Phase 4B.3a (initial pass reverted; corrected implementation accepted) |
+| **Status** | CLOSED - COMPLETE AND PHYSICALLY ACCEPTED JULY 21, 2026 |
+| **Target Phase** | Phase 4B.3a |
 | **Operator Decision** | 2026-07-20 |
 
-**Limitation:** The device currently connects to Wi-Fi automatically. If the connection drops or fails due to an authentication error, there is no operator visibility into the failure reason (e.g., bad password, AP out of range), no classification of error types, no bounded retry logic preventing infinite loops on authentication failure, and no HTTP API for the operator to manually request a connection retry without a system restart.
+**Original limitation:** The device connected to Wi-Fi automatically without operator-visible failure classification, bounded authentication retry, or a manual recovery API.
 
-**Rationale:** The Phase 4B.3a implementation introduced `argus_sta_state_t` classification, bounded retries with timer-based backoffs, and a `/api/network/reconnect` endpoint. This feature was deferred (reverted) to maintain the purity and focus of the Phase 4B.3 acceptance sequence, which primarily targeted Identity Provisioning and NVS Driver Seam corrections.
+**Correction history:** An initial Phase 4B.3a implementation was reverted to protect the Phase 4B.3 acceptance baseline. The feature was then reintroduced on `phase4b3a-wifi-observability`. Independent reviews found undefined dashboard fields, invalid embedded JavaScript, a synchronous disconnect/connect race, no preserved pending apply transaction, invalid authority pairs, placeholder tests, production-singleton mutation by a pure test, contradictory test-count evidence, stale build provenance, and premature readiness language. The current closure retains that history and does not imply first-pass correctness.
 
-**Deferred items:**
-- Network failure classification and translation (`wifi_event_sta_disconnected_t` reasons to operator-friendly strings)
-- Bounded connection retry logic with backoff timers
-- Status portal telemetry indicating the exact Wi-Fi state and operator guidance
-- `POST /api/network/reconnect` API endpoint to force a manual connection attempt
+**Implemented on the feature branch:**
+- Raw disconnect classification and operator-facing telemetry
+- Bounded authentication retry and generation-checked timers
+- Nonblocking generation-tagged configuration-apply/manual-reconnect transaction
+- `POST /api/network/reconnect`
+- Failure-evidence preservation until successful IP acquisition
+- Pure authority-pair validation and isolated transaction tests
 
-**Decision criteria:** This feature should be re-introduced as a distinct, focused micro-phase (e.g., Phase 4B.4) to finalize the robustness and operator experience of the Wi-Fi connection lifecycle.
+**Final acceptance:** Independent source review and the physical checklist were completed. Two hardware executions of diagnostic `t` each produced 142 distinct tests repeated three times, 426 passed, and 0 failed. Physical Tests 1-10 passed. Runtime acceptance applies to firmware commit `87eff30f36c9d264351ee939ff4061116c0dd128`; screenshot commit `62674ad26312cab040cbe6f72661b7d6f1593db5` is evidence-only; accepted feature-branch record head `4766d96d3845483828dfbfc1aa83eb77a72dd52e` contains the reviewed record. The Test 3 wording difference was non-blocking and remained truthful, understandable, and actionable.
+
+---
+
+## DHR-015 — Flat JSON Parser Scope and Ambiguity Hardening
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-20 |
+| **System Area** | HTTP Configuration API / JSON Parser |
+| **Phase Introduced** | Phase 4B.3a closure review |
+| **Status** | DEFERRED |
+| **Target Phase** | Before API schema expansion or untrusted-network exposure |
+
+**Current scope:** `argus_json` is a bounded flat-object extractor used with request-size limits and a small accepted configuration schema. Nested objects and arrays are unsupported by design.
+
+**Deferred hardening:** Define and enforce a duplicate-key policy, reject or correctly disambiguate escaped key-like text inside string values, make unsupported nested structures fail explicitly, and migrate to a strict parser if the API expands beyond the current flat schema.
+
+**Acceptance boundary:** This closure does not replace the parser because no current schema correctness failure was established. Existing request-size limits, field bounds, content-type checks, and accepted flat schema remain required controls.
 
 ## Register Maintenance
 

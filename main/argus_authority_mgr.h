@@ -71,6 +71,13 @@ esp_err_t argus_authority_mgr_get_snapshot(argus_authority_snapshot_t *out_snap)
 esp_err_t argus_authority_mgr_set_mode(argus_control_authority_t new_mode, argus_authority_owner_t new_owner);
 
 /**
+ * @brief Validate an authority mode/owner pair without touching production state.
+ * @return ESP_OK for an established valid pair, ESP_ERR_INVALID_ARG otherwise.
+ */
+esp_err_t argus_authority_validate_pair(argus_control_authority_t mode,
+                                        argus_authority_owner_t owner);
+
+/**
  * @brief Finalize grant of LOCAL_SERVICE authority to requested owner (state-only).
  *
  * Updates authority mode to LOCAL_SERVICE under s_auth_mutex.

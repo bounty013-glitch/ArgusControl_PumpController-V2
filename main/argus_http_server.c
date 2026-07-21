@@ -37,7 +37,9 @@
  * 6. SECURITY BASELINE
  *    - No permissive CORS (no Access-Control-Allow-Origin header).
  *    - Cache-Control: no-store on all API responses.
- *    - Only GET methods accepted (405 for others).
+ *    - Registered GET endpoints are read-only; state-changing operations use
+ *      explicitly registered, authenticated POST handlers with method and
+ *      content-type enforcement. Unregistered methods are rejected.
  *    - Content-Type: application/json on all API responses.
  *    - No Internet/CDN dependency — all assets embedded.
  *
@@ -370,20 +372,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     argus_state_snapshot_t state_snap;
     argus_state_mgr_get_snapshot(&state_snap);
 
-    argus_authority_snapshot_t auth_snap;
-    esp_err_t auth_err = argus_authority_mgr_get_snapshot(&auth_snap);
-    if (auth_err != ESP_OK) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"authority snapshot failed\"}");
-        return ESP_OK;
-    }
-
-    /* Coherent network snapshot — takes s_net_mutex (safe: see doc block 4) */
     argus_net_snapshot_t net_snap;
-    esp_err_t net_err = argus_net_mgr_get_snapshot(&net_snap);
-    if (net_err != ESP_OK) {
+    argus_authority_snapshot_t auth_snap;
+    argus_net_event_t service_evt = {0};
+    argus_svc_policy_result_t service_policy;
+    if (argus_net_mgr_evaluate_service_entry(
+            ARGUS_AUTH_OWNER_BROWSER, &net_snap, &auth_snap,
+            &service_evt, &service_policy) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"network snapshot failed\"}");
+        httpd_resp_sendstr(req, "{\"error\":\"service policy snapshot failed\"}");
         return ESP_OK;
     }
 
@@ -396,15 +393,51 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     const char *auth_owner_str = argus_authority_mgr_get_owner_name(auth_snap.owner);
 
     /* NVS commissioned status — no secrets */
-    argus_config_payload_t cfg;
-    bool has_cfg = false;
-    bool commissioned = (argus_nvs_config_get_effective(&cfg, &has_cfg) == ESP_OK) &&
-                        has_cfg && argus_nvs_config_is_commissioned(&cfg);
-    /* Zero the config to prevent accidental secret leakage */
-    memset(&cfg, 0, sizeof(cfg));
+    bool commissioned = net_snap.commissioned;
+    bool service_entry_permitted = service_policy == ARGUS_SVC_POLICY_OK;
+
+    const char *reason_name = "NONE";
+    argus_net_classify_disconnect(net_snap.last_disconnect_reason, &reason_name);
+    if (net_snap.last_disconnect_reason == 0 && net_snap.last_disconnect_category == ARGUS_DISCONNECT_CAT_IP_TIMEOUT) {
+        reason_name = "IP_ACQUISITION_TIMEOUT";
+    }
+
+    const char *operator_guidance = "No network issues detected.";
+    const char *timer_cancel_failure = "NONE";
+    if (net_snap.last_service_cancel_failure ==
+        ARGUS_SERVICE_CANCEL_FAILURE_RETRY_TIMER) {
+        timer_cancel_failure = "AUTO_RETRY_TIMER_STOP";
+        operator_guidance = argus_net_service_cancel_guidance(
+            net_snap.last_service_cancel_failure);
+    } else if (net_snap.last_service_cancel_failure ==
+               ARGUS_SERVICE_CANCEL_FAILURE_IP_TIMER) {
+        timer_cancel_failure = "IP_TIMEOUT_TIMER_STOP";
+        operator_guidance = argus_net_service_cancel_guidance(
+            net_snap.last_service_cancel_failure);
+    } else if (net_snap.apply_state == ARGUS_WIFI_APPLY_PREPARING ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_WAITING_DISCONNECT ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_APPLYING_CONFIG ||
+        net_snap.apply_state == ARGUS_WIFI_APPLY_CONNECTING) {
+        operator_guidance = "Wi-Fi recovery in progress; previous failure is retained until recovery succeeds.";
+    } else if (net_snap.action_required) {
+        operator_guidance = "Operator action required: Check Wi-Fi SSID and password.";
+    } else if (net_snap.sta_state == ARGUS_STA_RETRY_WAIT) {
+        operator_guidance = "Connection lost. Retrying automatically...";
+    } else if (net_snap.sta_state == ARGUS_STA_DISABLED) {
+        operator_guidance = "Wi-Fi client is disabled.";
+    }
+
+    const char *category_str = "NONE";
+    switch (net_snap.last_disconnect_category) {
+        case ARGUS_DISCONNECT_CAT_AUTHENTICATION: category_str = "AUTHENTICATION"; break;
+        case ARGUS_DISCONNECT_CAT_AP_UNAVAILABLE: category_str = "AP_UNAVAILABLE"; break;
+        case ARGUS_DISCONNECT_CAT_IP_TIMEOUT: category_str = "IP_TIMEOUT"; break;
+        case ARGUS_DISCONNECT_CAT_UNKNOWN: category_str = "UNKNOWN"; break;
+        default: break;
+    }
 
     /* Build JSON response */
-    char buf[768];
+    char buf[1536];
     int len = snprintf(buf, sizeof(buf),
         "{"
         "\"machine\":{\"state\":\"%s\","
@@ -418,8 +451,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"generation\":%" PRIu32 "},"
         "\"network\":{\"mode\":\"%s\","
         "\"sta_connected\":%s,\"sta_ip_acquired\":%s,"
-        "\"ap_started\":%s},"
-        "\"broker\":{\"running\":%s,"
+        "\"ap_started\":%s,"
+        "\"sta_ip_address\":\"%s\","
+        "\"sta_state\":\"%s\","
+        "\"recovery_state\":\"%s\","
+        "\"last_error_category\":\"%s\","
+        "\"last_disconnect_reason_name\":\"%s\","
+        "\"last_disconnect_reason_code\":%" PRIu8 ","
+        "\"retry_count\":%" PRIu32 ","
+        "\"seconds_until_retry\":%" PRIu32 ","
+        "\"manual_reconnect_permitted\":%s,"
+        "\"service_entry_permitted\":%s,"
+        "\"operator_action_required\":%s,"
+        "\"timer_cancel_failure\":\"%s\","
+        "\"timer_cancel_error\":\"%s\","
+        "\"operator_guidance\":\"%s\"},"
+        "\"broker\":{\"running\":%s,\"stopped\":%s,"
         "\"active_clients\":%" PRId32 ","
         "\"observable\":%s},"
         "\"commissioned\":%s"
@@ -437,7 +484,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.sta_connected ? "true" : "false",
         net_snap.sta_ip_acquired ? "true" : "false",
         net_snap.ap_started ? "true" : "false",
+        net_snap.sta_ip_address,
+        argus_net_mgr_get_sta_state_name(net_snap.sta_state),
+        argus_net_mgr_get_wifi_apply_state_name(net_snap.apply_state),
+        category_str,
+        reason_name,
+        net_snap.last_disconnect_reason,
+        net_snap.consecutive_failures,
+        net_snap.seconds_until_retry,
+        net_snap.manual_reconnect_permitted ? "true" : "false",
+        service_entry_permitted ? "true" : "false",
+        net_snap.action_required ? "true" : "false",
+        timer_cancel_failure,
+        esp_err_to_name(net_snap.last_service_cancel_error),
+        operator_guidance,
         net_snap.mqtt_broker_running ? "true" : "false",
+        net_snap.mqtt_broker_stopped ? "true" : "false",
         (broker_err == ESP_OK) ? broker_obs.active_client_count : (int32_t)0,
         (broker_err == ESP_OK) ? "true" : "false",
         commissioned ? "true" : "false");
@@ -604,88 +666,110 @@ static const char PORTAL_HTML[] =
     "<div class=\"note\">Service portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
     /* h() — HTML-escape to prevent DOM injection from device-supplied values */
-    "function h(s){if(s==null)return'';"
-    "return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')"
-    ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}"
-    "function row(l,v,c){return '<div class=\"row\"><span class=\"label\">'+h(l)+"
-    "'</span><span class=\"val\">'+(c?'<span class=\"badge '+h(c)+'\">'+h(v)+'</span>':h(v))+'</span></div>'}"
-    "function bc(s){var m={'RUNNING':'badge-ok','HOLDING':'badge-ok','UNLOCKED':'badge-warn',"
-    "'STARTING':'badge-warn','DECELERATING':'badge-warn','EMERGENCY_STOPPED':'badge-err',"
-    "'FAULTED':'badge-err','BOOTING':'badge-off','RECOVERING':'badge-warn'};"
-    "return m[s]||'badge-off'}"
-    "function nc(s){return s==='COMMISSIONED_STA'||s==='AP_DISCOVERABLE'?'badge-ok':"
-    "s==='SERVICE_AP_ONLY'?'badge-warn':s==='NETWORK_FAULT'?'badge-err':'badge-off'}"
-    "function fmt(v){return (v/1000).toFixed(1)+' RPM'}"
-    "function refresh(){"
-    "fetch('/api/status').then(r=>r.json()).then(d=>{"
-    "var m=d.machine,a=d.authority,n=d.network;"
-    "document.getElementById('machine-rows').innerHTML="
-    "row('State',m.state,bc(m.state))+"
-    "row('Target Speed',fmt(m.target_rpm_milli))+"
-    "row('Applied Speed',fmt(m.applied_rpm_milli))+"
-    "row('Generated Speed',fmt(m.generated_rpm_milli))+"
-    "row('Driver',m.driver_enabled?'Enabled':'Disabled',m.driver_enabled?'badge-ok':'badge-off')+"
-    "row('E-Stop',m.estop_latched?'LATCHED':'Clear',m.estop_latched?'badge-err':'badge-ok')+"
-    "row('Ramp',m.ramp_active?'Active':'Idle',m.ramp_active?'badge-warn':'badge-off');"
-    "document.getElementById('authority-rows').innerHTML="
-    "row('Mode',a.mode)+"
-    "row('Owner',a.owner)+"
-    "row('Generation',a.generation);"
-    "document.getElementById('network-rows').innerHTML="
-    "row('Mode',n.mode,nc(n.mode))+"
-    "row('STA Connected',n.sta_connected?'Yes':'No',n.sta_connected?'badge-ok':'badge-off')+"
-    "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+"
-    "row('Broker',d.broker.running?'Running':'Stopped',d.broker.running?'badge-ok':'badge-off')+"
-    "row('Commissioned',d.commissioned?'Yes':'No',d.commissioned?'badge-ok':'badge-warn');"
-    "var sc=document.getElementById('service-controls');sc.innerHTML='';"
-    "if(n.mode==='AP_DISCOVERABLE'||n.mode==='UNCOMMISSIONED_AP'){"
-    "sc.innerHTML='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';"
-    "}else if(n.mode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){"
-    "sc.innerHTML='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';"
-    "}"
-    "}).catch(e=>{document.getElementById('machine-rows').innerHTML="
-    "row('Error','Failed to load status','badge-err')});"
-    "fetch('/api/identity').then(r=>r.json()).then(d=>{"
-    "document.getElementById('fw-ver').textContent=d.firmware_version+' | '+d.service_ssid;"
-    "document.getElementById('identity-rows').innerHTML="
-    "row('Hardware UID',d.hardware_uid)+"
-    "row('Client ID',d.client_id||'(not set)')+"
-    "row('Unit ID',d.unit_id||'(not set)')+"
-    "row('Device Name',d.device_name||'(not set)')+"
-    "row('Model',d.device_model);"
-    "}).catch(e=>{})}"
-    "function doRestart(){"
-    "if(!confirm('Restart the controller? Active connections will be lost.'))return;"
-    "fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(d=>{"
-    "if(d.status==='restart_initiated'){"
-    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';"
-    "}else{alert(d.message||d.error||'Restart failed')}"
-    "}).catch(()=>alert('Connection lost'))}"
-    "function doSvcEnter(){"
-    "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;"
-    "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}"
-    "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{"
-    "if(d.status==='accepted'||d.status==='ok'){"
-    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Service entry requested. You may temporarily lose connection. Please reconnect to the Service AP if necessary and wait for the dashboard to refresh.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';"
-    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Enter Local Service';}}"
-    "}).catch(()=>{"
-    "alert('Network error. The request status is unknown. Please reconnect to the Service AP and reload to verify /api/status.');"
-    "if(b){b.disabled=false;b.textContent='Enter Local Service';}"
-    "})}"
-    "function doSvcExit(){"
-    "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;"
-    "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}"
-    "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{"
-    "if(d.status==='accepted'){"
-    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device reboot requested. Connection will be lost.</p></div>';"
-    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Exit Local Service';}}"
-    "}).catch(()=>{"
-    "alert('Network error. Exit status unknown. Reconnect to the network and verify controller state.');"
-    "if(b){b.disabled=false;b.textContent='Exit Local Service';}"
-    "})}"
-    "refresh();"
-    "</script>"
-    "</body>"
+    "function h(s){if(s==null)return'';\n"
+    "return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')\n"
+    ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;')}\n"
+    "function row(l,v,c){return '<div class=\"row\"><span class=\"label\">'+h(l)+\n"
+    "'</span><span class=\"val\">'+(c?'<span class=\"badge '+h(c)+'\">'+h(v)+'</span>':h(v))+'</span></div>'}\n"
+    "function bc(s){var m={'RUNNING':'badge-ok','HOLDING':'badge-ok','UNLOCKED':'badge-warn',\n"
+    "'STARTING':'badge-warn','DECELERATING':'badge-warn','EMERGENCY_STOPPED':'badge-err',\n"
+    "'FAULTED':'badge-err','BOOTING':'badge-off','RECOVERING':'badge-warn'};\n"
+    "return m[s]||'badge-off'}\n"
+    "function nc(s){return s==='COMMISSIONED_STA'||s==='AP_DISCOVERABLE'?'badge-ok':\n"
+    "s==='SERVICE_AP_ONLY'?'badge-warn':s==='NETWORK_FAULT'?'badge-err':'badge-off'}\n"
+    "function fmt(v){return (v/1000).toFixed(1)+' RPM'}\n"
+    "function refresh(){\n"
+    "fetch('/api/status').then(r=>r.json()).then(d=>{\n"
+    "var m=d.machine,a=d.authority,n=d.network;\n"
+    "document.getElementById('machine-rows').innerHTML=\n"
+    "row('State',m.state,bc(m.state))+\n"
+    "row('Target Speed',fmt(m.target_rpm_milli))+\n"
+    "row('Applied Speed',fmt(m.applied_rpm_milli))+\n"
+    "row('Generated Speed',fmt(m.generated_rpm_milli))+\n"
+    "row('Driver',m.driver_enabled?'Enabled':'Disabled',m.driver_enabled?'badge-ok':'badge-off')+\n"
+    "row('E-Stop',m.estop_latched?'LATCHED':'Clear',m.estop_latched?'badge-err':'badge-ok')+\n"
+    "row('Ramp',m.ramp_active?'Active':'Idle',m.ramp_active?'badge-warn':'badge-off');\n"
+    "document.getElementById('authority-rows').innerHTML=\n"
+    "row('Mode',a.mode)+\n"
+    "row('Owner',a.owner)+\n"
+    "row('Generation',a.generation);\n"
+    "var sc=document.getElementById('service-controls');sc.innerHTML='';\n"
+    "var nmode = n.mode || 'UNKNOWN';\n"
+    "var nsta = n.sta_state || 'UNKNOWN';\n"
+    "var ncat = n.last_error_category || 'NONE';\n"
+    "document.getElementById('network-rows').innerHTML=\n"
+    "row('Mode',nmode,nc(nmode))+\n"
+    "row('STA State',nsta,nc(nsta))+\n"
+    "row('Recovery',n.recovery_state||'IDLE',nc(n.recovery_state||'IDLE'))+\n"
+    "row('STA Connected',n.sta_connected?'Yes':'No',n.sta_connected?'badge-ok':'badge-off')+\n"
+    "row('AP Started',n.ap_started?'Yes':'No',n.ap_started?'badge-ok':'badge-off')+\n"
+    "(n.sta_ip_acquired?row('STA IP',n.sta_ip_address||'UNKNOWN','badge-ok'):'')+\n"
+    "row('Broker',!d.broker.observable?'Unobservable':d.broker.running?'Running':d.broker.stopped?'Stopped':'Not converged',d.broker.running?'badge-ok':d.broker.stopped?'badge-off':'badge-warn')+\n"
+    "row('Commissioned',d.commissioned?'Yes':'No',d.commissioned?'badge-ok':'badge-warn')+\n"
+    "(ncat!=='NONE'?row('Last Failure',ncat+' ('+(n.last_disconnect_reason_name||'')+')','badge-warn'):'')+\n"
+    "((n.retry_count||0)>0?row('Failures',n.retry_count,'badge-err'):'')+\n"
+    "((n.seconds_until_retry||0)>0?row('Retry In',n.seconds_until_retry+'s','badge-warn'):'')+\n"
+    "row('Guidance',n.operator_guidance||'Unknown',n.operator_action_required?'badge-err':'badge-ok');\n"
+    "if(n.manual_reconnect_permitted){\n"
+    "sc.innerHTML+='<button id=\"btn-reconnect\" class=\"refresh-btn\" style=\"background:#3b82f6;margin-bottom:8px\" onclick=\"doReconnect()\">Reconnect Wi-Fi</button>';\n"
+    "}\n"
+    "if(n.service_entry_permitted){\n"
+    "sc.innerHTML+='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';\n"
+    "}else if(nmode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){\n"
+    "sc.innerHTML+='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';\n"
+    "}\n"
+    "}).catch(e=>{document.getElementById('machine-rows').innerHTML=\n"
+    "row('Error','Failed to load status','badge-err')});\n"
+    "fetch('/api/identity').then(r=>r.json()).then(d=>{\n"
+    "document.getElementById('fw-ver').textContent=d.firmware_version+' | '+d.service_ssid;\n"
+    "document.getElementById('identity-rows').innerHTML=\n"
+    "row('Hardware UID',d.hardware_uid)+\n"
+    "row('Client ID',d.client_id||'(not set)')+\n"
+    "row('Unit ID',d.unit_id||'(not set)')+\n"
+    "row('Device Name',d.device_name||'(not set)')+\n"
+    "row('Model',d.device_model);\n"
+    "}).catch(e=>{})}\n"
+    "function doRestart(){\n"
+    "if(!confirm('Restart the controller? Active connections will be lost.'))return;\n"
+    "fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
+    "if(d.status==='restart_initiated'){\n"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';\n"
+    "}else{alert(d.message||d.error||'Restart failed')}\n"
+    "}).catch(()=>alert('Connection lost'))}\n"
+    "function doSvcEnter(){\n"
+    "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;\n"
+    "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
+    "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
+    "if(d.status==='accepted'||d.status==='ok'){\n"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Service entry requested. You may temporarily lose connection. Please reconnect to the Service AP if necessary and wait for the dashboard to refresh.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';\n"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Enter Local Service';}}\n"
+    "}).catch(()=>{\n"
+    "alert('Network error. The request status is unknown. Please reconnect to the Service AP and reload to verify /api/status.');\n"
+    "if(b){b.disabled=false;b.textContent='Enter Local Service';}\n"
+    "})}\n"
+    "function doSvcExit(){\n"
+    "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;\n"
+    "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
+    "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
+    "if(d.status==='accepted'){\n"
+    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device reboot requested. Connection will be lost.</p></div>';\n"
+    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Exit Local Service';}}\n"
+    "}).catch(()=>{\n"
+    "alert('Network error. Exit status unknown. Reconnect to the network and verify controller state.');\n"
+    "if(b){b.disabled=false;b.textContent='Exit Local Service';}\n"
+    "})}\n"
+    "function doReconnect(){\n"
+    "var b=document.getElementById('btn-reconnect');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
+    "fetch('/api/network/reconnect',{method:'POST'}).then(r=>{\n"
+    "if(r.status===202){refresh();if(b){b.disabled=false;b.textContent='Reconnect Wi-Fi';}}\n"
+    "else{r.json().then(d=>alert(d.error||'Reconnect request failed')).catch(()=>alert('Request failed'));if(b){b.disabled=false;b.textContent='Reconnect Wi-Fi';}}\n"
+    "}).catch(()=>{\n"
+    "alert('Network error during reconnect request.');\n"
+    "if(b){b.disabled=false;b.textContent='Reconnect Wi-Fi';}\n"
+    "})}\n"
+    "refresh();\n"
+    "</script>\n"
+    "</body>\n"
     "</html>";
 
 /* ── File-scope password change page HTML ────────────────────────── */
@@ -1042,8 +1126,8 @@ static const char WIFI_PAGE_HTML[] =
     "body:JSON.stringify(body)})"
     ".then(r=>r.json()).then(d=>{"
     "if(d.status==='saved'){"
-    "msg.className='alert alert-ok';"
-    "msg.textContent='WiFi saved. Restart required for changes to take effect.';"
+    "msg.className=(d.apply_queued===false)?'alert alert-warn':'alert alert-ok';"
+    "msg.textContent=d.message||'Saved.';"
     "msg.style.display='block';origSsid=ssid;"
     "}else{"
     "msg.className='alert alert-err';"
@@ -1062,8 +1146,8 @@ static const char WIFI_PAGE_HTML[] =
     "body:JSON.stringify({scope:'wifi',sta_ssid:'',sta_pass:''})})"
     ".then(r=>r.json()).then(d=>{"
     "if(d.status==='saved'){"
-    "msg.className='alert alert-ok';"
-    "msg.textContent='WiFi cleared. Restart required.';"
+    "msg.className=(d.apply_queued===false||d.restart_required)?'alert alert-warn':'alert alert-ok';"
+    "msg.textContent=d.message||'WiFi cleared. Restart required.';"
     "msg.style.display='block';"
     "document.getElementById('ssid').value='';"
     "document.getElementById('pass').value='';origSsid='';"
@@ -1277,7 +1361,21 @@ static esp_err_t config_save_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true}");
+    if (scope == ARGUS_CONFIG_SCOPE_WIFI) {
+        if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false,\"message\":\"Wi-Fi configuration saved. Runtime apply is suppressed during Local Service; exit service to restart with the new configuration.\"}");
+            return ESP_OK;
+        }
+        argus_net_event_t evt = { .type = ARGUS_NET_EVT_APPLY_WIFI_CONFIG };
+        esp_err_t post_err = argus_net_mgr_post_event(&evt);
+        if (post_err == ESP_OK) {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":false,\"apply_queued\":true,\"message\":\"Wi-Fi configuration saved. Reconnection has started. Remain connected to the Service AP and refresh the dashboard to observe progress.\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false,\"message\":\"Configuration saved but runtime apply failed (queue full). Restart required.\"}");
+        }
+    } else {
+        httpd_resp_sendstr(req, "{\"status\":\"saved\",\"restart_required\":true,\"apply_queued\":false}");
+    }
     return ESP_OK;
 }
 
@@ -1306,6 +1404,37 @@ static esp_err_t wifi_page_handler(httpd_req_t *req)
 }
 
 /* ── Phase 4B.2: POST /api/restart handler ───────────────────────── */
+
+
+/* ── POST /api/network/reconnect handler ─────────────────────────── */
+
+static esp_err_t reconnect_post_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_POST) return send_method_not_allowed(req);
+
+    set_api_headers(req);
+
+    esp_err_t err = argus_net_mgr_request_manual_reconnect();
+    if (err == ESP_OK) {
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_sendstr(req, "{\"status\":\"accepted\"}");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"manual reconnect not permitted when uncommissioned\"}");
+    } else if (err == ESP_ERR_NOT_SUPPORTED) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"manual reconnect conflict in current state\"}");
+    } else if (err == ESP_ERR_NO_MEM) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "{\"error\":\"queue full\"}");
+    } else {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"internal error requesting reconnect\"}");
+    }
+
+    return ESP_OK;
+}
 
 static esp_err_t restart_handler(httpd_req_t *req)
 {
@@ -1364,19 +1493,16 @@ static esp_err_t service_enter_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 
-    /* Check current state for idempotency and policy */
     argus_net_snapshot_t net_snap;
-    if (argus_net_mgr_get_snapshot(&net_snap) != ESP_OK) {
+    argus_authority_snapshot_t auth_snap;
+    argus_net_event_t evt = {0};
+    argus_svc_policy_result_t pol;
+    if (argus_net_mgr_evaluate_service_entry(
+            ARGUS_AUTH_OWNER_BROWSER, &net_snap, &auth_snap, &evt, &pol) != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"reason\":\"snapshot_failed\"}");
         return ESP_OK;
     }
-
-    argus_authority_snapshot_t auth_snap;
-    argus_authority_mgr_get_snapshot(&auth_snap);
-
-    argus_net_event_t evt;
-    argus_svc_policy_result_t pol = argus_service_policy_evaluate_entry(&net_snap, &auth_snap, &evt);
 
     if (pol == ARGUS_SVC_POLICY_IDEMPOTENT) {
         httpd_resp_sendstr(req,
@@ -1668,6 +1794,14 @@ static const httpd_uri_t uri_wifi_page = {
     .user_ctx  = NULL
 };
 
+
+static const httpd_uri_t uri_reconnect = {
+    .uri       = "/api/network/reconnect",
+    .method    = HTTP_POST,
+    .handler   = reconnect_post_handler,
+    .user_ctx  = NULL
+};
+
 static const httpd_uri_t uri_restart = {
     .uri       = "/api/restart",
     .method    = HTTP_POST,
@@ -1753,7 +1887,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 16;  /* 6 (4B.1) + 5 (4B.2) + 2 (4B.3) + headroom */
+    config.max_uri_handlers   = 16;  /* 14 registered handlers + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -1801,6 +1935,9 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
+        if (reg_err != ESP_OK) goto rollback;
+
+        reg_err = httpd_register_uri_handler(s_server, &uri_reconnect);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);
