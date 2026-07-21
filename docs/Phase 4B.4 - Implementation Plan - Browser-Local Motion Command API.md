@@ -1,6 +1,19 @@
 # Phase 4B.4 - Implementation Plan: Browser-Local Motion Command API
 
-**Status:** STEP 1 STRICT REQUEST CONTRACT AND PURE DECODER IMPLEMENTED - RUNTIME EXECUTION PENDING
+**Status:** STEP 1 ACCEPTED - STEP 2 AUTHENTICATED HTTP ADMISSION AND ROUTER DISPATCH IN PROGRESS
+
+## Autonomous execution status
+
+| Field | Status |
+|---|---|
+| Accepted baseline | Step 1 corrective commit `eb1a6cc19ac0621a76b3b7996b8e89a976cab966` |
+| Current authorized step | Phase 4B.4 Step 2 - authenticated HTTP admission and exclusive router dispatch |
+| Current state | IN PROGRESS |
+| Allowed autonomous actions | Source changes within Step 2; ESP-IDF v5.5.3 build; COM5 chip verification, flash, reboot, serial monitor, and automated on-controller tests with motor disconnected |
+| Hard stops | Baseline conflict; unsafe or unidentified COM5 device; abnormal electrical/reset behavior; out-of-scope architecture or accepted safety-semantics change; connected-motor or human-observation requirement |
+| Last validated commit | `eb1a6cc19ac0621a76b3b7996b8e89a976cab966` - Step 1 accepted |
+| Next required human action | Independent supervisory review after software and automated runtime gates pass |
+| Later human gate | Connected-motor and physical bench acceptance; no mechanical acceptance is authorized in this run |
 
 ## Objective
 
