@@ -1,6 +1,6 @@
 # Phase 4B.5 - Implementation Plan: Browser Controls and Live Status
 
-**Status:** MOTOR-DISCONNECTED SOFTWARE AND AUTOMATED RUNTIME VALIDATED - READY FOR SUPERVISORY REVIEW
+**Status:** COMPLETE AND ACCEPTED - Powered UI-to-motor integration passed July 22, 2026
 
 ## Authorized Baseline
 
@@ -87,7 +87,9 @@ The exact corrected reproduction started from stationary `HOLDING` with zero gen
 
 ## Safety Boundary
 
-This completed validation is controller-level and motor-disconnected. No connected-motor, pump, hose, chemical, pressure, process, flow-accuracy, or mechanical-endurance acceptance is claimed. The narrow powered UI-to-motor confirmation remains the Phase 4B.5 acceptance dependency and must use the final controls implemented by this phase.
+The earlier software, automated-runtime, and isolated browser validation remained motor-disconnected. On July 22, 2026, Shawn later completed the bounded connected-motor procedure through the final authenticated `/controls` page against firmware commit `666c1b0ee610c8041f8afd11bd41b3230e1eee5a`. Setpoint-without-motion, forward start and smooth ramp, normal stop, unlock, reverse direction, E-stop halt with truthful latch, and reset without automatic restart all passed. While E-stop was latched, disabled motion controls admitted no command and caused no movement. The completed record is [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md).
+
+This grants Phase 4B.5 acceptance only for the implemented browser/UI-to-controller-to-motor boundary. No pump head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is claimed.
 
 ## Step 0 Identity Record
 

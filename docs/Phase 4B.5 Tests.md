@@ -1,12 +1,12 @@
 # Phase 4B.5 Tests and Acceptance Record
 
-**Current disposition:** Motor-disconnected implementation VALIDATED; motor-disconnected controller and browser testing PASSED; final powered acceptance PENDING.
+**Current disposition:** Phase 4B.5 implementation ACCEPTED; motor-disconnected controller and browser testing PASSED; powered UI-to-motor integration PASSED; final Phase 4B.5 acceptance GRANTED.
 
 ## 1. Purpose and Acceptance Boundary
 
 This is the living software, automated-runtime, isolated-controller, browser, and later powered-integration record for Phase 4B.5. It records both successful and failed observations. An HTTP acceptance response proves command admission and dispatch only; authoritative controller status reports controller state, and neither proves physical shaft motion.
 
-This record does not grant final Phase 4B.5 acceptance. The remaining gate is the bounded powered UI-to-motor procedure in Section 18.
+Final Phase 4B.5 acceptance was granted after the bounded powered UI-to-motor procedure in Section 18 passed on July 22, 2026. The acceptance remains limited to the scope stated here.
 
 ## 2. Tested Branch, Identity, and Commits
 
@@ -129,44 +129,74 @@ All three runs reported production-singleton isolation with zero live mutations 
 
 Operator assistance was limited to confirming physical isolation, arranging the laptop/controller network path, reconnecting Windows to the controller Service AP when required, authenticating the browser session, and observing browser/controller behavior during the isolated command sequence. Automated tooling performed the clean builds, flash, host checks, and final ConPTY suite capture. No operator observation was promoted into powered-motion evidence.
 
+### Connected-Motor Operator Test - July 22, 2026
+
+Shawn personally performed and observed the later connected-motor procedure through the final authenticated `/controls` page. These physical observations are operator-attested evidence, separate from the automated host and pure-suite evidence. Shawn observed correct setpoint, start, stop, unlock, reverse, E-stop, and reset-E-stop behavior. While E-stop was latched, ordinary motion controls were disabled and clicking them caused no command or physical motion. Resetting E-stop did not automatically restart the motor; motion required a separate deliberate command.
+
+The retained screenshot [Phase 4B.5 E-Stop Active - Motor Connected.png](Evidence%20Screen%20Shots/Phase%204b.5/Phase%204B.5%20E-Stop%20Active%20-%20Motor%20Connected.png) shows the authenticated controls page reporting `EMERGENCY_STOPPED`, `E-STOP LATCHED`, zero applied and generated speed, disabled ordinary motion controls, `LOCAL_SERVICE/BROWSER` authority, and firmware identity `v2-phase4b.5-dev`. It supplements, but does not replace, the operator-attested physical observations.
+
 ## 17. Explicit Exclusions
 
-The following were not connected, operated, or accepted:
+The connected motor was operated only for the bounded unloaded browser/UI-to-controller-to-motor checks recorded in Section 18. The following remain outside the accepted scope:
 
-- motor or loaded motor driver;
 - pump head, tubing, or hose;
+- fluid displacement or flow calibration;
 - chemical, water, pressure, or process load;
-- physical direction, shaft motion, torque, or stopping distance;
+- loaded torque or loaded mechanical performance;
 - flow accuracy or calibration; and
 - mechanical endurance.
 
-No pump, hose, chemical, pressure, flow-accuracy, process, or mechanical-endurance acceptance is implied.
+No pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is implied.
 
-## 18. Remaining Powered UI-to-Motor Procedure
+## 18. Completed Powered UI-to-Motor Procedure
 
-The remaining gate is a narrow, separately authorized connected-motor confirmation using the final `/controls` page and accepted lower-layer hardware doctrine. It must positively establish physical isolation controls and safe test conditions before power is applied, then confirm at low speed that setpoint alone causes no motion, Start produces the commanded direction and smooth ramp, Stop returns smoothly to zero, Unlock disables holding output, reverse produces opposite shaft direction, and E-stop halts output with truthful latched status. HTTP 200 must not be used as proof of physical motion or cessation.
+On July 22, 2026, Shawn completed the previously pending connected-motor confirmation using the final authenticated `/controls` page and the accepted lower-layer hardware doctrine. HTTP admission and authoritative status were observed alongside, but were not substituted for, direct physical observation.
 
-Any unexpected motion, wrong direction, failure to stop, abnormal sound, driver fault, heat, smoke, panic, reset, watchdog, brownout, stack/heap failure, or dishonest status is an immediate hard stop. No powered procedure is authorized or performed by this record.
+| Powered test | Operator-observed result |
+|---|---|
+| Setpoint alone caused no motion | **PASS** |
+| Start produced the commanded direction and smooth ramp | **PASS** |
+| Stop returned smoothly to zero | **PASS** |
+| Unlock disabled holding output | **PASS** |
+| Reverse produced the opposite physical shaft direction | **PASS** |
+| E-stop halted output and authoritative status truthfully showed the latch | **PASS** |
+| Reset E-stop cleared the latch and restored motion-control eligibility | **PASS** |
+
+While E-stop was latched, motion controls were disabled; physically clicking them produced no command and no physical motion. Resetting E-stop did not automatically restart the motor. Motion resumed only after a separate deliberate motion command.
+
+No unexpected motion, wrong direction, failure to stop, abnormal sound, driver fault, heat, smoke, panic, reset, watchdog, brownout, stack/heap failure, or dishonest status was observed. This completed procedure closes only the bounded browser/UI-to-controller-to-motor integration gate.
 
 ## 19. Current Acceptance Disposition
 
 | Gate | Disposition |
 |---|---|
-| Phase 4B.5 motor-disconnected implementation | **VALIDATED** |
+| Phase 4B.5 motor-disconnected implementation | **ACCEPTED** |
 | Motor-disconnected controller and browser testing | **PASSED** |
 | Recovery deadlock | **CORRECTED AND REPRODUCED SUCCESSFULLY** |
 | Browser E-stop pending-command correction | **PASSED** |
-| Powered UI-to-motor integration | **PENDING** |
-| Final Phase 4B.5 acceptance | **NOT YET GRANTED** |
+| Powered UI-to-motor integration | **PASSED** |
+| Start/motion prevention while E-stop latched | **PASSED** |
+| Reset without automatic restart | **PASSED** |
+| Final Phase 4B.5 acceptance | **GRANTED** |
 
 ## 20. Final Powered Result
 
-**Tested firmware commit:** `[PENDING]`
+**Test date:** July 22, 2026
 
-**Powered UI-to-motor result:** `[PENDING]`
+**Tested branch:** `phase4b5-browser-controls-live-status`
 
-**Evidence:** `[PENDING]`
+**Firmware identity displayed during testing:** `v2-phase4b.5-dev`
 
-**Final Phase 4B.5 acceptance:** `[PENDING]`
+**Tested implementation commit:** `666c1b0ee610c8041f8afd11bd41b3230e1eee5a`
 
-Phase 4B.5 may be marked finally accepted only after the powered procedure passes against an explicitly identified firmware commit and its evidence is reviewed. That acceptance must not imply pump, hose, chemical, pressure, flow-accuracy, process, or mechanical-endurance acceptance.
+**Documentation-only branch HEAD present at test time:** `ab5036d8e6f05a66a12e62533143abb84ca11871`
+
+**Powered UI-to-motor result:** **PASSED**
+
+**Evidence:** Operator-performed and operator-observed connected-motor testing, supplemented by the retained E-stop-active UI screenshot linked in Section 16.
+
+**Final Phase 4B.5 acceptance:** **GRANTED**
+
+`666c1b0` is the last firmware-affecting implementation commit and identifies the tested firmware. `ab5036d` is the later documentation-only branch head present when the powered test was performed; it did not change the tested binary.
+
+This acceptance does not imply pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance.
