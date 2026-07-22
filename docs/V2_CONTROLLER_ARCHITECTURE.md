@@ -86,6 +86,12 @@ graph TD
     *   Requires strict QoS 1, non-retained command envelopes with current session, newer nonzero sequence, bounded command ID, and topic-specific value.
     *   Serializes accepted MQTT work through a bounded worker queue. The only normal motion path is broker to contract/runtime to command router to authority and state management.
     *   Publishes 25 authoritative retained metadata, state, status, and open-loop telemetry topics plus bounded non-retained command results.
+10. **Security Contract (Phase 4D.1; implementation deferred)**:
+    *   Separates AP join secrets, Argus console verifiers, human accounts, browser sessions, machine credentials, MQTT connection identity, and Phase 4C freshness/session state.
+    *   Defines deny-by-default roles, permission ceilings, delegation, and operation-boundary authorization without making login equivalent to operating authority.
+    *   Restricts human browser traffic to the protected local AP for this plain-HTTP release and defines `/login`, `/operate`, and `/commission` as logical interface boundaries.
+    *   Preserves the existing authority manager, command router, state manager, and fail-operational behavior as the only control architecture. Security code may not create a second motion path.
+    *   Defers credential/session implementation, MQTT machine authentication, protected storage, physical recovery trigger selection, HTTPS/TLS, certificates, and hostile-network operation to separately accepted work.
 
 ---
 

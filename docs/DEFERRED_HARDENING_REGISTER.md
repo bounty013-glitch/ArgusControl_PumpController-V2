@@ -316,14 +316,48 @@ Direct privileged mutation of a locked identity remains intentionally unsupporte
 | **Date Recorded** | 2026-07-22 |
 | **System Area** | Embedded MQTT Broker / Supervisory Contract |
 | **Phase Introduced** | Phase 4C acceptance |
-| **Status** | DEFERRED |
-| **Target Phase** | Phase 4D security review |
+| **Status** | CONTRACTED; IMPLEMENTATION DEFERRED |
+| **Target Phase** | Later Phase 4D implementation subphase |
 
 **Current scope:** Phase 4C assumes a trusted local network. Its broker-lifecycle session, command sequence, connection identity, client ID, heartbeat lease, and topic-ownership policy provide freshness, replay control, and deterministic local ownership. They do not authenticate a human or publisher cryptographically.
 
 **Deferred hardening:** Define MQTT authentication and credential lifecycle, transport encryption, cryptographic publisher identity where required, authorization policy, rate limits, connection and publish abuse handling, denial-of-service bounds, security event observability, and a general adversarial security audit. Coordinate this work with the Phase 4D HTTP, TLS, credential, CSRF, and deployment-security design.
 
 **Acceptance boundary:** Do not describe client IDs, command sessions, sequence counters, topic ACLs, or connection IDs as security credentials. Phase 4C acceptance proves protocol correctness on the trusted local network; it does not claim resistance to a hostile network participant.
+
+**Phase 4D.1 disposition:** The machine-identity, credential, per-client permission, revocation, and audit boundaries are now defined in `PHASE_4D_SECURITY_CONTRACT.md`. No MQTT authentication, credential, authorization, or transport-encryption behavior was implemented, so this item remains open.
+
+---
+
+## DHR-017 - Certificate and Hostile-Network Security Deferred
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-22 |
+| **System Area** | Browser and MQTT Transport Security |
+| **Phase Introduced** | Phase 4D.1 contract acceptance |
+| **Status** | DEFERRED TO NEXT RELEASE |
+| **Target Phase** | Post-current-release security hardening |
+
+**Deferred work:** HTTPS, browser certificate issuance, renewal, trust/pinning, and recovery; MQTT TLS and any selected client-certificate lifecycle; cryptographic publisher identity; hostile-network operation; remote Internet exposure; and broader penetration testing.
+
+**Current boundary:** Human browser use is restricted to the protected controller AP. Non-TLS MQTT is restricted to the approved trusted local network. Wi-Fi link encryption is not end-to-end HTTP or MQTT transport security. No port forwarding, routed WAN, public-network, or hostile-peer deployment is accepted.
+
+---
+
+## DHR-018 - Residual Current-Release Security Risks
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-22 |
+| **System Area** | Current-Release Deployment and Device Protection |
+| **Phase Introduced** | Phase 4D.1 contract acceptance |
+| **Status** | OPEN |
+| **Target Phase** | Later Phase 4D subphases and next release, by risk class |
+
+**Known residual risks:** Fleet-wide factory credential exposure; HTTP credential and session observation by an attacker already present on the AP; non-TLS MQTT credential and payload observation by an attacker on the trusted network; physical extraction while secure boot, flash encryption, and NVS encryption remain inactive; denial-of-service and resource-exhaustion limits; bounded local audit capacity; and the absence of trustworthy wall-clock time until a verified source is available.
+
+**Acceptance boundary:** Phase 4D.1 documents these risks and does not describe them as solved. Later implementations must preserve truthful deployment limits and fail closed where protected security state is unavailable or corrupt.
 
 ## Register Maintenance
 
