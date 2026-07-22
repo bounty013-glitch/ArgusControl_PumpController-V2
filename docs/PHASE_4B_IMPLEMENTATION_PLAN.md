@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 identity is `v2-phase4b.5-dev`; the dedicated authenticated controls page and live authoritative status are implemented at `594445b`, with the live-exposed recovery mutex correction at `efcc8a3`. Motor-disconnected controller validation passed three final 501/501 suites and isolated browser command/recovery checks. Phase 4B.5 is ready for supervisory review; final acceptance still requires one narrow powered confirmation through the real browser controls.
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 identity is `v2-phase4b.5-dev`; the dedicated authenticated controls page and live authoritative status are implemented at `594445b`, with the recovery mutex correction at `efcc8a3` and browser E-stop pending-command correction at `666c1b0`. Motor-disconnected controller validation passed three final 501/501 suites and isolated browser command/recovery checks. The formal record is [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md). Final acceptance still requires one narrow powered confirmation through the real browser controls.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -732,7 +732,7 @@ final Phase 4B.5 controls remains a Phase 4B.5 acceptance dependency.
 
 ### 4B.5 — Embedded Mobile UI
 
-**Status:** MOTOR-DISCONNECTED SOFTWARE AND AUTOMATED RUNTIME VALIDATED - Identity is `v2-phase4b.5-dev`; dedicated authenticated `/controls` and live authoritative status are implemented at `594445b`, with recovery mutex correction `efcc8a3`. Three final controller invocations passed 501/501 each, and isolated browser command, recovery, service-exit, and reboot checks passed. Ready for supervisory review; the powered UI-to-motor gate remains deferred.
+**Status:** MOTOR-DISCONNECTED SOFTWARE AND AUTOMATED RUNTIME VALIDATED - Identity is `v2-phase4b.5-dev`; dedicated authenticated `/controls` and live authoritative status are implemented at `594445b`, with recovery mutex correction `efcc8a3` and browser E-stop pending-command correction `666c1b0`. Three final corrected-image controller invocations passed 501/501 each, and isolated browser command, recovery, service-exit, and reboot checks passed. See [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md). The powered UI-to-motor gate remains pending.
 
 **Scope:** Create embedded HTML/CSS/JS portal. Mobile-first responsive
 layout. All assets embedded in firmware. Status display, commissioning

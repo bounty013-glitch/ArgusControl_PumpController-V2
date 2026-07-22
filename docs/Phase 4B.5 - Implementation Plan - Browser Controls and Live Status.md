@@ -19,6 +19,10 @@ Implementation commit: `594445b42d66ada780fd1e34f5084b0a2bab96ac`
 
 Recovery deadlock correction: `efcc8a3eb2ede7279242a848936408287cd03f7b`
 
+Browser E-stop pending-command correction: `666c1b0ee610c8041f8afd11bd41b3230e1eee5a`
+
+Formal test and acceptance record: [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md)
+
 ## Implemented Surface
 
 - Authenticated route: `GET /controls`
@@ -38,7 +42,7 @@ The status schema now includes authoritative requested and applied direction, fa
 
 ## Eligibility And Failure Behavior
 
-Ordinary controls require fresh status confirming `SERVICE_AP_ONLY` and `LOCAL_SERVICE/BROWSER` authority. Start and setpoint controls are disabled for stale, disconnected, unauthorized, E-stop-latched, faulted, or otherwise ineligible states. Stop, unlock, reset, and recovery follow the current authoritative state. E-stop remains prominent and attemptable during stale or disconnected status while authentication remains valid.
+Ordinary controls require fresh status confirming `SERVICE_AP_ONLY` and `LOCAL_SERVICE/BROWSER` authority. Start and setpoint controls are disabled for stale, disconnected, unauthorized, E-stop-latched, faulted, or otherwise ineligible states. Stop, unlock, reset, and recovery follow the current authoritative state. E-stop remains prominent and attemptable during stale or disconnected status while authentication remains valid. Separate ordinary and E-stop in-flight lanes permit one E-stop request while an ordinary request is pending, suppress repeated E-stop clicks, and prevent an older ordinary response from overwriting the newer E-stop result.
 
 The page distinguishes current, fetching, stale, disconnected, unauthorized, and invalid status; preserves last-known values only with explicit stale treatment; and reports command pending, accepted, rejected, malformed-response, timeout, and transport-failure outcomes separately from controller state. HTTP 200 is described as API admission, not physical-motion proof.
 
