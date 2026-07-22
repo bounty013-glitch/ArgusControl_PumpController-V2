@@ -12,6 +12,7 @@
 #include "argus_mqtt_broker.h"
 #include "argus_http_server.h"
 #include "argus_restart_mgr.h"
+#include "argus_factory_reset.h"
 #include "argus_service_policy.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -61,6 +62,7 @@ static _Atomic bool s_sta_started = false;
 static _Atomic bool s_sta_connected = false;
 static _Atomic bool s_sta_ip_acquired = false;
 static _Atomic bool s_ap_started = false;
+static _Atomic bool s_factory_reset_pending = false;
 
 static argus_sta_state_t s_sta_state = ARGUS_STA_DISABLED;
 static uint8_t s_last_disconnect_reason = 0;
@@ -789,6 +791,23 @@ static void net_mgr_task(void *pvParameters)
                          * Operator must power-cycle manually. */
                     }
                     /* If accepted, reboot() was called — unreachable */
+                    break;
+                }
+
+                case ARGUS_NET_EVT_FACTORY_RESET_REQUEST: {
+                    ESP_LOGI(TAG, "Factory-reset request received by lifecycle owner");
+                    argus_factory_reset_ops_t reset_ops;
+                    argus_factory_reset_get_production_ops(&reset_ops);
+                    argus_factory_reset_result_t result =
+                        argus_factory_reset_execute(&reset_ops);
+                    if (!result.accepted) {
+                        atomic_store(&s_factory_reset_pending, false);
+                        s_last_error = ARGUS_NET_ERR_RESET_FAILED;
+                        ESP_LOGE(TAG,
+                                 "Factory reset failed at step %d: %s; no success claimed",
+                                 result.failed_at_step,
+                                 esp_err_to_name(result.error));
+                    }
                     break;
                 }
 
@@ -1827,6 +1846,7 @@ static void populate_net_snapshot_locked(argus_net_snapshot_t *out_snap)
     out_snap->apply_state = s_wifi_transaction.state;
     out_snap->timer_generation = s_timer_generation;
     out_snap->wifi_transaction_active = s_wifi_transaction.active;
+    out_snap->factory_reset_pending = atomic_load(&s_factory_reset_pending);
     out_snap->transaction_generation = s_wifi_transaction.generation;
     out_snap->auto_retry_timer_active =
         s_auto_retry_timer && xTimerIsTimerActive(s_auto_retry_timer);
@@ -2104,6 +2124,142 @@ esp_err_t argus_net_mgr_request_restart(void)
     /* Post restart event to net_mgr task — deferred so HTTP can respond first */
     argus_net_event_t evt = { .type = ARGUS_NET_EVT_RESTART_REQUEST };
     return argus_net_mgr_post_event(&evt);
+}
+
+static esp_err_t factory_reset_lock_lifecycle(void *ctx)
+{
+    (void)ctx;
+    return xSemaphoreTake(s_net_mutex, portMAX_DELAY) == pdTRUE ? ESP_OK
+                                                               : ESP_FAIL;
+}
+
+static void factory_reset_unlock_lifecycle(void *ctx)
+{
+    (void)ctx;
+    xSemaphoreGive(s_net_mutex);
+}
+
+static void factory_reset_lock_dispatch(void *ctx)
+{
+    (void)ctx;
+    argus_cmd_router_lock_dispatch();
+}
+
+static void factory_reset_unlock_dispatch(void *ctx)
+{
+    (void)ctx;
+    argus_cmd_router_unlock_dispatch();
+}
+
+static esp_err_t factory_reset_get_network(void *ctx, argus_net_snapshot_t *out)
+{
+    (void)ctx;
+    if (out == NULL) return ESP_ERR_INVALID_ARG;
+    populate_net_snapshot_locked(out);
+    return ESP_OK;
+}
+
+static esp_err_t factory_reset_get_authority(
+    void *ctx, argus_authority_snapshot_t *out)
+{
+    (void)ctx;
+    return argus_authority_mgr_get_snapshot(out);
+}
+
+static void factory_reset_get_state(void *ctx, argus_state_snapshot_t *out)
+{
+    (void)ctx;
+    argus_state_mgr_get_snapshot(out);
+}
+
+static esp_err_t factory_reset_begin_transition(void *ctx)
+{
+    (void)ctx;
+    esp_err_t err = argus_authority_mgr_set_mode(
+        ARGUS_AUTHORITY_SERVICE_TRANSITION, ARGUS_AUTH_OWNER_NONE);
+    if (err == ESP_OK) set_net_mode(ARGUS_NET_MODE_SERVICE_TRANSITION);
+    return err;
+}
+
+static void factory_reset_response_grace(void *ctx)
+{
+    (void)ctx;
+    vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+static esp_err_t factory_reset_stop_http(void *ctx)
+{
+    (void)ctx;
+    return argus_http_server_stop();
+}
+
+static esp_err_t factory_reset_revoke_authority(void *ctx)
+{
+    (void)ctx;
+    return argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE,
+                                        ARGUS_AUTH_OWNER_NONE);
+}
+
+static esp_err_t factory_reset_erase_configuration(void *ctx)
+{
+    (void)ctx;
+    return argus_nvs_config_factory_reset();
+}
+
+static void factory_reset_reboot(void *ctx)
+{
+    (void)ctx;
+    esp_restart();
+}
+
+void argus_factory_reset_get_production_ops(argus_factory_reset_ops_t *out_ops)
+{
+    if (out_ops == NULL) return;
+    *out_ops = (argus_factory_reset_ops_t){
+        .lock_lifecycle = factory_reset_lock_lifecycle,
+        .unlock_lifecycle = factory_reset_unlock_lifecycle,
+        .lock_dispatch = factory_reset_lock_dispatch,
+        .unlock_dispatch = factory_reset_unlock_dispatch,
+        .get_network_snapshot = factory_reset_get_network,
+        .get_authority_snapshot = factory_reset_get_authority,
+        .get_state_snapshot = factory_reset_get_state,
+        .begin_transition = factory_reset_begin_transition,
+        .response_grace_delay = factory_reset_response_grace,
+        .stop_http = factory_reset_stop_http,
+        .revoke_authority = factory_reset_revoke_authority,
+        .erase_configuration = factory_reset_erase_configuration,
+        .reboot = factory_reset_reboot,
+        .ctx = NULL,
+    };
+}
+
+esp_err_t argus_net_mgr_request_factory_reset(void)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+
+    argus_net_snapshot_t net;
+    argus_authority_snapshot_t authority;
+    argus_state_snapshot_t state;
+    if (argus_net_mgr_get_snapshot(&net) != ESP_OK ||
+        argus_authority_mgr_get_snapshot(&authority) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    argus_state_mgr_get_snapshot(&state);
+    if (argus_factory_reset_evaluate_policy(&net, &authority, &state,
+                                             net.factory_reset_pending) !=
+        ARGUS_FACTORY_RESET_POLICY_OK) {
+        return net.factory_reset_pending ? ESP_ERR_NOT_SUPPORTED
+                                         : ESP_ERR_INVALID_STATE;
+    }
+
+    bool expected = false;
+    if (!atomic_compare_exchange_strong(&s_factory_reset_pending, &expected, true)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    argus_net_event_t evt = {.type = ARGUS_NET_EVT_FACTORY_RESET_REQUEST};
+    esp_err_t err = argus_net_mgr_post_event(&evt);
+    if (err != ESP_OK) atomic_store(&s_factory_reset_pending, false);
+    return err;
 }
 
 esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_owner)

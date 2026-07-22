@@ -255,31 +255,38 @@ static esp_err_t prod_erase_all(void *ctx)
 {
     (void)ctx;
     esp_err_t first_err = ESP_OK;
-    nvs_handle_t handle;
+    static const char *const reset_namespaces[] = {
+        ARGUS_NVS_NS_CFG,
+        ARGUS_NVS_NS_SYS,
+    };
 
-    esp_err_t open_err = nvs_open(ARGUS_NVS_NS_CFG, NVS_READWRITE, &handle);
-    if (open_err == ESP_OK) {
-        esp_err_t erase_err = nvs_erase_all(handle);
-        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
-        esp_err_t commit_err = nvs_commit(handle);
-        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
-        nvs_close(handle);
-    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
-        first_err = open_err;
-    }
-
-    open_err = nvs_open(ARGUS_NVS_NS_SYS, NVS_READWRITE, &handle);
-    if (open_err == ESP_OK) {
-        esp_err_t erase_err = nvs_erase_all(handle);
-        if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
-        esp_err_t commit_err = nvs_commit(handle);
-        if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
-        nvs_close(handle);
-    } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
-        first_err = open_err;
+    for (size_t i = 0U; i < sizeof(reset_namespaces) / sizeof(reset_namespaces[0]); i++) {
+        const char *namespace_name = reset_namespaces[i];
+        if (!argus_nvs_config_namespace_in_factory_reset_scope(namespace_name)) {
+            if (first_err == ESP_OK) first_err = ESP_ERR_INVALID_STATE;
+            continue;
+        }
+        nvs_handle_t handle;
+        esp_err_t open_err = nvs_open(namespace_name, NVS_READWRITE, &handle);
+        if (open_err == ESP_OK) {
+            esp_err_t erase_err = nvs_erase_all(handle);
+            if (erase_err != ESP_OK && first_err == ESP_OK) first_err = erase_err;
+            esp_err_t commit_err = nvs_commit(handle);
+            if (commit_err != ESP_OK && first_err == ESP_OK) first_err = commit_err;
+            nvs_close(handle);
+        } else if (open_err != ESP_ERR_NVS_NOT_FOUND && first_err == ESP_OK) {
+            first_err = open_err;
+        }
     }
 
     return first_err;
+}
+
+bool argus_nvs_config_namespace_in_factory_reset_scope(const char *namespace_name)
+{
+    return namespace_name != NULL &&
+           (strcmp(namespace_name, ARGUS_NVS_NS_CFG) == 0 ||
+            strcmp(namespace_name, ARGUS_NVS_NS_SYS) == 0);
 }
 
 static const argus_nvs_driver_t s_prod_driver = {

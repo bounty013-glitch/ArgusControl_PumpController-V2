@@ -93,6 +93,7 @@ typedef enum {
     ARGUS_NET_EVT_AP_CLIENT_CONNECTED,
     ARGUS_NET_EVT_AP_CLIENT_DISCONNECTED,
     ARGUS_NET_EVT_RESTART_REQUEST,         /**< Coordinated restart (deferred to net_mgr task) */
+    ARGUS_NET_EVT_FACTORY_RESET_REQUEST,   /**< Coordinated configuration reset + reboot */
     ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
     ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP,   /**< Timer wakeup for auto-reconnect */
     ARGUS_NET_EVT_APPLY_WIFI_CONFIG,       /**< Apply new Wi-Fi credentials without restart */
@@ -460,6 +461,13 @@ esp_err_t argus_net_mgr_request_service_exit(argus_authority_owner_t requested_o
  */
 esp_err_t argus_net_mgr_request_restart(void);
 
+/**
+ * @brief Preflight and queue one coordinated configuration factory reset.
+ * @return ESP_OK when exactly one request was queued; ESP_ERR_INVALID_STATE
+ *         when policy rejects; ESP_ERR_NOT_SUPPORTED when already pending.
+ */
+esp_err_t argus_net_mgr_request_factory_reset(void);
+
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
 
@@ -488,6 +496,7 @@ typedef struct {
     argus_wifi_apply_state_t apply_state;
     uint32_t timer_generation;
     bool wifi_transaction_active;
+    bool factory_reset_pending;
     uint32_t transaction_generation;
     bool auto_retry_timer_active;
     uint32_t auto_retry_timer_generation;

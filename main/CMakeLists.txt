@@ -17,6 +17,7 @@ idf_component_register(
         "argus_console_helpers.c"
         "argus_http_server.c"
         "argus_restart_mgr.c"
+        "argus_factory_reset.c"
         "argus_config_overlay.c"
         "argus_json.c"
         "argus_service_policy.c"
