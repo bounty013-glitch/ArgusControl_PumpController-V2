@@ -5360,6 +5360,7 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_sequence_duplicate_and_conflict);
     RUN_TEST(test_4c_sequence_stale_and_wrap);
     RUN_TEST(test_4c_session_restart_invalidates_prior_envelope);
+    RUN_TEST(test_4c_session_generation_contract);
     RUN_TEST(test_4c_retained_capacity_covers_baseline);
     }
 

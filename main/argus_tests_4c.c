@@ -349,6 +349,22 @@ esp_err_t test_4c_session_restart_invalidates_prior_envelope(void)
     return ESP_OK;
 }
 
+esp_err_t test_4c_session_generation_contract(void)
+{
+    char first[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
+    char second[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
+    CHECK(argus_mqtt_session_format(0U, 0U, first, sizeof(first)) ==
+          ESP_ERR_INVALID_ARG);
+    CHECK(argus_mqtt_session_format(0x01234567U, 0x89abcdefU,
+                                    first, sizeof(first)) == ESP_OK);
+    CHECK(strcmp(first, "0123456789abcdef") == 0);
+    CHECK(argus_mqtt_session_format(0x01234567U, 0x89abcdf0U,
+                                    second, sizeof(second)) == ESP_OK);
+    CHECK(strcmp(first, second) != 0);
+    CHECK(strlen(first) == ARGUS_MQTT_SESSION_HEX_LEN);
+    return ESP_OK;
+}
+
 esp_err_t test_4c_retained_capacity_covers_baseline(void)
 {
     const size_t retained_metadata = 4U;

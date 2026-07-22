@@ -376,12 +376,16 @@ esp_err_t argus_mqtt_runtime_prepare_start(void)
     esp_err_t err = argus_identity_get(&identity);
     if (err != ESP_OK) return err;
 
-    uint64_t random_value = 0U;
-    while (random_value == 0U) {
-        random_value = ((uint64_t)esp_random() << 32) | esp_random();
-    }
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
-    snprintf(session, sizeof(session), "%016" PRIx64, random_value);
+    uint32_t random_high;
+    uint32_t random_low;
+    do {
+        random_high = esp_random();
+        random_low = esp_random();
+    } while (random_high == 0U && random_low == 0U);
+    err = argus_mqtt_session_format(random_high, random_low,
+                                    session, sizeof(session));
+    if (err != ESP_OK) return err;
 
     xQueueReset(s_runtime.queue);
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);

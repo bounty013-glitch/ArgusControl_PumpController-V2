@@ -135,6 +135,8 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
 
 void argus_mqtt_session_core_init(argus_mqtt_session_core_t *core,
                                   const char *session);
+esp_err_t argus_mqtt_session_format(uint32_t high, uint32_t low,
+                                    char *out, size_t out_size);
 bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference);
 esp_err_t argus_mqtt_session_accept_heartbeat(
     argus_mqtt_session_core_t *core, uint64_t connection_id,

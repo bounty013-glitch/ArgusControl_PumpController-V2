@@ -329,6 +329,17 @@ void argus_mqtt_session_core_init(argus_mqtt_session_core_t *core,
     if (session != NULL) strlcpy(core->session, session, sizeof(core->session));
 }
 
+esp_err_t argus_mqtt_session_format(uint32_t high, uint32_t low,
+                                    char *out, size_t out_size)
+{
+    if (out == NULL || out_size < ARGUS_MQTT_SESSION_HEX_LEN + 1U ||
+        (high == 0U && low == 0U)) return ESP_ERR_INVALID_ARG;
+    int written = snprintf(out, out_size, "%08lx%08lx",
+                           (unsigned long)high, (unsigned long)low);
+    return written == (int)ARGUS_MQTT_SESSION_HEX_LEN
+               ? ESP_OK : ESP_ERR_INVALID_SIZE;
+}
+
 bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference)
 {
     uint32_t delta = candidate - reference;

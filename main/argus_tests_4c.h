@@ -20,4 +20,5 @@ esp_err_t test_4c_sequence_first_and_newer(void);
 esp_err_t test_4c_sequence_duplicate_and_conflict(void);
 esp_err_t test_4c_sequence_stale_and_wrap(void);
 esp_err_t test_4c_session_restart_invalidates_prior_envelope(void);
+esp_err_t test_4c_session_generation_contract(void);
 esp_err_t test_4c_retained_capacity_covers_baseline(void);
