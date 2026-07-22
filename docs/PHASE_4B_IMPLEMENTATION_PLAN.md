@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 is COMPLETE AND ACCEPTED: motor-disconnected validation passed three final 501/501 suites, and the connected-motor browser/UI integration gate passed on July 22, 2026 against firmware commit `666c1b0`. See [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md). Phase 4B.6 is next and is NOT YET IMPLEMENTED or accepted; all of Phase 4B is therefore not yet complete.
+**Status:** Phase 4B.1 through Phase 4B.5 are COMPLETE AND ACCEPTED. Phase 4B.6 is IN PROGRESS on identity `v2-phase4b.6-dev`; no Phase 4B.6 implementation or acceptance is claimed by the identity checkpoint. See [Phase 4B.6 implementation plan](Phase%204B.6%20-%20Implementation%20Plan%20-%20Complete%20Portal%20Lifecycle.md). All of Phase 4B remains incomplete until the Phase 4B.6 stop gate is satisfied.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -763,7 +763,7 @@ motion controls admitted no command, and reset did not automatically restart.
 
 ### 4B.6 — Exit, Apply/Reboot, Reset, and Physical Acceptance
 
-**Status:** NEXT PHASE - NOT YET IMPLEMENTED OR ACCEPTED
+**Status:** IN PROGRESS - Identity `v2-phase4b.6-dev` established; functional implementation and acceptance remain pending.
 
 **Scope:** Final integration testing. Exit/apply/reboot workflows.
 Factory reset. Final operator acceptance matching the phase-staged criteria in
