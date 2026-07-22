@@ -4,7 +4,7 @@ Argus V2 Peristaltic Pump Controller firmware for ESP32-S3.
 
 This repository implements the V2 architecture for precision motor control, featuring exact fixed-point Bresenham GPTimer pulse generation, a 20 ms linear trajectory profile engine, verified common-anode active-low hardware integration, an embedded local MQTT broker, and open-loop safety doctrine.
 
-**Current Status**: Phase 4B.1 through Phase 4B.6 are **COMPLETE AND ACCEPTED**. Firmware identity `v2-phase4b.6-dev` completed the controller-hosted portal lifecycle, coordinated configuration factory reset, truthful uncommissioned recovery, exact recommissioning, and final Local Service round trip on July 22, 2026. The three final controller suite invocations passed 531/531 each. Phase 4B.5 powered evidence remains accepted and was not repeated; Phase 4B.6 issued no motion command. No pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is implied. The project is ready to begin Phase 4C.
+**Current Status**: Phase 4C is **COMPLETE AND ACCEPTED** on July 22, 2026. Firmware `v2-phase4c-dev` implements and verifies the dynamic MQTT supervisory contract, broker-lifecycle sessions, connection-bound heartbeat lease, replay protection, command results, authoritative retained state, truthful open-loop telemetry, and fail-operational supervisory loss. Three final controller suites passed 591/591 each, stationary live protocol acceptance passed 72 checks, and the bounded unloaded powered run passed 50 assertions at no more than 500 mRPM. The controller finished `UNLOCKED`, zero-output, E-stop clear, and driver-disabled. No pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is implied.
 
 ---
 
@@ -69,9 +69,7 @@ The control node hosts a local MQTT broker listening on port `1883` on both its 
 *   **Broker Lifecycle**: Full state machine (STOPPED → STARTING → RUNNING → STOPPING) with bounded startup/shutdown and atomic client tracking.
 *   **Authority Model**: Exclusive command authority — MQTT supervisory, local browser, and diagnostic CLI authority never coexist. See `docs/PHASE_4A_RUNTIME_ACCEPTANCE.md` for verified behavior.
 
-> [!NOTE]
-> MQTT topic paths and payload schemas are preliminary. The production
-> MQTT contract will be defined in Phase 4C.
+The accepted MQTT contract uses the commissioned-identity root `argus/<client_id>/<unit_id>`, strict topic ownership, QoS 1 non-retained command envelopes, application-level command results, and retained controller truth. MQTT transports intent; it does not own machine state. See [Phase 4C MQTT Supervisory Contract](docs/PHASE_4C_MQTT_CONTRACT.md) and [Phase 4C Tests and Acceptance Record](docs/Phase%204C%20Tests.md).
 
 ---
 

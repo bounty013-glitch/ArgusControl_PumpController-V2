@@ -1,0 +1,24 @@
+#pragma once
+
+#include "esp_err.h"
+
+esp_err_t test_4c_topic_root_and_canonical_topics(void);
+esp_err_t test_4c_topic_component_rejections(void);
+esp_err_t test_4c_topic_ownership_policy(void);
+esp_err_t test_4c_command_decoder_all_actions(void);
+esp_err_t test_4c_command_decoder_strict_structure(void);
+esp_err_t test_4c_command_decoder_value_contract(void);
+esp_err_t test_4c_command_decoder_identity_fields(void);
+esp_err_t test_4c_command_decoder_length_and_nul(void);
+esp_err_t test_4c_heartbeat_decoder_contract(void);
+esp_err_t test_4c_heartbeat_decoder_rejections(void);
+esp_err_t test_4c_serial_number_arithmetic(void);
+esp_err_t test_4c_heartbeat_lease_binding(void);
+esp_err_t test_4c_heartbeat_expiry_is_observability_only(void);
+esp_err_t test_4c_disconnect_releases_matching_lease(void);
+esp_err_t test_4c_sequence_first_and_newer(void);
+esp_err_t test_4c_sequence_duplicate_and_conflict(void);
+esp_err_t test_4c_sequence_stale_and_wrap(void);
+esp_err_t test_4c_session_restart_invalidates_prior_envelope(void);
+esp_err_t test_4c_session_generation_contract(void);
+esp_err_t test_4c_retained_capacity_covers_baseline(void);

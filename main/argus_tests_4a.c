@@ -22,6 +22,7 @@
 #include "argus_tests_4b4_step2.h"
 #include "argus_tests_4b5.h"
 #include "argus_tests_4b6.h"
+#include "argus_tests_4c.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5108,7 +5109,7 @@ static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6 Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -5340,6 +5341,27 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b6_factory_reset_orchestration_revalidation);
     RUN_TEST(test_4b6_factory_reset_orchestration_failures);
     RUN_TEST(test_4b6_factory_reset_http_and_ui_contract);
+    /* Phase 4C dynamic MQTT contract and fail-operational tests */
+    RUN_TEST(test_4c_topic_root_and_canonical_topics);
+    RUN_TEST(test_4c_topic_component_rejections);
+    RUN_TEST(test_4c_topic_ownership_policy);
+    RUN_TEST(test_4c_command_decoder_all_actions);
+    RUN_TEST(test_4c_command_decoder_strict_structure);
+    RUN_TEST(test_4c_command_decoder_value_contract);
+    RUN_TEST(test_4c_command_decoder_identity_fields);
+    RUN_TEST(test_4c_command_decoder_length_and_nul);
+    RUN_TEST(test_4c_heartbeat_decoder_contract);
+    RUN_TEST(test_4c_heartbeat_decoder_rejections);
+    RUN_TEST(test_4c_serial_number_arithmetic);
+    RUN_TEST(test_4c_heartbeat_lease_binding);
+    RUN_TEST(test_4c_heartbeat_expiry_is_observability_only);
+    RUN_TEST(test_4c_disconnect_releases_matching_lease);
+    RUN_TEST(test_4c_sequence_first_and_newer);
+    RUN_TEST(test_4c_sequence_duplicate_and_conflict);
+    RUN_TEST(test_4c_sequence_stale_and_wrap);
+    RUN_TEST(test_4c_session_restart_invalidates_prior_envelope);
+    RUN_TEST(test_4c_session_generation_contract);
+    RUN_TEST(test_4c_retained_capacity_covers_baseline);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -5381,7 +5403,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6 Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -5424,7 +5446,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4B.6 PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4C PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 

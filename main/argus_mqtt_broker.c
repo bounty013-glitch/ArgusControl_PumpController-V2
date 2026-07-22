@@ -19,11 +19,11 @@ static const char *TAG = "argus_mqtt_broker";
 
 #define ARGUS_MQTT_MAX_CLIENTS 10
 #define ARGUS_MQTT_MAX_SUBS_PER_CLIENT 20
-#define ARGUS_MQTT_MAX_RETAINED 16
-#define ARGUS_MQTT_MAX_TOPIC_LEN 128
-#define ARGUS_MQTT_MAX_PAYLOAD_LEN 128
-#define ARGUS_MQTT_MAX_PACKET_LEN 512
-#define ARGUS_MQTT_CLIENT_TASK_STACK 4096
+#define ARGUS_MQTT_MAX_RETAINED ARGUS_MQTT_BROKER_RETAINED_CAPACITY
+#define ARGUS_MQTT_MAX_TOPIC_LEN ARGUS_MQTT_BROKER_TOPIC_CAP
+#define ARGUS_MQTT_MAX_PAYLOAD_LEN ARGUS_MQTT_BROKER_PAYLOAD_CAP
+#define ARGUS_MQTT_MAX_PACKET_LEN 1024
+#define ARGUS_MQTT_CLIENT_TASK_STACK 6144
 #define ARGUS_MQTT_SERVER_TASK_STACK 4096
 
 /* ---------------------------------------------------------------------------
@@ -38,8 +38,10 @@ static const char *TAG = "argus_mqtt_broker";
  * -----------------------------------------------------------------------*/
 typedef struct {
     bool in_use;
+    bool connected;
     int sock;
-    char client_id[32];
+    uint64_t connection_id;
+    char client_id[ARGUS_MQTT_BROKER_CLIENT_ID_CAP];
     char subscriptions[ARGUS_MQTT_MAX_SUBS_PER_CLIENT][ARGUS_MQTT_MAX_TOPIC_LEN];
     size_t subscription_count;
 } argus_mqtt_client_t;
@@ -65,8 +67,10 @@ typedef struct {
     int listen_sock;
     TaskHandle_t server_task_handle;
     _Atomic int32_t active_client_count;
+    _Atomic uint64_t next_connection_id;
     argus_mqtt_broker_message_cb_t on_message;
     argus_mqtt_broker_policy_cb_t policy_check;
+    argus_mqtt_broker_client_cb_t on_client_event;
     void *user_ctx;
     argus_mqtt_client_t clients[ARGUS_MQTT_MAX_CLIENTS];
     argus_mqtt_retained_t retained[ARGUS_MQTT_MAX_RETAINED];
@@ -144,17 +148,12 @@ static bool argus_mqtt_read_string(const uint8_t *packet, uint32_t len, uint32_t
     if (!argus_mqtt_read_u16(packet, len, offset, &string_len)) {
         return false;
     }
-    if (*offset + string_len > len || out_len == 0U) {
+    if (*offset + string_len > len || out_len == 0U || string_len >= out_len) {
         return false;
     }
 
-    size_t copy_len = string_len;
-    if (copy_len >= out_len) {
-        copy_len = out_len - 1U;
-    }
-
-    memcpy(out, packet + *offset, copy_len);
-    out[copy_len] = '\0';
+    memcpy(out, packet + *offset, string_len);
+    out[string_len] = '\0';
     *offset += string_len;
     return true;
 }
@@ -218,7 +217,7 @@ static esp_err_t argus_mqtt_send_publish(int sock, const char *topic, const char
  * Retained message & subscriber helpers  (unchanged, operate under client_lock)
  * =========================================================================*/
 
-static void argus_mqtt_store_retained_locked(const char *topic, const char *payload)
+static esp_err_t argus_mqtt_store_retained_locked(const char *topic, const char *payload)
 {
     argus_mqtt_retained_t *slot = NULL;
 
@@ -239,12 +238,14 @@ static void argus_mqtt_store_retained_locked(const char *topic, const char *payl
     }
 
     if (slot == NULL) {
-        slot = &s_broker.retained[0];
+        ESP_LOGE(TAG, "retained capacity exhausted; refusing to evict authoritative state");
+        return ESP_ERR_NO_MEM;
     }
 
     slot->in_use = true;
     strlcpy(slot->topic, topic, sizeof(slot->topic));
     strlcpy(slot->payload, payload, sizeof(slot->payload));
+    return ESP_OK;
 }
 
 static void argus_mqtt_deliver_to_subscribers_locked(const char *topic, const char *payload, bool retain)
@@ -285,6 +286,19 @@ static void argus_mqtt_send_retained_for_filter_locked(argus_mqtt_client_t *clie
  * MQTT packet handlers  (unchanged from original)
  * =========================================================================*/
 
+static bool argus_mqtt_duplicate_client_id_locked(
+    const argus_mqtt_client_t *requester, const char *client_id)
+{
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        const argus_mqtt_client_t *other = &s_broker.clients[i];
+        if (other != requester && other->in_use && other->connected &&
+            strcmp(other->client_id, client_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static esp_err_t argus_mqtt_handle_connect(argus_mqtt_client_t *client, const uint8_t *packet, uint32_t len)
 {
     uint32_t offset = 0;
@@ -306,8 +320,12 @@ static esp_err_t argus_mqtt_handle_connect(argus_mqtt_client_t *client, const ui
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    if (!argus_mqtt_read_string(packet, len, &offset, client_id, sizeof(client_id))) {
-        strlcpy(client_id, "argus-client", sizeof(client_id));
+    if (client->connected ||
+        !argus_mqtt_read_string(packet, len, &offset, client_id, sizeof(client_id)) ||
+        client_id[0] == '\0') {
+        const uint8_t connack_bad_id[] = {0x20U, 0x02U, 0x00U, 0x02U};
+        (void)send(client->sock, connack_bad_id, sizeof(connack_bad_id), 0);
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     if (connect_flags & 0x04U) {
@@ -332,8 +350,15 @@ static esp_err_t argus_mqtt_handle_connect(argus_mqtt_client_t *client, const ui
         }
     }
 
+    if (offset != len || argus_mqtt_duplicate_client_id_locked(client, client_id)) {
+        const uint8_t connack_bad_id[] = {0x20U, 0x02U, 0x00U, 0x02U};
+        (void)send(client->sock, connack_bad_id, sizeof(connack_bad_id), 0);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     strlcpy(client->client_id, client_id, sizeof(client->client_id));
     client->subscription_count = 0;
+    client->connected = true;
 
     const uint8_t connack_ok[] = {0x20U, 0x02U, 0x00U, 0x00U};
     if (send(client->sock, connack_ok, sizeof(connack_ok), 0) != sizeof(connack_ok)) {
@@ -399,11 +424,7 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
                                            uint8_t fixed_header,
                                            const uint8_t *packet,
                                            uint32_t len,
-                                           char *callback_topic,
-                                           size_t callback_topic_len,
-                                           char *callback_payload,
-                                           size_t callback_payload_len,
-                                           bool *callback_retain,
+                                           argus_mqtt_broker_message_t *callback_message,
                                            bool *has_callback)
 {
     uint32_t offset = 0;
@@ -426,35 +447,51 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
         return ESP_ERR_INVALID_ARG;
     }
 
-    size_t payload_len = len - offset;
+    const size_t payload_len = len - offset;
     if (payload_len >= sizeof(payload)) {
-        payload_len = sizeof(payload) - 1U;
+        return ESP_ERR_INVALID_SIZE;
     }
     memcpy(payload, packet + offset, payload_len);
     payload[payload_len] = '\0';
 
-    if (s_broker.policy_check != NULL) {
-        if (s_broker.policy_check(topic, payload, retain, s_broker.user_ctx) != ESP_OK) {
-            ESP_LOGW(TAG, "Broker policy seam rejected message: topic=%s, retain=%d", topic, retain);
-            if (qos == 1U) {
-                uint8_t puback[] = {0x40U, 0x02U, (uint8_t)(packet_id >> 8), (uint8_t)(packet_id & 0xFFU)};
-                send(client->sock, puback, sizeof(puback), 0);
-            }
-            return ESP_OK; // Rejected message is NOT stored or delivered
+    *callback_message = (argus_mqtt_broker_message_t) {
+        .connection_id = client->connection_id,
+        .payload_len = payload_len,
+        .qos = qos,
+        .retain = retain,
+        .dup = (fixed_header & 0x08U) != 0U,
+        .policy_admitted = true,
+    };
+    strlcpy(callback_message->client_id, client->client_id,
+            sizeof(callback_message->client_id));
+    strlcpy(callback_message->topic, topic, sizeof(callback_message->topic));
+    memcpy(callback_message->payload, payload, payload_len + 1U);
+
+    if (s_broker.policy_check != NULL &&
+        s_broker.policy_check(callback_message, s_broker.user_ctx) != ESP_OK) {
+        callback_message->policy_admitted = false;
+        *has_callback = s_broker.on_message != NULL;
+        ESP_LOGW(TAG, "broker policy rejected external publish: topic=%s qos=%u retain=%d",
+                 topic, qos, retain);
+        if (qos == 1U) {
+            const uint8_t puback[] = {0x40U, 0x02U, (uint8_t)(packet_id >> 8), (uint8_t)(packet_id & 0xFFU)};
+            (void)send(client->sock, puback, sizeof(puback), 0);
         }
+        return ESP_OK;
     }
 
     if (retain) {
-        argus_mqtt_store_retained_locked(topic, payload);
+        esp_err_t retain_err = argus_mqtt_store_retained_locked(topic, payload);
+        if (retain_err != ESP_OK) {
+            return retain_err;
+        }
     }
     argus_mqtt_deliver_to_subscribers_locked(topic, payload, retain);
 
-    ESP_LOGI(TAG, "client %s publish: %s=%s", client->client_id, topic, payload);
+    ESP_LOGI(TAG, "client %s publish accepted: topic=%s qos=%u retain=%d payload_len=%u",
+             client->client_id, topic, qos, retain, (unsigned)payload_len);
 
     if (s_broker.on_message != NULL) {
-        strlcpy(callback_topic, topic, callback_topic_len);
-        strlcpy(callback_payload, payload, callback_payload_len);
-        *callback_retain = retain;
         *has_callback = true;
     }
 
@@ -472,9 +509,16 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
 
 static void argus_mqtt_close_client(argus_mqtt_client_t *client)
 {
+    argus_mqtt_broker_client_info_t info = {
+        .connection_id = client->connection_id,
+    };
+    strlcpy(info.client_id, client->client_id, sizeof(info.client_id));
+
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     int sock = client->sock;
+    bool notify_disconnect = client->connected;
     client->sock = -1;
+    client->connected = false;
     client->in_use = false;
     client->subscription_count = 0;
     xSemaphoreGive(s_broker.client_lock);
@@ -482,6 +526,11 @@ static void argus_mqtt_close_client(argus_mqtt_client_t *client)
     if (sock >= 0) {
         shutdown(sock, 0);
         close(sock);
+    }
+
+    if (notify_disconnect && s_broker.on_client_event != NULL) {
+        s_broker.on_client_event(ARGUS_MQTT_BROKER_CLIENT_DISCONNECTED,
+                                 &info, s_broker.user_ctx);
     }
 
     int32_t prev = atomic_fetch_sub(&s_broker.active_client_count, 1);
@@ -525,27 +574,25 @@ static void argus_mqtt_client_task(void *arg)
 
         uint8_t packet_type = fixed_header >> 4;
         bool has_callback = false;
-        bool callback_retain = false;
-        char callback_topic[ARGUS_MQTT_MAX_TOPIC_LEN] = {0};
-        char callback_payload[ARGUS_MQTT_MAX_PAYLOAD_LEN] = {0};
+        bool notify_connect = false;
+        argus_mqtt_broker_message_t callback_message = {0};
 
         xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
 
         esp_err_t err = ESP_OK;
-        switch (packet_type) {
+        if (!client->connected && packet_type != 1U) {
+            err = ESP_ERR_INVALID_STATE;
+        } else switch (packet_type) {
         case 1:
             err = argus_mqtt_handle_connect(client, packet, remaining_len);
+            notify_connect = err == ESP_OK;
             break;
         case 3:
             err = argus_mqtt_handle_publish(client,
                                             fixed_header,
                                             packet,
                                             remaining_len,
-                                            callback_topic,
-                                            sizeof(callback_topic),
-                                            callback_payload,
-                                            sizeof(callback_payload),
-                                            &callback_retain,
+                                            &callback_message,
                                             &has_callback);
             break;
         case 8:
@@ -566,14 +613,21 @@ static void argus_mqtt_client_task(void *arg)
 
         xSemaphoreGive(s_broker.client_lock);
 
-        if (has_callback && s_broker.on_message != NULL) {
-            s_broker.on_message(callback_topic, callback_payload, callback_retain, s_broker.user_ctx);
+        if (notify_connect && s_broker.on_client_event != NULL) {
+            argus_mqtt_broker_client_info_t info = {
+                .connection_id = client->connection_id,
+            };
+            strlcpy(info.client_id, client->client_id, sizeof(info.client_id));
+            s_broker.on_client_event(ARGUS_MQTT_BROKER_CLIENT_CONNECTED,
+                                     &info, s_broker.user_ctx);
         }
 
-        if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
-            ESP_LOGW(TAG, "client packet handling failed: %s", esp_err_to_name(err));
+        if (has_callback && s_broker.on_message != NULL) {
+            s_broker.on_message(&callback_message, s_broker.user_ctx);
         }
-        if (err == ESP_ERR_NOT_SUPPORTED) {
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "client packet handling failed: %s", esp_err_to_name(err));
             break;
         }
     }
@@ -596,6 +650,7 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(int sock)
             memset(client, 0, sizeof(*client));
             client->in_use = true;
             client->sock = sock;
+            client->connection_id = atomic_fetch_add(&s_broker.next_connection_id, 1U) + 1U;
             return client;
         }
     }
@@ -783,6 +838,7 @@ esp_err_t argus_mqtt_broker_init(void)
 
     s_broker.state = BROKER_STATE_STOPPED;
     atomic_store(&s_broker.active_client_count, 0);
+    atomic_store(&s_broker.next_connection_id, 0);
     s_broker.listen_sock = -1;
     s_broker.server_task_handle = NULL;
 
@@ -817,6 +873,7 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
     s_broker.port = config->port;
     s_broker.on_message = config->on_message;
     s_broker.policy_check = config->policy_check;
+    s_broker.on_client_event = config->on_client_event;
     s_broker.user_ctx = config->user_ctx;
     s_broker.listen_sock = -1;
     s_broker.startup_error = ESP_OK;
@@ -889,6 +946,10 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain)
 {
     ESP_RETURN_ON_FALSE(topic != NULL && payload != NULL, ESP_ERR_INVALID_ARG, TAG, "invalid publish args");
+    ESP_RETURN_ON_FALSE(strnlen(topic, ARGUS_MQTT_MAX_TOPIC_LEN) < ARGUS_MQTT_MAX_TOPIC_LEN,
+                        ESP_ERR_INVALID_SIZE, TAG, "publish topic too long");
+    ESP_RETURN_ON_FALSE(strnlen(payload, ARGUS_MQTT_MAX_PAYLOAD_LEN) < ARGUS_MQTT_MAX_PAYLOAD_LEN,
+                        ESP_ERR_INVALID_SIZE, TAG, "publish payload too long");
 
     xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
     if (s_broker.state != BROKER_STATE_RUNNING) {
@@ -900,7 +961,11 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
     xSemaphoreGive(s_broker.lifecycle_mutex);
 
     if (retain) {
-        argus_mqtt_store_retained_locked(topic, payload);
+        esp_err_t retain_err = argus_mqtt_store_retained_locked(topic, payload);
+        if (retain_err != ESP_OK) {
+            xSemaphoreGive(s_broker.client_lock);
+            return retain_err;
+        }
     }
     argus_mqtt_deliver_to_subscribers_locked(topic, payload, retain);
     xSemaphoreGive(s_broker.client_lock);
