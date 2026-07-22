@@ -1,21 +1,21 @@
 # Phase 4B.4 - Physical Test and Evidence Record
 
-**Status:** PENDING - TEMPLATE ESTABLISHED DURING STEP 0
+**Status:** STEP 2 AUTOMATED CONTROLLER RUNTIME PASSED - PHYSICAL TESTS PENDING
 **Firmware identity:** `v2-phase4b.4-dev`
-**Candidate commit:** `[PENDING]`
+**Candidate commit:** `99413f8` (Step 2 software candidate; not physically accepted)
 **Acceptance date:** `[PENDING]`
 
 ## Evidence boundary
 
-This document is an unexecuted template. The Step 0 identity-only build is recorded in the Phase 4B.4 implementation plan, but no Phase 4B.4 functional implementation, runtime test result, physical result, or acceptance is claimed. Populate candidate identity and results only after source review authorizes hardware execution.
+This document remains the physical-test template. Phase 4B.4 Step 2 controller-only automated runtime is recorded below, but the motor remained disconnected and no command-API physical result, motor result, pump result, or physical acceptance is claimed.
 
 For every test, record the initial condition, operator action, relevant serial/dashboard transition, actual outcome, PASS/FAIL determination, and screenshot filename when one materially adds evidence.
 
 ## Preflight pure suite
 
-**Result:** `[PENDING]`
+**Result:** `PASS - CONTROLLER-ONLY AUTOMATED RUNTIME`
 
-Record distinct tests, repeat passes, total executions, passed, failed, and before/after production-isolation state. Step 1 registers 151 distinct tests for 453 expected executions across three passes. These are source-derived counts, not runtime results, and may increase during later Phase 4B.4 steps.
+Three final genuine interactive diagnostic-option `t` invocations each reported 163 distinct tests, three repeat passes, 489 executions, 489 passed, and 0 failed. Every invocation preserved authority generation 3, network `AP_DISCOVERABLE`, broker `RUNNING`, machine `UNLOCKED`, and 16 tasks, and returned normally to the diagnostic prompt. No panic, post-input reset, watchdog, brownout, assertion, stack-canary, heap-corruption, or task-leak evidence appeared.
 
 ## Command API physical tests
 

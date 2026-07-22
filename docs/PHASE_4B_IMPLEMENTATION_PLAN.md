@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 is ACCEPTED at `eb1a6cc`; Step 2 authenticated HTTP admission and router dispatch is IN PROGRESS.
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 is ACCEPTED at `eb1a6cc`; Step 2 authenticated HTTP admission and router dispatch is SOFTWARE-AND-AUTOMATED-RUNTIME-READY-FOR-REVIEW at `99413f8`.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -505,9 +505,13 @@ intent from physical motor movement:
 {
   "command": "start" | "stop" | "unlock" | "estop" | "reset_estop" | "recover" | "set_target",
   "target_rpm_milli": 1000,
-  "generation": 4
+  "forward": true
 }
 ```
+
+`target_rpm_milli` and `forward` are present only for `set_target`. Source,
+authority generation, authority mode, owner, and routing fields are supplied
+by the controller and are rejected if sent by the browser.
 
 **POST /api/config/stage request:**
 ```json
@@ -679,7 +683,7 @@ Authority snapshot confirms `LOCAL_SERVICE/BROWSER`.
 
 ### 4B.4 — Browser-Local Motion Command API
 
-**Status:** ACTIVE - Step 1 accepted; Step 2 authenticated HTTP admission and router dispatch in progress. Connected-motor and physical acceptance remain pending. See [Phase 4B.4 Implementation Plan](Phase%204B.4%20-%20Implementation%20Plan%20-%20Browser-Local%20Motion%20Command%20API.md).
+**Status:** ACTIVE - Step 1 accepted; Step 2 authenticated HTTP admission and router dispatch is software-and-automated-runtime ready for independent supervisory review at `99413f8`. Connected-motor and physical acceptance remain pending. See [Phase 4B.4 Implementation Plan](Phase%204B.4%20-%20Implementation%20Plan%20-%20Browser-Local%20Motion%20Command%20API.md).
 
 **Scope:** Implement `POST /api/command`. Parse JSON, construct
 `argus_command_envelope_t` with `source=LOCAL_SERVICE_PORTAL`, dispatch
@@ -695,11 +699,17 @@ through router.
 **Lock impact:** None new — dispatch goes through existing
 `s_dispatch_mutex`.
 
-**Failure behavior:** JSON parse error returns 400. Authority rejection
-returns 403. Dispatch error returns 500.
+**Failure behavior:** Body or decoder rejection returns 400. Authentication
+failure returns 401. Network or authority admission rejection returns 403.
+Established router/state conflicts return 409. Unexpected internal failures
+return 500. Oversized requests are rejected without draining an unbounded
+client-declared length.
 
-**Tests:** Envelope construction tests. Authority rejection tests for
-wrong source/owner combinations.
+**Tests:** 12 Step 2 groups cover exact registration, bounded body reception,
+authentication/decoder rejection, the admission matrix, all seven envelopes,
+generation-capture order, exactly-once dispatch, response mapping, prohibited
+routing fields, and invalid-operation isolation. The complete 163-test suite
+passed 489/489 executions in each of three final controller runs.
 
 **Stop gate:** Browser can start/stop motor through HTTP commands while
 holding `LOCAL_SERVICE/BROWSER` authority.
