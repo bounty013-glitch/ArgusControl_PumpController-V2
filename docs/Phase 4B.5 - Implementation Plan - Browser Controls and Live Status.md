@@ -1,6 +1,6 @@
 # Phase 4B.5 - Implementation Plan: Browser Controls and Live Status
 
-**Status:** IMPLEMENTED - SOFTWARE VALIDATED; CONTROLLER VALIDATION BLOCKED ON ISOLATION EVIDENCE
+**Status:** MOTOR-DISCONNECTED SOFTWARE AND AUTOMATED RUNTIME VALIDATED - READY FOR SUPERVISORY REVIEW
 
 ## Authorized Baseline
 
@@ -16,6 +16,8 @@ Implement the real technician-oriented browser motion controls on a dedicated au
 The page must submit only the seven accepted command schemas to `POST /api/command`. The browser supplies no source, authority owner, or authority generation and owns no machine state. The accepted command router remains the sole production path to the state and motion system.
 
 Implementation commit: `594445b42d66ada780fd1e34f5084b0a2bab96ac`
+
+Recovery deadlock correction: `efcc8a3eb2ede7279242a848936408287cd03f7b`
 
 ## Implemented Surface
 
@@ -49,21 +51,39 @@ Validated on July 21, 2026 against implementation commit `594445b42d66ada780fd1e
 - Source boundaries: one existing production router dispatch call; no controls-page call to router, state manager, trajectory, pulse engine, motor, or GPIO APIs; no browser-supplied source, owner, or generation.
 - ESP-IDF: v5.5.3.
 - Build: full-clean, ccache disabled, PASS with zero compiler warnings and zero compiler errors.
-- Application binary: `0x107410` bytes.
-- Smallest OTA slot: `0x300000` bytes; headroom `0x1f8bf0` bytes (66%).
+- Final corrected application binary: `0x1073e0` bytes.
+- Smallest OTA slot: `0x300000` bytes; headroom `0x1f8c20` bytes (66%).
 - Diff/credential/temp-artifact audit: PASS.
 
-Four registered Phase 4B.5 pure tests increase the previous 163-test baseline to 167 distinct tests. The expected controller result is three internal repeat passes, 501 total executions, 501 passed, and zero failed. Those numbers are registration expectations only; no Phase 4B.5 controller execution is claimed in this record.
+Four registered Phase 4B.5 pure tests increase the previous 163-test baseline to 167 distinct tests.
 
-## Controller Validation Gate
+## Motor-Disconnected Controller Validation
 
-No COM port was opened, no image was flashed, and no live browser command or diagnostic option was sent during this pass. Existing records establish that the motor was disconnected during accepted Phase 4B.4 automated work, but they do not positively establish the current required electrical isolation of STEP, DIR, and ENA from the driver. The unavailable power rig and a disconnected motor are not substitutes for that evidence.
+Validated on July 21-22, 2026. Before live motion-capable commands, the operator confirmed that the motor was fully isolated and physically absent from the bench. No motor, driver load, pump, or mechanical assembly was operated.
 
-Motor-disconnected controller validation remains pending until STEP/DIR/ENA isolation is physically verified and recorded. At that point the corrected image must receive boot/stability observation, three complete 167-test/501-execution pure-suite invocations, authenticated controls-page and automatic-status checks, and only then isolated live command/state-machine checks. No motion-capable browser command may be sent before that verification.
+- COM5/chip verification: ESP32-S3 QFN56 revision 0.2, USB-Serial/JTAG, MAC `3c:dc:75:6e:c2:d0`.
+- Firmware identity: `v2-phase4b.5-dev`.
+- Final corrected binary SHA-256: `503B74BF873E0D6F2B6261FCF1DF7895A8E9D2F90E0FFA2BB97EB3844C37F378`.
+- Flash: PASS with hash verification.
+- Final pure-suite runs: three complete genuine Windows ConPTY-backed invocations, each 167 distinct tests, three internal repeat passes, 501/501 executions passed, zero failed; aggregate 1,503/1,503.
+- Production isolation on every final invocation: authority generation, network state, broker state, machine state, and task count unchanged.
+- Stability: no panic, unexpected reset, watchdog, brownout, assertion, stack-canary failure, heap corruption, or task leak.
+- Browser preflight: authenticated `/controls` loaded with live automatic status, correct identity, `AP_DISCOVERABLE`, `SUPERVISORY/MQTT`, zero speeds, disabled driver, and ordinary browser commands correctly disabled.
+- Local Service entry: `SERVICE_AP_ONLY`, `LOCAL_SERVICE/BROWSER`, STA disabled, broker stopped, and browser commands admissible.
+- Isolated command checks: accepted target without output, forward and reverse controller-state runs, normal stop to `HOLDING`, unlock, E-stop priority, reset without automatic restart, and recovery to `UNLOCKED`; responses remained distinct from authoritative status and did not claim physical motion.
+- Controlled service exit: PASS; the reboot restored `AP_DISCOVERABLE`, `SUPERVISORY/MQTT`, `UNLOCKED`, zero outputs, disabled driver, and the running broker without a reset loop.
+
+## Recovery Deadlock Finding And Correction
+
+The first live browser recovery request exposed a pre-existing self-deadlock in `argus_trajectory_recover()`: recovery held the non-recursive trajectory mutex and called the public `argus_trajectory_clear_error()`, which attempted to take the same mutex again. The API request could not complete, status polling became stale, and the HTTP task remained blocked. No panic, reset, unsafe motor behavior, or physical motion occurred.
+
+Commit `efcc8a3eb2ede7279242a848936408287cd03f7b` introduced a lock-held error-clear helper. Recovery calls that helper while already holding the mutex, while the public clear function retains its existing lock-taking contract. A host regression fails if recovery again calls the public lock-taking function. The ESP-IDF v5.5.3 full-clean no-ccache build passed with zero compiler warnings and zero compiler errors, and the final three controller suites passed before the corrected live browser reproduction.
+
+The exact corrected reproduction started from stationary `HOLDING` with zero generated and applied speed. One browser `Recover` action returned `Recover accepted by API`; authoritative status then reported `UNLOCKED`, zero generated/applied speed, disabled driver, clear E-stop, preserved `SERVICE_AP_ONLY` and `LOCAL_SERVICE/BROWSER`, and continued healthy polling.
 
 ## Safety Boundary
 
-Development and any later automated controller validation are motor-disconnected. No connected-motor, pump, hose, chemical, pressure, process, flow-accuracy, or mechanical-endurance acceptance is claimed. The narrow powered UI-to-motor confirmation remains a later Phase 4B.5 acceptance dependency and must use the final controls implemented by this phase.
+This completed validation is controller-level and motor-disconnected. No connected-motor, pump, hose, chemical, pressure, process, flow-accuracy, or mechanical-endurance acceptance is claimed. The narrow powered UI-to-motor confirmation remains the Phase 4B.5 acceptance dependency and must use the final controls implemented by this phase.
 
 ## Step 0 Identity Record
 
