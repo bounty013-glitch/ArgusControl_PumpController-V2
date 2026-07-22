@@ -375,9 +375,6 @@ esp_err_t argus_mqtt_runtime_prepare_start(void)
     argus_identity_t identity;
     esp_err_t err = argus_identity_get(&identity);
     if (err != ESP_OK) return err;
-    argus_mqtt_topics_t topics;
-    err = argus_mqtt_topics_build(&topics, identity.client_id, identity.unit_id);
-    if (err != ESP_OK) return err;
 
     uint64_t random_value = 0U;
     while (random_value == 0U) {
@@ -389,7 +386,13 @@ esp_err_t argus_mqtt_runtime_prepare_start(void)
     xQueueReset(s_runtime.queue);
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
     s_runtime.identity = identity;
-    s_runtime.topics = topics;
+    err = argus_mqtt_topics_build(&s_runtime.topics,
+                                  identity.client_id, identity.unit_id);
+    if (err != ESP_OK) {
+        s_runtime.prepared = false;
+        xSemaphoreGive(s_runtime.mutex);
+        return err;
+    }
     argus_mqtt_session_core_init(&s_runtime.session, session);
     s_runtime.prepared = true;
     xSemaphoreGive(s_runtime.mutex);

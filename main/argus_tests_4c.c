@@ -357,5 +357,6 @@ esp_err_t test_4c_retained_capacity_covers_baseline(void)
     const size_t retained_telemetry = 6U;
     CHECK(retained_metadata + retained_state + retained_status +
               retained_telemetry <= ARGUS_MQTT_BROKER_RETAINED_CAPACITY);
+    CHECK(sizeof(argus_mqtt_topics_t) > 4096U);
     return ESP_OK;
 }
