@@ -364,7 +364,7 @@ The V2 pump controller's accepted Phase 4C implementation is a strict deployment
 - Telemetry distinguishes configured target, trajectory target, applied output, generated rate, and generated step count. `feedback_available=false` is published until a real feedback provider exists; no `actual_rpm` is fabricated.
 - The legacy `argus/peristaltic/cmd/...` interface is not a compatibility path and cannot dispatch commands.
 
-Sessions, sequences, connection IDs, client IDs, and topic policy provide lifecycle freshness and deterministic local ownership, not cryptographic identity. Authentication, TLS, cryptographic publisher identity, rate limiting, abuse handling, and the general security review remain Phase 4D work. The exact deployed contract is defined in `PHASE_4C_MQTT_CONTRACT.md`.
+Sessions, sequences, connection IDs, client IDs, and topic policy provide lifecycle freshness and deterministic local ownership, not cryptographic identity. Phase 4D.1 defines independently revocable machine identities and per-client publish/subscribe permissions as future admission gates before the accepted Phase 4C contract. It does not implement those gates. Until MQTT TLS and credential handling are separately implemented and accepted, deployment remains limited to the approved protected local-network boundary; Wi-Fi encryption is not MQTT end-to-end transport security. The exact deployed protocol remains defined in `PHASE_4C_MQTT_CONTRACT.md`, and the future security boundary is defined in `PHASE_4D_SECURITY_CONTRACT.md`.
 
 ## Support-Friendly Design
 

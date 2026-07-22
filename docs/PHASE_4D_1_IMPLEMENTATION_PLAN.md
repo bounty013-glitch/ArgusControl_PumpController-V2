@@ -1,6 +1,6 @@
 # Phase 4D.1 - Security Contract and Boundary Audit
 
-**Status:** IN PROGRESS
+**Status:** COMPLETE AND ACCEPTED - CONTRACT/AUDIT ONLY
 
 **Branch:** `phase4d1-security-contract-and-boundaries`
 
@@ -160,4 +160,8 @@ Subphase labels may be adjusted by a later approved plan, but boundaries must re
 
 ## 12. Current Disposition
 
-Phase 4D.1 acceptance requires the contract, audit record, identity-only build, unchanged Phase 4C tests and boundaries, sanitized secret scan, and eligible non-motion pure-suite evidence. It does not accept security implementation, transport encryption, recovery hardware, physical security, or penetration resistance.
+Phase 4D.1 completed the authoritative contract, sanitized repository audit, identity-only build, source-boundary checks, and living-document reconciliation. The full-clean ESP-IDF v5.5.3 build completed with zero warnings and zero errors, no binary-size or static-RAM change from accepted Phase 4C, and no secret in the repository changes.
+
+Two eligible non-motion controller-suite attempts each executed all 591 assertions with zero test failures, but each correctly failed final production isolation because the controller's real commissioned-STA retry lifecycle changed network state during the suite. A third speculative run could not produce valid isolation evidence without changing network conditions or using a credential, browser, service-mode, configuration, or flash action excluded by this subphase. No controller-suite PASS is claimed; the exact evidence is preserved in `Phase 4D.1 Tests.md`.
+
+Phase 4D.1 accepts security architecture and boundaries only. It does not accept security implementation, transport encryption, recovery hardware, physical security, hostile-network operation, or penetration resistance.

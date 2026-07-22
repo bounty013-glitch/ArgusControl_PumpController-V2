@@ -63,6 +63,16 @@ gantt
     *   Fail-operational loss proven live at 500 mRPM: link became `OFFLINE` while state and output remained `RUNNING`; reconnect republished truth without a synthetic Start; normal Stop and Unlock returned safely to zero.
 *   **Evidence**: Three final 591/591 controller suites, 72 stationary protocol checks, 50 powered assertions, and zero build warnings/errors. See `PHASE_4C_MQTT_CONTRACT.md` and `Phase 4C Tests.md`.
 
+#### Phase 4D.1: Security Contract and Boundary Audit
+*   **Status**: COMPLETE AND ACCEPTED on July 22, 2026 as a contract/audit subphase only.
+*   **Delivered**:
+    *   Phase identity `v2-phase4d.1-dev` with no runtime security behavior change.
+    *   Sanitized audit of HTTP/AP/STA exposure, commissioning, credentials, storage, reset/recovery, MQTT, device protections, and command boundaries.
+    *   Authoritative human/machine identity model, built-in roles, permission matrix and ceilings, browser-session policy, AP-password workflow, recovery boundary, and bounded audit contract.
+    *   Explicit plain-HTTP and non-TLS MQTT deployment limits; HTTPS, TLS, certificates, hostile-network operation, and penetration testing remain deferred.
+*   **Evidence**: ESP-IDF v5.5.3 full-clean build with zero warnings/errors and no Phase 4C binary-size or static-RAM change. See `PHASE_4D_SECURITY_CONTRACT.md` and `Phase 4D.1 Tests.md`.
+*   **Next gate**: Phase 4D.2 may begin only under a separately approved scope. No credential or recovery implementation was started here.
+
 #### Phase 5: Field Integration and Calibration
 *   **Tasks**:
     *   Tune trajectory ramp acceleration.
