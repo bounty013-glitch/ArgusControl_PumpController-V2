@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 is ACTIVE with identity `v2-phase4b.5-dev`; the authorized functional step is the dedicated authenticated controls page and live authoritative status display. Final Phase 4B.5 acceptance requires one narrow powered confirmation through the real browser controls.
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 identity is `v2-phase4b.5-dev`; the dedicated authenticated controls page and live authoritative status display are implemented and software-validated at `594445b`. Motor-disconnected controller validation remains pending positive STEP/DIR/ENA isolation evidence. Final Phase 4B.5 acceptance requires one narrow powered confirmation through the real browser controls.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -732,7 +732,7 @@ final Phase 4B.5 controls remains a Phase 4B.5 acceptance dependency.
 
 ### 4B.5 — Embedded Mobile UI
 
-**Status:** ACTIVE - Step 0 identity established as `v2-phase4b.5-dev`; dedicated authenticated controls page and live authoritative status are the current authorized implementation step.
+**Status:** IMPLEMENTED AND SOFTWARE-VALIDATED - Identity is `v2-phase4b.5-dev`; dedicated authenticated `/controls` and live authoritative status are implemented at `594445b`. Motor-disconnected controller validation is pending positive STEP/DIR/ENA electrical-isolation evidence, and the powered UI-to-motor gate remains deferred.
 
 **Scope:** Create embedded HTML/CSS/JS portal. Mobile-first responsive
 layout. All assets embedded in firmware. Status display, commissioning
