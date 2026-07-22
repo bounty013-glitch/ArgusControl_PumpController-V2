@@ -305,6 +305,26 @@ Direct privileged mutation of a locked identity remains intentionally unsupporte
 
 **Acceptance boundary:** This closure does not replace the parser because no current schema correctness failure was established. Existing request-size limits, field bounds, content-type checks, and accepted flat schema remain required controls.
 
+**Phase 4C note:** The MQTT heartbeat and command-envelope contracts do not use `argus_json`. They use a separate strict bounded decoder that rejects duplicate, unknown, nested, array, malformed, truncated, embedded-NUL, ambiguous, and trailing input. This does not close the existing HTTP configuration-parser debt described above.
+
+---
+
+## DHR-016 — MQTT Trusted-Network Security Boundary
+
+| Field | Value |
+|-------|-------|
+| **Date Recorded** | 2026-07-22 |
+| **System Area** | Embedded MQTT Broker / Supervisory Contract |
+| **Phase Introduced** | Phase 4C acceptance |
+| **Status** | DEFERRED |
+| **Target Phase** | Phase 4D security review |
+
+**Current scope:** Phase 4C assumes a trusted local network. Its broker-lifecycle session, command sequence, connection identity, client ID, heartbeat lease, and topic-ownership policy provide freshness, replay control, and deterministic local ownership. They do not authenticate a human or publisher cryptographically.
+
+**Deferred hardening:** Define MQTT authentication and credential lifecycle, transport encryption, cryptographic publisher identity where required, authorization policy, rate limits, connection and publish abuse handling, denial-of-service bounds, security event observability, and a general adversarial security audit. Coordinate this work with the Phase 4D HTTP, TLS, credential, CSRF, and deployment-security design.
+
+**Acceptance boundary:** Do not describe client IDs, command sessions, sequence counters, topic ACLs, or connection IDs as security credentials. Phase 4C acceptance proves protocol correctness on the trusted local network; it does not claim resistance to a hostile network participant.
+
 ## Register Maintenance
 
 This register is maintained as a living document. New entries are appended as limitations are identified. Entries are closed when the limitation is resolved, with closure evidence documenting the specific change, test, or audit that addressed the item.

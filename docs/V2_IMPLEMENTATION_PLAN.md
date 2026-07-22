@@ -53,10 +53,15 @@ gantt
     *   Set the status output values and step position calculations based directly on the generated step count telemetry (`generated_step_count` and `generated_rpm_milli`).
 
 #### Phase 4: Dynamic MQTT & Fail-Operational Configuration
-*   **Tasks**:
-    *   Modify `app_main.c` and `argus_mqtt_broker.c` to parse and publish to dynamic topic trees incorporating client name and unit ID.
-    *   Implement the Fail-Operational supervisor: monitor connection state and heartbeats. If connection drops, continue pumping at the last valid trajectory rate. Republication occurs upon reconnection.
-    *   Document freshness, sequence, and idempotency behavior to prevent replaying stale commands (START, STOP, setpoints) blindly after recovery.
+*   **Status**: COMPLETE AND ACCEPTED as Phase 4C on July 22, 2026.
+*   **Implemented**:
+    *   Dynamic bounded root `argus/<client_id>/<unit_id>` from commissioned identity, with exact topic ownership and no legacy command fallback.
+    *   Per-broker-lifecycle random command session, non-reusable connection identity, duplicate-client rejection, and connection-bound heartbeat lease.
+    *   Strict command envelopes, QoS/RETAIN admission, uint32 freshness, exact-duplicate result replay, stale and sequence-conflict rejection, and bounded application command results.
+    *   One MQTT-to-router dispatch path with no direct state-manager, trajectory, step-generator, or GPIO bypass.
+    *   Twenty-five retained authoritative metadata/state/status/open-loop telemetry topics, 1 Hz health refresh, and baseline republication on reconnect.
+    *   Fail-operational loss proven live at 500 mRPM: link became `OFFLINE` while state and output remained `RUNNING`; reconnect republished truth without a synthetic Start; normal Stop and Unlock returned safely to zero.
+*   **Evidence**: Three final 591/591 controller suites, 72 stationary protocol checks, 50 powered assertions, and zero build warnings/errors. See `PHASE_4C_MQTT_CONTRACT.md` and `Phase 4C Tests.md`.
 
 #### Phase 5: Field Integration and Calibration
 *   **Tasks**:

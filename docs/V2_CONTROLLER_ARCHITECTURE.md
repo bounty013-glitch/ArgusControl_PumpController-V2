@@ -9,9 +9,12 @@ To isolate hardware mechanics from supervisory business logic and state machine 
 ```mermaid
 graph TD
     subgraph Communication Layer
-        MQTT[argus_mqtt_mgr] <--> Broker[argus_mqtt_broker]
+        Broker[argus_mqtt_broker] --> Contract[argus_mqtt_contract]
+        Contract --> Runtime[argus_mqtt_runtime]
     end
     subgraph Orchestration Layer
+        Router[argus_cmd_router] --> Authority[argus_authority_mgr]
+        Authority --> SM[argus_state_mgr]
         SM[argus_state_mgr] --> Config[argus_config]
         SM --> Fault[argus_fault_handler]
     end
@@ -23,7 +26,8 @@ graph TD
         StepGen --> Telemetry[argus_telemetry]
         FeedbackSeam[argus_feedback_seam] -.-> |Future Optional Feedback| Telemetry
     end
-    MQTT <--> SM
+    Runtime --> Router
+    SM --> Runtime
     SM --> Profile
     StepGen -.-> |STP/DIR/ENA Pins| Motor((Integrated Closed-Loop Motor))
 ```
@@ -75,6 +79,13 @@ graph TD
         *   `actual_rpm`: Unavailable unless a real feedback provider is connected.
 8.  **Fault Detection & Latching (`argus_fault_handler`)**:
     *   Rely on the motor's internal GUI-configured "Max Missing Steps" threshold to lock the driver during a mechanical stall. The controller cannot programmatically detect mechanical stall, encoder loss, following error, or insufficient measured motion without a physical feedback source.
+9.  **MQTT Supervisory Contract (`argus_mqtt_broker`, `argus_mqtt_contract`, `argus_mqtt_runtime`)**:
+    *   Constructs `argus/<client_id>/<unit_id>` once per valid broker lifecycle and fails closed on unsafe identity components or topic overflow.
+    *   Enforces exact publication ownership before retention, subscriber delivery, parsing, or dispatch.
+    *   Binds the supervisory lease to a non-reusable broker connection identity and a fresh random broker-lifecycle session.
+    *   Requires strict QoS 1, non-retained command envelopes with current session, newer nonzero sequence, bounded command ID, and topic-specific value.
+    *   Serializes accepted MQTT work through a bounded worker queue. The only normal motion path is broker to contract/runtime to command router to authority and state management.
+    *   Publishes 25 authoritative retained metadata, state, status, and open-loop telemetry topics plus bounded non-retained command results.
 
 ---
 
@@ -113,6 +124,7 @@ The V2 Controller executes a deterministic state machine:
 *   **Physical E-Stop**: An independently wired physical safety circuit must be used for hardware-level emergency stop. The controller does not trigger unverified physical E-stop pins.
 
 ### Fail-Operational Policy (Supervisory Communication Loss)
-*   **Lost Connection**: If the Wi-Fi connection drops or the HMI heartbeat fails during a run, the controller **continues pumping** at the last valid trajectory rate.
-*   **State Recovery**: The controller cannot queue commands it never received. Once the connection is re-established, the current state is republished to the HMI.
-*   **Idempotency and Freshness**: Stale command payloads (like historical START, STOP, or setpoint changes) must not be replayed blindly upon reconnection. Messages must carry freshness indicators, sequence counters, or monotonic timestamps to discard delayed commands.
+*   **Lost Connection**: If the MQTT connection drops or the heartbeat expires during a run, the controller continues at the last accepted trajectory rate. Link state becomes `STALE` or `OFFLINE`; no automatic Stop, target clear, driver disable, or synthetic state transition occurs.
+*   **State Recovery**: The controller cannot queue commands it never received. Once a client reconnects, the current retained baseline is republished before new command decisions.
+*   **Session and Freshness**: Every broker lifecycle creates a new command session. A two-second heartbeat and six-second lease timeout bind one current connection. Strict uint32 sequence ordering, exact-duplicate result replay, stale rejection, and sequence-conflict rejection prevent delayed or altered commands from dispatching.
+*   **Authority Boundary**: Heartbeat presence does not grant browser or CLI authority. The server captures MQTT source and authority generation, and the existing router rechecks authority before state mutation.
