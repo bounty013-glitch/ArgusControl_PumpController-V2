@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 is ACCEPTED at `eb1a6cc`; Step 2 authenticated HTTP admission and router dispatch is SOFTWARE-AND-AUTOMATED-RUNTIME-READY-FOR-REVIEW at `99413f8`.
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 is ACCEPTED at `eb1a6cc`; the Step 2 authenticated HTTP admission and router-dispatch candidate, including the supervisory session-close correction, is SOFTWARE-AND-AUTOMATED-RUNTIME-READY-FOR-FINAL-REVIEW at `1b701e5`.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -683,7 +683,7 @@ Authority snapshot confirms `LOCAL_SERVICE/BROWSER`.
 
 ### 4B.4 — Browser-Local Motion Command API
 
-**Status:** ACTIVE - Step 1 accepted; Step 2 authenticated HTTP admission and router dispatch is software-and-automated-runtime ready for independent supervisory review at `99413f8`. Connected-motor and physical acceptance remain pending. See [Phase 4B.4 Implementation Plan](Phase%204B.4%20-%20Implementation%20Plan%20-%20Browser-Local%20Motion%20Command%20API.md).
+**Status:** ACTIVE - Step 1 accepted; the Step 2 authenticated HTTP admission and router-dispatch candidate, including the supervisory session-close correction, is software-and-automated-runtime ready for final independent review at `1b701e5`. Connected-motor and physical acceptance remain pending. See [Phase 4B.4 Implementation Plan](Phase%204B.4%20-%20Implementation%20Plan%20-%20Browser-Local%20Motion%20Command%20API.md).
 
 **Scope:** Implement `POST /api/command`. Parse JSON, construct
 `argus_command_envelope_t` with `source=LOCAL_SERVICE_PORTAL`, dispatch
@@ -703,13 +703,18 @@ through router.
 failure returns 401. Network or authority admission rejection returns 403.
 Established router/state conflicts return 409. Unexpected internal failures
 return 500. Oversized requests are rejected without draining an unbounded
-client-declared length.
+client-declared length. Oversized, truncated, timed-out, and unrecoverable body
+receives close the HTTP session after the bounded response because request
+framing is no longer trustworthy; an internal receiver argument failure maps
+to 500 and also closes the uncertain session.
 
 **Tests:** 12 Step 2 groups cover exact registration, bounded body reception,
 authentication/decoder rejection, the admission matrix, all seven envelopes,
 generation-capture order, exactly-once dispatch, response mapping, prohibited
-routing fields, and invalid-operation isolation. The complete 163-test suite
-passed 489/489 executions in each of three final controller runs.
+routing fields, invalid-operation isolation, and the production handler's
+receive-result response/connection-close decisions. The complete 163-test
+suite passed 489/489 executions in each of three final corrected controller
+runs, for 1,467/1,467 passing outcomes.
 
 **Stop gate:** Browser can start/stop motor through HTTP commands while
 holding `LOCAL_SERVICE/BROWSER` authority.

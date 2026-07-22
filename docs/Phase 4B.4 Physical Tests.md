@@ -2,7 +2,7 @@
 
 **Status:** STEP 2 AUTOMATED CONTROLLER RUNTIME PASSED - PHYSICAL TESTS PENDING
 **Firmware identity:** `v2-phase4b.4-dev`
-**Candidate commit:** `99413f8` (Step 2 software candidate; not physically accepted)
+**Candidate commit:** `1b701e5` (Step 2 corrected software candidate; not physically accepted)
 **Acceptance date:** `[PENDING]`
 
 ## Evidence boundary
@@ -15,7 +15,7 @@ For every test, record the initial condition, operator action, relevant serial/d
 
 **Result:** `PASS - CONTROLLER-ONLY AUTOMATED RUNTIME`
 
-Three final genuine interactive diagnostic-option `t` invocations each reported 163 distinct tests, three repeat passes, 489 executions, 489 passed, and 0 failed. Every invocation preserved authority generation 3, network `AP_DISCOVERABLE`, broker `RUNNING`, machine `UNLOCKED`, and 16 tasks, and returned normally to the diagnostic prompt. No panic, post-input reset, watchdog, brownout, assertion, stack-canary, heap-corruption, or task-leak evidence appeared.
+Three final genuine interactive diagnostic-option `t` invocations of the corrected candidate each reported 163 distinct tests, three repeat passes, 489 executions, 489 passed, and 0 failed, for 1,467/1,467 passing outcomes. The first invocation preserved authority generation 3, network `AP_DISCOVERABLE`, broker `STOPPED`, machine `UNLOCKED`, and 15 tasks. The second and third preserved generation 3, `AP_DISCOVERABLE`, broker `RUNNING`, `UNLOCKED`, and 16 tasks. Each invocation preserved the production state present when it began and returned normally to the diagnostic prompt. No panic, post-input reset, watchdog, brownout, assertion, stack-canary, heap-corruption, or task-leak evidence appeared.
 
 ## Command API physical tests
 
