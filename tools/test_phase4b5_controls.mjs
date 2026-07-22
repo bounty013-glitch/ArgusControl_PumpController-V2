@@ -3,9 +3,21 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const html = fs.readFileSync(new URL("../main/argus_controls.html", import.meta.url), "utf8");
+const trajectorySource = fs.readFileSync(new URL("../main/argus_trajectory.c", import.meta.url), "utf8");
 const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
 assert.ok(scriptMatch, "inline controls script is present");
 new vm.Script(scriptMatch[1], { filename: "argus_controls.html" });
+
+const recoverBody = trajectorySource.match(
+  /esp_err_t argus_trajectory_recover\(void\)\s*\{([\s\S]*?)\n\}\n\nvoid argus_trajectory_clear_error/,
+);
+assert.ok(recoverBody, "trajectory recovery implementation is present");
+assert.match(recoverBody[1], /clear_error_locked\(\)/);
+assert.doesNotMatch(
+  recoverBody[1],
+  /argus_trajectory_clear_error\(\)/,
+  "recovery must not reacquire the non-recursive trajectory mutex",
+);
 
 assert.equal((html.match(/fetch\("\/api\/command"/g) || []).length, 1);
 assert.equal((html.match(/fetch\("\/api\/status"/g) || []).length, 1);
