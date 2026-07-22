@@ -126,7 +126,10 @@ esp_err_t test_4b5_controls_command_contract(void)
     TEST_CHECK(!bounded_contains(page, page_len, "authority_generation:"));
     TEST_CHECK(!bounded_contains(page, page_len, "authority_owner:"));
     TEST_CHECK(!bounded_contains(page, page_len, "source:"));
-    TEST_CHECK(bounded_contains(page, page_len, "if (runtime.commandPending"));
+    TEST_CHECK(bounded_contains(page, page_len, "runtime.ordinaryCommandPending"));
+    TEST_CHECK(bounded_contains(page, page_len, "runtime.estopCommandPending"));
+    TEST_CHECK(bounded_contains(page, page_len, "runtime.displayedCommandSequence"));
+    TEST_CHECK(bounded_contains(page, page_len, "sequence !== runtime.displayedCommandSequence"));
     TEST_CHECK(bounded_contains(page, page_len, "rpmStringToMilli"));
     TEST_CHECK(bounded_contains(page, page_len, "milli >= 0 && milli <= 200000"));
     TEST_CHECK(bounded_contains(page, page_len, "Admission is not proof of physical motion"));
@@ -155,7 +158,9 @@ esp_err_t test_4b5_controls_live_status_contract(void)
     TEST_CHECK(bounded_contains(page, page_len, "m.state === \"FAULTED\""));
     TEST_CHECK(bounded_contains(page, page_len, "m.estop_latched"));
     TEST_CHECK(bounded_contains(page, page_len,
-                                "byId(\"cmd-estop\").disabled = runtime.commandPending || runtime.unauthorized"));
+                                "byId(\"cmd-estop\").disabled = runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive"));
+    TEST_CHECK(!bounded_contains(page, page_len,
+                                 "byId(\"cmd-estop\").disabled = runtime.ordinaryCommandPending"));
     TEST_CHECK(!bounded_contains(page, page_len, "setInterval(requestStatus"));
 #endif
     return ESP_OK;

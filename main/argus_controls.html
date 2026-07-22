@@ -323,7 +323,10 @@
       status: null,
       lastSuccessMs: 0,
       statusInFlight: false,
-      commandPending: false,
+      ordinaryCommandPending: false,
+      estopCommandPending: false,
+      commandSequence: 0,
+      displayedCommandSequence: 0,
       reconcileRequested: false,
       unauthorized: false,
       failures: 0,
@@ -460,7 +463,8 @@
       const admitted = fresh && status && admittedByStatus(status);
       const m = status ? status.machine : null;
       const faulted = !m || m.state === "FAULTED" || m.fault_code !== 0;
-      const ordinaryReady = admitted && !runtime.commandPending && !m.estop_latched && !faulted;
+      const commandBlocked = runtime.ordinaryCommandPending || runtime.estopCommandPending;
+      const ordinaryReady = admitted && !commandBlocked && !m.estop_latched && !faulted;
       const stationary = m && (m.state === "UNLOCKED" || m.state === "HOLDING");
       const moving = m && (m.state === "STARTING" || m.state === "RUNNING" || m.state === "DECELERATING");
 
@@ -469,12 +473,12 @@
       byId("dir-forward").disabled = !(ordinaryReady && stationary);
       byId("dir-reverse").disabled = !(ordinaryReady && stationary);
       byId("cmd-start").disabled = !(ordinaryReady && stationary && m.target_rpm_milli > 0);
-      byId("cmd-stop").disabled = !(admitted && !runtime.commandPending && moving);
+      byId("cmd-stop").disabled = !(admitted && !commandBlocked && moving);
       byId("cmd-unlock").disabled = !(ordinaryReady && m.state === "HOLDING");
-      byId("cmd-reset-estop").disabled = !(admitted && !runtime.commandPending && m && m.estop_latched && m.state === "EMERGENCY_STOPPED");
-      byId("cmd-recover").disabled = !(admitted && !runtime.commandPending && m && !m.estop_latched &&
+      byId("cmd-reset-estop").disabled = !(admitted && !commandBlocked && m && m.estop_latched && m.state === "EMERGENCY_STOPPED");
+      byId("cmd-recover").disabled = !(admitted && !commandBlocked && m && !m.estop_latched &&
         (m.state === "UNLOCKED" || m.state === "HOLDING" || m.state === "FAULTED"));
-      byId("cmd-estop").disabled = runtime.commandPending || runtime.unauthorized;
+      byId("cmd-estop").disabled = runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive;
     }
 
     function schedulePoll(delay) {
@@ -579,11 +583,25 @@
       setText("command-result-detail", detail);
     }
 
+    function commandMessageFor(sequence, kind, title, detail) {
+      if (sequence !== runtime.displayedCommandSequence) return;
+      commandMessage(kind, title, detail);
+    }
+
     async function sendCommand(payload, label) {
-      if (runtime.commandPending || runtime.unauthorized) return;
-      runtime.commandPending = true;
+      const isEstop = payload.command === "estop";
+      if (runtime.unauthorized || !runtime.pageActive) return;
+      if (isEstop) {
+        if (runtime.estopCommandPending) return;
+        runtime.estopCommandPending = true;
+      } else {
+        if (runtime.ordinaryCommandPending || runtime.estopCommandPending) return;
+        runtime.ordinaryCommandPending = true;
+      }
+      const sequence = ++runtime.commandSequence;
+      runtime.displayedCommandSequence = sequence;
       updateEligibility();
-      commandMessage("pending", label + " pending", "One request is in flight. Controller status has not been changed optimistically.");
+      commandMessageFor(sequence, "pending", label + " pending", "Request in flight. Controller status has not been changed optimistically.");
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       try {
@@ -598,12 +616,12 @@
         let body = null;
         try { body = JSON.parse(text); } catch (_) { body = null; }
         if (!body || !isObject(body)) {
-          commandMessage("failure", label + " result unknown", "Malformed API response. Authoritative status will be refreshed.");
+          commandMessageFor(sequence, "failure", label + " result unknown", "Malformed API response. Authoritative status will be refreshed.");
         } else if (response.status === 200 && body.ok === true) {
-          commandMessage("accepted", label + " accepted by API", "Admission is not proof of physical motion. Await authoritative controller status.");
+          commandMessageFor(sequence, "accepted", label + " accepted by API", "Admission is not proof of physical motion. Await authoritative controller status.");
         } else if (response.status === 401) {
           runtime.unauthorized = true;
-          commandMessage("rejected", label + " unauthorized", "The authenticated session is no longer valid.");
+          commandMessageFor(sequence, "rejected", label + " unauthorized", "The authenticated session is no longer valid.");
           setFreshness("unauthorized", "Session expired", "Authentication is required before status or commands can continue.");
         } else {
           const categories = {
@@ -612,14 +630,15 @@
             409: "Command conflict",
             500: "Controller internal failure"
           };
-          commandMessage("rejected", label + " rejected", (categories[response.status] || "HTTP " + response.status) + ". Controller state remains authoritative.");
+          commandMessageFor(sequence, "rejected", label + " rejected", (categories[response.status] || "HTTP " + response.status) + ". Controller state remains authoritative.");
         }
       } catch (error) {
         const detail = error.name === "AbortError" ? "Command request timed out." : "Command transport failed.";
-        commandMessage("failure", label + " not confirmed", detail + " No retry was attempted; verify authoritative status.");
+        commandMessageFor(sequence, "failure", label + " not confirmed", detail + " No retry was attempted; verify authoritative status.");
       } finally {
         clearTimeout(timeout);
-        runtime.commandPending = false;
+        if (isEstop) runtime.estopCommandPending = false;
+        else runtime.ordinaryCommandPending = false;
         updateEligibility();
         requestStatus(true);
       }

@@ -42,7 +42,10 @@ class FakeElement {
     };
   }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
-  click() { return this.listeners.get("click")?.({ preventDefault() {} }); }
+  click() {
+    if (this.disabled) return;
+    return this.listeners.get("click")?.({ preventDefault() {} });
+  }
 }
 
 const ids = [...html.matchAll(/id="([^"]+)"/g)].map((match) => match[1]);
@@ -52,7 +55,7 @@ const windowListeners = new Map();
 let nextTimer = 1;
 const timers = new Map();
 const fetchCalls = [];
-let pendingCommandResolve;
+const pendingCommandResolvers = [];
 const commandResponses = [];
 
 const status = {
@@ -98,7 +101,7 @@ async function fakeFetch(url, options = {}) {
       if (next instanceof Error) throw next;
       return next;
     }
-    return new Promise((resolve) => { pendingCommandResolve = resolve; });
+    return new Promise((resolve) => { pendingCommandResolvers.push(resolve); });
   }
   throw new Error(`unexpected fetch ${url}`);
 }
@@ -149,13 +152,47 @@ assert.equal(elements.get("cmd-start").disabled, false);
 elements.get("cmd-start").click();
 elements.get("cmd-start").click();
 await new Promise((resolve) => setImmediate(resolve));
-const commandCalls = fetchCalls.filter((call) => call.url === "/api/command");
-assert.equal(commandCalls.length, 1, "duplicate click dispatches once");
+let commandCalls = fetchCalls.filter((call) => call.url === "/api/command");
+assert.equal(commandCalls.length, 1, "duplicate ordinary click dispatches once");
 assert.equal(commandCalls[0].options.credentials, "same-origin");
 assert.deepEqual(JSON.parse(commandCalls[0].options.body), { command: "start" });
 assert.equal(elements.get("machine-state").textContent, "UNLOCKED", "no optimistic state mutation");
-pendingCommandResolve(response(200, { ok: true, result: "accepted" }));
+assert.equal(elements.get("cmd-estop").disabled, false, "ordinary request does not block E-stop");
+
+elements.get("cmd-estop").click();
+elements.get("cmd-estop").click();
+elements.get("cmd-start").click();
 await new Promise((resolve) => setImmediate(resolve));
+commandCalls = fetchCalls.filter((call) => call.url === "/api/command");
+assert.equal(commandCalls.length, 2, "pending ordinary command permits one E-stop only");
+assert.deepEqual(JSON.parse(commandCalls[1].options.body), { command: "estop" });
+assert.equal(elements.get("cmd-estop").disabled, true, "pending E-stop suppresses repeats");
+assert.equal(elements.get("cmd-start").disabled, true, "pending E-stop blocks ordinary commands");
+assert.match(elements.get("command-result-title").textContent, /Emergency stop pending/);
+
+pendingCommandResolvers.shift()(response(200, { ok: true, result: "accepted" }));
+await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setImmediate(resolve));
+assert.match(elements.get("command-result-title").textContent, /Emergency stop pending/,
+  "older ordinary response cannot overwrite newer E-stop result");
+assert.equal(elements.get("machine-state").textContent, "UNLOCKED",
+  "ordinary response does not mutate authoritative state");
+
+pendingCommandResolvers.shift()(response(200, { ok: true, result: "accepted" }));
+await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setImmediate(resolve));
+assert.match(elements.get("command-result-title").textContent, /Emergency stop accepted by API/);
+assert.equal(elements.get("machine-state").textContent, "UNLOCKED",
+  "E-stop response does not optimistically latch displayed state");
+
+status.machine.state = "EMERGENCY_STOPPED";
+status.machine.estop_latched = true;
+await vm.runInContext("requestStatus(true)", context);
+assert.equal(elements.get("machine-state").textContent, "EMERGENCY_STOPPED");
+assert.equal(elements.get("estop-state").textContent, "E-STOP LATCHED");
+status.machine.state = "UNLOCKED";
+status.machine.estop_latched = false;
+await vm.runInContext("requestStatus(true)", context);
 await new Promise((resolve) => setImmediate(resolve));
 
 async function verifyCommandResult(code, body, expectedTitle) {
@@ -192,6 +229,10 @@ assert.equal(elements.get("cmd-start").disabled, true);
 assert.equal(elements.get("cmd-estop").disabled, false, "E-stop remains available with stale status");
 vm.runInContext("runtime.unauthorized = true; updateEligibility();", context);
 assert.equal(elements.get("cmd-estop").disabled, true, "unauthorized session cannot issue E-stop");
+const beforeUnauthorizedEstop = fetchCalls.filter((call) => call.url === "/api/command").length;
+elements.get("cmd-estop").click();
+assert.equal(fetchCalls.filter((call) => call.url === "/api/command").length, beforeUnauthorizedEstop,
+  "unauthorized E-stop is not transmitted");
 
 assert.ok(documentListeners.has("visibilitychange"));
 assert.ok(windowListeners.has("pagehide"));
