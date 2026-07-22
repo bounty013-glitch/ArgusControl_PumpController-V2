@@ -288,6 +288,15 @@ esp_err_t test_4c_disconnect_releases_matching_lease(void)
     CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
     CHECK(argus_mqtt_session_disconnect(&core, 7U));
     CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE && core.lease_connection_id == 0U);
+
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 9U, &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_tick(&core, 6100U));
+    CHECK(core.link == ARGUS_MQTT_LINK_STALE && core.lease_connection_id == 0U);
+    CHECK(core.heartbeat_connection_id == 9U);
+    CHECK(argus_mqtt_session_disconnect(&core, 9U));
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    CHECK(core.heartbeat_connection_id == 0U && core.heartbeat_counter == 0U);
     return ESP_OK;
 }
 

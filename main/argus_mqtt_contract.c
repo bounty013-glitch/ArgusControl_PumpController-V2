@@ -379,7 +379,8 @@ bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,
                                    uint64_t connection_id)
 {
     if (core == NULL || connection_id == 0U ||
-        core->lease_connection_id != connection_id) return false;
+        (core->lease_connection_id != connection_id &&
+         core->heartbeat_connection_id != connection_id)) return false;
     core->lease_connection_id = 0U;
     core->heartbeat_connection_id = 0U;
     core->heartbeat_counter = 0U;
