@@ -21,6 +21,7 @@
 #include "argus_tests_4b4.h"
 #include "argus_tests_4b4_step2.h"
 #include "argus_tests_4b5.h"
+#include "argus_tests_4b6.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5328,6 +5329,17 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b5_controls_route_and_navigation_contract);
     RUN_TEST(test_4b5_controls_command_contract);
     RUN_TEST(test_4b5_controls_live_status_contract);
+    /* Phase 4B.6 complete portal lifecycle and configuration reset tests */
+    RUN_TEST(test_4b6_factory_reset_decoder_acceptance);
+    RUN_TEST(test_4b6_factory_reset_decoder_rejections);
+    RUN_TEST(test_4b6_factory_reset_content_type_contract);
+    RUN_TEST(test_4b6_factory_reset_receive_contract);
+    RUN_TEST(test_4b6_factory_reset_receive_close_contract);
+    RUN_TEST(test_4b6_factory_reset_policy_matrix);
+    RUN_TEST(test_4b6_factory_reset_orchestration_success);
+    RUN_TEST(test_4b6_factory_reset_orchestration_revalidation);
+    RUN_TEST(test_4b6_factory_reset_orchestration_failures);
+    RUN_TEST(test_4b6_factory_reset_http_and_ui_contract);
     }
 
     int total_executions = passed_executions + failed_executions;
