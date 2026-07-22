@@ -1,19 +1,19 @@
 # Phase 4B.4 - Implementation Plan: Browser-Local Motion Command API
 
-**Status:** STEP 1 ACCEPTED - STEP 2 SOFTWARE-AND-AUTOMATED-RUNTIME-READY-FOR-FINAL-REVIEW
+**Status:** STEP 1 AND STEP 2 SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED
 
 ## Autonomous execution status
 
 | Field | Status |
 |---|---|
 | Accepted baseline | Step 1 corrective commit `eb1a6cc19ac0621a76b3b7996b8e89a976cab966` |
-| Current authorized step | Phase 4B.4 Step 2 - authenticated HTTP admission and exclusive router dispatch |
-| Current state | SOFTWARE-AND-AUTOMATED-RUNTIME-READY-FOR-FINAL-REVIEW |
-| Allowed autonomous actions | Source changes within Step 2; ESP-IDF v5.5.3 build; COM5 chip verification, flash, reboot, serial monitor, and automated on-controller tests with motor disconnected |
-| Hard stops | Baseline conflict; unsafe or unidentified COM5 device; abnormal electrical/reset behavior; out-of-scope architecture or accepted safety-semantics change; connected-motor or human-observation requirement |
-| Last validated commit | `1b701e5` - Step 2 plus supervisory session-close correction; clean build and three final controlled on-controller suite runs passed |
-| Next required human action | Final independent supervisory review of Phase 4B.4 Step 2 |
-| Later human gate | Connected-motor and physical bench acceptance; no mechanical acceptance is authorized in this run |
+| Accepted implementation | `1b701e5ffdf820a468070dc1f1a54d129a9537d0` - Step 2 plus supervisory session-close correction |
+| Accepted evidence | `5dbaf316e94ee4743f14841f1bbd89aa3dc8ecaf` - build, boundary, and three-run controller evidence |
+| Current state | SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED |
+| Phase 4B.4 decision | COMPLETE AND ACCEPTED; temporary connected-motor campaign not required |
+| Previously accepted motor behavior | REMAINS ACCEPTED - NOT REOPENED |
+| Next authorized step | Phase 4B.5 UI development against the accepted command API |
+| Deferred integration gate | One narrow powered confirmation using the final Phase 4B.5 browser controls |
 
 ## Objective
 
@@ -90,7 +90,7 @@ Step 1 added nine distinct decoder tests to the inherited 142-test baseline. Ste
 
 Step 1 adds only the frozen request contract, pure decoder, and pure tests. It does not add or register `POST /api/command`, read live authority or network state, attach source or generation, construct a production envelope, dispatch a command, call the state manager, or mutate motor, trajectory, timer, GPIO, network, or production singleton state.
 
-Step 2 implements the admission gate, authentication integration, server-owned source and generation attachment, envelope construction, exclusive router dispatch, HTTP handler, and exact POST registration. Polished browser controls remain deferred to Phase 4B.5. Independent supervisory review, connected-motor testing, and physical acceptance remain pending.
+Step 2 implements the admission gate, authentication integration, server-owned source and generation attachment, envelope construction, exclusive router dispatch, HTTP handler, and exact POST registration. Independent supervisory review accepted that implementation and its automated runtime. Polished browser controls remain Phase 4B.5 work. The only new powered integration question is deferred to Phase 4B.5 so it is answered through the real controls rather than temporary Developer Tools helpers.
 
 ## Step 0 static verification
 
@@ -120,4 +120,14 @@ After COM5 was verified as the intended ESP32-S3 QFN56 revision 0.2 controller w
 
 Recovery analysis preserved and decoded two earlier panic captures against their exact flashed ELF. The first was a BREAK/double-exception immediately after malformed duplicate fabricated ANSI cursor responses. The second was a LoadProhibited scheduler failure at `prvSelectHighestPriorityTaskSMP` with `EXCVADDR=0x44`; `0xA5A5A5A5` appeared only in unused caller-saved registers and is consistent with FreeRTOS stack-fill residue, not a dereferenced fault pointer. No suite-entry evidence preceded the second capture. Six later clean genuine-ConPTY runs, including the three final post-correction runs, support final classification as a headless terminal-emulation artifact that induced real scheduler corruption, not a Step 2 implementation or test-runner defect.
 
-Adversarial review found and corrected one earlier in-scope issue: oversized requests were rejected before decode but then drained for the client-declared length. The handler sends a bounded 400 response, requests session closure, and performs no unbounded drain. The subsequent supervisory receive-failure finding and correction are recorded above. Real socket/auth and live-router execution are not part of the pure endpoint seam. Those paths retain the accepted production authentication and router implementations; inherited authority, router, E-stop, and state-core tests remain in the complete suite, while connected HTTP and motor behavior remain explicit later acceptance gates.
+Adversarial review found and corrected one earlier in-scope issue: oversized requests were rejected before decode but then drained for the client-declared length. The handler sends a bounded 400 response, requests session closure, and performs no unbounded drain. The subsequent supervisory receive-failure finding and correction are recorded above. Real socket/auth and live-router execution are not part of the pure endpoint seam. Those paths retain the accepted production authentication and router implementations; inherited authority, router, E-stop, and state-core tests remain in the complete suite.
+
+## Final acceptance disposition
+
+Phase 4B.4 is complete and accepted on its software, automated-runtime, architectural-boundary, and controller-execution evidence. Physical motor-control behavior was previously live-tested and accepted at the lower-layer state, trajectory, pulse-engine, driver-control, and E-stop boundaries; Phase 4B.4 does not reopen that acceptance.
+
+The remaining powered test is limited to end-to-end confirmation that commands entering through the final authenticated Phase 4B.5 browser UI invoke the previously accepted behavior without bypass, inversion, unintended motion, or loss of safety semantics. Phase 4B.5 must use its real controls for a safe low-speed setpoint-without-motion check, forward start, normal stop, brief reverse confirmation, E-stop and latched rejection, reset/recovery without automatic restart, and final UI/API/controller/physical truthfulness. Temporary browser-console helpers and a duplicate API-to-motor campaign are not required.
+
+Automation-only authority-mode/owner combinations, server-owned source and generation, stale-generation rejection, exact dispatch counts, malformed and interrupted receive handling, connection closure, production isolation, no direct motion bypass, and E-stop routing priority must not be physically manufactured through backdoors or timing races.
+
+See [Phase 4B.4 Acceptance Disposition and Deferred Integration Record](Phase%204B.4%20Physical%20Tests.md). No pump, hose, chemical, pressure, flow-accuracy, process, or mechanical-endurance acceptance is implied.
