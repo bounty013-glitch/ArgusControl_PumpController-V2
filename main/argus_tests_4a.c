@@ -5424,7 +5424,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4B.6 PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4C PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
