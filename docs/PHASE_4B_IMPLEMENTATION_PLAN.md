@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.5 are COMPLETE AND ACCEPTED. Phase 4B.6 is IN PROGRESS on identity `v2-phase4b.6-dev`; no Phase 4B.6 implementation or acceptance is claimed by the identity checkpoint. See [Phase 4B.6 implementation plan](Phase%204B.6%20-%20Implementation%20Plan%20-%20Complete%20Portal%20Lifecycle.md). All of Phase 4B remains incomplete until the Phase 4B.6 stop gate is satisfied.
+**Status:** Phase 4B.1 through Phase 4B.6 are COMPLETE AND ACCEPTED as of July 22, 2026. Phase 4B closed on identity `v2-phase4b.6-dev` after coordinated restart, Local Service, configuration factory reset, uncommissioned recovery, exact recommissioning, and final service round-trip acceptance. See [Phase 4B.6 implementation plan](Phase%204B.6%20-%20Implementation%20Plan%20-%20Complete%20Portal%20Lifecycle.md) and [Phase 4B.6 tests](Phase%204B.6%20Tests.md). The project is ready to begin Phase 4C.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -47,10 +47,11 @@ Config apply, service exit, and factory reset must use coordinated
 safe-stop and reboot orchestration. HTTP handlers must not bypass that
 architecture.
 
-**Resolution (4B.2/4B.3):** Future commit/reboot handlers will call
-`argus_net_mgr_request_service_exit()` which performs a controlled stop,
-authority revocation, and `esp_restart()`. No direct `esp_restart()` from
-HTTP handlers.
+**Resolution (4B.2 through 4B.6):** HTTP handlers queue lifecycle events to
+the network-manager task. Coordinated restart, service exit, and configuration
+factory reset perform safety revalidation, response grace, authority and
+network convergence, and reboot from the lifecycle owner. HTTP handlers do not
+stop their own server or call `esp_restart()` directly.
 
 ### A4. NETWORK_FAULT Portal Behavior
 
@@ -371,11 +372,10 @@ esp_err_t result = argus_cmd_router_dispatch(&env);
 | Action | Method | URI | Notes |
 |---|---|---|---|
 | Read config | GET | `/api/config` | Returns masked config (`sta_pass` = `"********"`) |
-| Stage config | POST | `/api/config/stage` | Stores in RAM buffer, validates fields |
-| Validate staged | POST | `/api/config/validate` | Runs `argus_nvs_config_validate()` |
-| Apply and reboot | POST | `/api/config/apply` | Commits via `argus_nvs_config_commit()`, reboots |
+| Save config | POST | `/api/config/save` | Scoped `identity` or `wifi` overlay, strict validation, durable commit, eligible runtime Wi-Fi apply |
+| Coordinated restart | POST | `/api/restart` | Queues a restart-safe network-manager lifecycle event |
 | Exit without change | POST | `/api/service/exit` | Revokes authority, reboots |
-| Factory reset | POST | `/api/factory-reset` | Calls `argus_nvs_config_factory_reset()`, reboots |
+| Factory reset | POST | `/api/factory-reset` | Exact confirmation; queues coordinated configuration reset and reboot |
 
 ### Password security
 
@@ -390,11 +390,11 @@ The STA password must **never** appear in:
 
 Password handling:
 
-- `POST /api/config/stage` accepts `sta_pass` as a write-only field.
-- `GET /api/config` returns `"********"` via `argus_nvs_config_mask()`.
-- If staged password is `"********"`, the existing password is preserved
-  (not overwritten with the mask string — already enforced by
-  `argus_nvs_core_commit()` rejection of `ARGUS_CONFIG_MASK_STRING`).
+- `POST /api/config/save` accepts `sta_pass` only as a write-only Wi-Fi field.
+- `GET /api/config` reports only `sta_pass_set`; it never returns the password.
+- Same-SSID save with omitted password preserves the stored password.
+- The mask string is never accepted as a password, and a new SSID requires a
+  real password.
 
 ### Power-loss safety
 
@@ -430,7 +430,7 @@ Handled by existing NVS dual-slot architecture:
 | Machine State | Always | State, target/applied/generated speeds (truthful labels) |
 | Commissioning | UNCOMMISSIONED or LOCAL_SERVICE | Config form with validation |
 | Motion Controls | LOCAL_SERVICE/BROWSER only | Start, stop, speed, E-stop |
-| Service Controls | AP_DISCOVERABLE or SERVICE_AP_ONLY | Enter/exit service, factory reset |
+| Service Controls | AP_DISCOVERABLE or SERVICE_AP_ONLY | Enter/exit service; factory reset only in safe `SERVICE_AP_ONLY` + `LOCAL_SERVICE/BROWSER` |
 
 ### Speed display labels
 
@@ -490,13 +490,12 @@ intent from physical motor movement:
 | GET | `/api/identity` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | JSON identity | No | Yes | 200, 401, 500 | None |
 | **POST** | **`/api/portal-password`** | **Any** | **Basic Auth** | **JSON** | **JSON result** | **NVS write** | **No** | **200, 400, 401, 500** | **Password write-only** |
 | GET | `/api/config` | UNCOMM, AP_DISC, SVC_AP | Basic Auth | None | JSON masked config | No | Yes | 200, 401, 500 | Password masked |
-| POST | `/api/config/stage` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | JSON fields | JSON result | RAM only | No | 200, 400, 401, 403 | Password write-only |
-| POST | `/api/config/validate` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON validation | No | Yes | 200, 400, 401, 403 | None |
-| POST | `/api/config/apply` | UNCOMM, SVC_AP | NONE or LOCAL_SERVICE | None | JSON + reboot | NVS commit | No | 200, 400, 401, 403, 500 | Password committed |
+| POST | `/api/config/save` | UNCOMM, AP_DISC, SVC_AP | Basic Auth; scoped policy | Scoped JSON | JSON result | NVS commit; eligible Wi-Fi apply | No | 200, 400, 401, 403, 500 | Password write-only |
+| POST | `/api/restart` | UNCOMM, AP_DISC, SVC_AP | Basic Auth; restart-safe machine | None | JSON result | Queued reboot | No | 200, 401, 409, 500 | None |
 | POST | `/api/service/enter` | AP_DISC | Basic Auth (becomes BROWSER) | None | JSON result | Auth transition | No | 200, 401, 409, 503 | None |
 | POST | `/api/service/exit` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | Auth revoke | No | 200, 401, 403, 500 | None |
 | POST | `/api/command` | SVC_AP | LOCAL_SERVICE/BROWSER | JSON envelope | JSON result | Motion cmd | No | 200, 400, 401, 403, 500 | None |
-| POST | `/api/factory-reset` | SVC_AP | LOCAL_SERVICE | None | JSON + reboot | NVS erase | No | 200, 401, 403, 500 | None |
+| POST | `/api/factory-reset` | SVC_AP | LOCAL_SERVICE/BROWSER | Exact confirmation JSON | HTTP 202 before disconnect | Coordinated config erase + reboot | No | 202, 400, 401, 403, 409, 415, 500, 503 | Portal credential preserved |
 
 ### JSON schemas (planned)
 
@@ -513,12 +512,20 @@ intent from physical motor movement:
 authority generation, authority mode, owner, and routing fields are supplied
 by the controller and are rejected if sent by the browser.
 
-**POST /api/config/stage request:**
+**POST /api/config/save identity request:**
 ```json
 {
+  "scope": "identity",
   "client_id": "acme_corp",
   "unit_id": "pump_001",
-  "device_name": "Main Process Pump",
+  "device_name": "Main Process Pump"
+}
+```
+
+**POST /api/config/save Wi-Fi request:**
+```json
+{
+  "scope": "wifi",
   "sta_ssid": "FactoryWiFi",
   "sta_pass": "SecurePassword123"
 }
@@ -533,7 +540,7 @@ by the controller and are rejected if sent by the browser.
 - HTTP JSON request parsing and field validation
 - Envelope construction from JSON command payload
 - Authority permission checks for `ARGUS_CMD_SRC_LOCAL_SERVICE_PORTAL`
-- Config staging field validation (using existing mock NVS)
+- Scoped configuration overlay validation (using existing mock NVS)
 - Password masking verification in JSON responses
 - Content-Type enforcement
 - Field length enforcement
@@ -633,21 +640,21 @@ Service AP.
 
 ---
 
-### 4B.2 — Commissioning Staging and Validation API
+### 4B.2 — Scoped Commissioning Configuration API
 
-**Scope:** Implement `GET /api/config`, `POST /api/config/stage`,
-`POST /api/config/validate`, `POST /api/config/apply`,
-`POST /api/factory-reset`.
+**Scope:** Implement `GET /api/config` and scoped `POST /api/config/save` for
+identity and Wi-Fi configuration. Configuration factory reset was completed in
+Phase 4B.6.
 
 **Files:**
 - `main/argus_http_server.c` — add commissioning handlers
 
-**APIs introduced:** Internal staged config buffer (module-static
-`argus_config_payload_t`). Uses existing `argus_nvs_config_validate()`,
-`argus_nvs_config_commit()`, `argus_nvs_config_factory_reset()`.
+**APIs introduced:** Strict scoped overlay using
+`argus_nvs_config_validate()` and `argus_nvs_config_commit()` with identity-lock
+and same-SSID password-preservation rules.
 
-**Lock impact:** None — staged config is local to HTTP server module.
-Commit goes through existing NVS serialization.
+**Lock impact:** Commit goes through existing NVS serialization. Runtime Wi-Fi
+apply is queued through the network manager when eligible.
 
 **Failure behavior:** Validation errors returned as JSON with specific
 field names. Commit failure returns 500. Mask-string password rejection
@@ -763,7 +770,7 @@ motion controls admitted no command, and reset did not automatically restart.
 
 ### 4B.6 — Exit, Apply/Reboot, Reset, and Physical Acceptance
 
-**Status:** IN PROGRESS - Identity `v2-phase4b.6-dev` established; functional implementation and acceptance remain pending.
+**Status:** COMPLETE AND ACCEPTED - July 22, 2026 on identity `v2-phase4b.6-dev`. See [Phase 4B.6 Tests.md](Phase%204B.6%20Tests.md).
 
 **Scope:** Final integration testing. Exit/apply/reboot workflows.
 Factory reset. Final operator acceptance matching the phase-staged criteria in
@@ -772,19 +779,17 @@ UI-to-motor evidence.
 
 **Files:** Integration across all Phase 4B files.
 
-**Tests:** Full operator physical acceptance sequence:
-1. Connect phone to Service AP.
-2. Load portal, verify status display.
-3. Commission device (stage, validate, apply, reboot).
-4. Enter service mode, verify browser authority.
-5. Confirm the accepted Phase 4B.5 real-control integration evidence; do not run a second API-to-motor campaign.
-6. Confirm the accepted automation-only non-owner rejection evidence; do not manufacture an authority mismatch.
-7. Exit service, verify reboot and recovery.
-8. Factory reset, verify uncommissioned state.
+**Accepted tests:** Three genuine-ConPTY pure-suite invocations passed 531/531
+each. Live acceptance proved same-SSID password preservation, identity lock,
+coordinated restart, Local Service entry/exit, the real two-action browser
+factory-reset flow, preserved nondefault portal authentication, truthful
+uncommissioned boot, exact identity restoration and relock, exact Wi-Fi
+restoration, and a final service round trip. No motion command was issued.
 
-**Stop gate:** All remaining portal, commissioning, service-lifecycle, reboot,
-and reset acceptance scenarios pass. Documentation incorporates the Phase 4B.5
-powered integration evidence without reopening lower-layer motor acceptance.
+**Stop gate:** SATISFIED. All remaining portal, commissioning,
+service-lifecycle, reboot, and configuration-reset scenarios passed. Phase 4B.5
+powered integration evidence remains incorporated without reopening motor
+acceptance. Phase 4B is complete and accepted.
 
 ---
 

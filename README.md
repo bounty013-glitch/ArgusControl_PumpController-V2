@@ -4,7 +4,7 @@ Argus V2 Peristaltic Pump Controller firmware for ESP32-S3.
 
 This repository implements the V2 architecture for precision motor control, featuring exact fixed-point Bresenham GPTimer pulse generation, a 20 ms linear trajectory profile engine, verified common-anode active-low hardware integration, an embedded local MQTT broker, and open-loop safety doctrine.
 
-**Current Status**: Phase 4B.1 through Phase 4B.5 are complete and accepted. Phase 4B.6 is **IN PROGRESS** on firmware identity `v2-phase4b.6-dev`, completing the controller-hosted portal lifecycle, configuration factory reset, uncommissioned recovery, and recommissioning acceptance. No Phase 4B.6 implementation or acceptance is claimed by this identity checkpoint. Phase 4B.5 powered evidence remains accepted and will not be repeated. No pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is implied.
+**Current Status**: Phase 4B.1 through Phase 4B.6 are **COMPLETE AND ACCEPTED**. Firmware identity `v2-phase4b.6-dev` completed the controller-hosted portal lifecycle, coordinated configuration factory reset, truthful uncommissioned recovery, exact recommissioning, and final Local Service round trip on July 22, 2026. The three final controller suite invocations passed 531/531 each. Phase 4B.5 powered evidence remains accepted and was not repeated; Phase 4B.6 issued no motion command. No pump-head, hose, tubing, fluid, chemical, pressure, flow-accuracy, calibration, loaded-torque, process, or mechanical-endurance acceptance is implied. The project is ready to begin Phase 4C.
 
 ---
 
