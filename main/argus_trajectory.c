@@ -27,6 +27,12 @@ static int32_t s_accel_limit = 10000; // 10.0 RPM/s
 static int32_t s_decel_limit = 10000; // 10.0 RPM/s
 static uint32_t s_update_interval_ms = 20;
 
+static void clear_error_locked(void)
+{
+    s_latched_error = 0;
+    argus_step_gen_clear_error();
+}
+
 esp_err_t argus_trajectory_init(const argus_config_t *cfg)
 {
     if (cfg == NULL) {
@@ -259,7 +265,7 @@ esp_err_t argus_trajectory_recover(void)
     // 2. Drive ENA HIGH to disable UIM
     esp_err_t err_dis = argus_step_gen_disable_driver();
 
-    argus_trajectory_clear_error();
+    clear_error_locked();
 
     if (s_traj_mutex != NULL) {
         xSemaphoreGive(s_traj_mutex);
@@ -292,8 +298,7 @@ void argus_trajectory_clear_error(void)
     if (s_traj_mutex != NULL) {
         xSemaphoreTake(s_traj_mutex, portMAX_DELAY);
     }
-    s_latched_error = 0;
-    argus_step_gen_clear_error();
+    clear_error_locked();
     if (s_traj_mutex != NULL) {
         xSemaphoreGive(s_traj_mutex);
     }

@@ -2,8 +2,8 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1 through 4B.3a status, identity, configuration, service,
- * credential-management, and Wi-Fi recovery API with embedded mobile portal.
+ * Phase 4B.1 through 4B.5 status, identity, configuration, service,
+ * credential-management, Wi-Fi recovery, and local command API.
  *
  * Lifecycle:
  *   argus_http_server_init() — One-time creation of lifecycle objects.
@@ -33,7 +33,13 @@
  *   Phase 4B.3/4B.3a:
  *   - Authenticated service entry/exit POST endpoints.
  *   - Authenticated manual Wi-Fi reconnect POST endpoint.
- *   - Motion-control POST endpoints remain outside the current portal scope.
+ *
+ *   Phase 4B.4:
+ *   - POST /api/command: Strict browser-local command admission and routing.
+ *   - Available only in SERVICE_AP_ONLY with LOCAL_SERVICE/BROWSER authority.
+ *
+ *   Phase 4B.5:
+ *   - GET /controls: Authenticated technician motion controls and live status.
  *
  * Access control:
  *   The portal is reachable through all interfaces on which the HTTP server
@@ -64,6 +70,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "argus_state_mgr.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -135,6 +142,23 @@ bool argus_http_server_is_running(void);
  * uses a separate h() function for DOM-safe rendering.
  */
 void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size);
+
+/** @brief Format the production-used machine-status JSON object. */
+int argus_http_test_format_machine_status_json(
+    const argus_state_snapshot_t *snapshot,
+    char *out,
+    size_t out_size);
+
+/**
+ * @brief Confirm the production browser-command POST registration contract.
+ */
+bool argus_http_test_command_registration(void);
+
+/** @brief Confirm the dedicated controls-page production registration. */
+bool argus_http_test_controls_registration(void);
+
+/** @brief Return the embedded controls page for pure contract tests. */
+const char *argus_http_test_controls_page(size_t *out_len);
 #endif
 
 #ifdef __cplusplus

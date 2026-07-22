@@ -1,6 +1,6 @@
 # Phase 4B — Controller-Hosted Local Browser Portal
 
-**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 is next; functional implementation has not begun.
+**Status:** Phase 4B.1 through Phase 4B.3, including Phase 4B.3a, are COMPLETE AND ACCEPTED. Phase 4B.4 Step 1 and Step 2 are SOFTWARE-AND-AUTOMATED-RUNTIME-ACCEPTED at implementation commit `1b701e5` with evidence commit `5dbaf31`. Phase 4B.5 is COMPLETE AND ACCEPTED: motor-disconnected validation passed three final 501/501 suites, and the connected-motor browser/UI integration gate passed on July 22, 2026 against firmware commit `666c1b0`. See [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md). Phase 4B.6 is next and is NOT YET IMPLEMENTED or accepted; all of Phase 4B is therefore not yet complete.
 
 This document defines the implementation plan for Phase 4B of the Argus V2
 Pump Controller firmware. Phase 4B adds an embedded HTTP server and
@@ -505,9 +505,13 @@ intent from physical motor movement:
 {
   "command": "start" | "stop" | "unlock" | "estop" | "reset_estop" | "recover" | "set_target",
   "target_rpm_milli": 1000,
-  "generation": 4
+  "forward": true
 }
 ```
+
+`target_rpm_milli` and `forward` are present only for `set_target`. Source,
+authority generation, authority mode, owner, and routing fields are supplied
+by the controller and are rejected if sent by the browser.
 
 **POST /api/config/stage request:**
 ```json
@@ -548,17 +552,24 @@ intent from physical motor movement:
 - Full clean build, 0 errors, 0 warnings
 - Binary size within partition budget (<1 MB)
 
-### Operator physical browser acceptance (planned)
+### Operator browser acceptance (phase staged)
 
 - Phone connects to Service AP
 - Portal loads in mobile browser
 - Read-only status displays correctly
 - Commissioning form validates and commits
 - Service entry transitions authority to LOCAL_SERVICE/BROWSER
-- Motion controls work under browser authority
-- Non-owner rejection verified (CLI and MQTT probes rejected)
+- Phase 4B.5 real controls complete one narrow powered UI-to-motor confirmation under browser authority
+- Accepted automation-only non-owner rejection evidence remains authoritative and is not physically manufactured
 - Service exit reboots cleanly
 - Post-reboot commissioned recovery confirmed
+
+Previously accepted state, trajectory, pulse-engine, driver-control, direction,
+normal-stop, recovery, and E-stop behavior is not reopened. The Phase 4B.5
+powered check confirms only that the final authenticated UI reaches that
+accepted path without bypass, inversion, unintended motion, or lost safety
+semantics. Automation-only authority, generation, malformed-input, dispatch,
+and isolation cases must not be physically manufactured.
 
 ### Deferred to Phase 4C
 
@@ -679,7 +690,7 @@ Authority snapshot confirms `LOCAL_SERVICE/BROWSER`.
 
 ### 4B.4 — Browser-Local Motion Command API
 
-**Status:** NEXT PHASE - identity establishment only; functional implementation has not begun.
+**Status:** COMPLETE AND ACCEPTED - Step 1 and Step 2 are software-and-automated-runtime accepted at implementation commit `1b701e5` with evidence commit `5dbaf31`. Previously accepted lower-layer physical motor behavior remains accepted and is not reopened. The sole new powered UI-to-motor confirmation is deferred to Phase 4B.5. See [Phase 4B.4 Acceptance Disposition](Phase%204B.4%20Physical%20Tests.md) and [Phase 4B.4 Implementation Plan](Phase%204B.4%20-%20Implementation%20Plan%20-%20Browser-Local%20Motion%20Command%20API.md).
 
 **Scope:** Implement `POST /api/command`. Parse JSON, construct
 `argus_command_envelope_t` with `source=LOCAL_SERVICE_PORTAL`, dispatch
@@ -695,18 +706,33 @@ through router.
 **Lock impact:** None new — dispatch goes through existing
 `s_dispatch_mutex`.
 
-**Failure behavior:** JSON parse error returns 400. Authority rejection
-returns 403. Dispatch error returns 500.
+**Failure behavior:** Body or decoder rejection returns 400. Authentication
+failure returns 401. Network or authority admission rejection returns 403.
+Established router/state conflicts return 409. Unexpected internal failures
+return 500. Oversized requests are rejected without draining an unbounded
+client-declared length. Oversized, truncated, timed-out, and unrecoverable body
+receives close the HTTP session after the bounded response because request
+framing is no longer trustworthy; an internal receiver argument failure maps
+to 500 and also closes the uncertain session.
 
-**Tests:** Envelope construction tests. Authority rejection tests for
-wrong source/owner combinations.
+**Tests:** 12 Step 2 groups cover exact registration, bounded body reception,
+authentication/decoder rejection, the admission matrix, all seven envelopes,
+generation-capture order, exactly-once dispatch, response mapping, prohibited
+routing fields, invalid-operation isolation, and the production handler's
+receive-result response/connection-close decisions. The complete 163-test
+suite passed 489/489 executions in each of three final corrected controller
+runs, for 1,467/1,467 passing outcomes.
 
-**Stop gate:** Browser can start/stop motor through HTTP commands while
-holding `LOCAL_SERVICE/BROWSER` authority.
+**Stop gate:** SATISFIED by accepted source, architectural-boundary,
+automated-runtime, and controller-execution evidence. The temporary Phase 4B.4
+connected-motor campaign is not required. One powered confirmation through the
+final Phase 4B.5 controls remains a Phase 4B.5 acceptance dependency.
 
 ---
 
 ### 4B.5 — Embedded Mobile UI
+
+**Status:** COMPLETE AND ACCEPTED - Identity `v2-phase4b.5-dev` was physically tested. Dedicated authenticated `/controls` and live authoritative status are implemented at `594445b`, with recovery mutex correction `efcc8a3` and browser E-stop pending-command correction `666c1b0`. Three final corrected-image controller invocations passed 501/501 each; isolated browser checks passed; and the later connected-motor UI-to-motor gate passed on July 22, 2026. See [Phase 4B.5 Tests.md](Phase%204B.5%20Tests.md).
 
 **Scope:** Create embedded HTML/CSS/JS portal. Mobile-first responsive
 layout. All assets embedded in firmware. Status display, commissioning
@@ -720,19 +746,29 @@ form, motion panel, service controls.
 
 **Failure behavior:** N/A (static content serving).
 
-**Tests:** Visual acceptance on operator's phone. Responsive layout
-verification.
+**Tests:** Visual acceptance on operator's phone, responsive-layout
+verification, and one narrow powered confirmation through the real controls:
+setpoint without motion, forward start, normal stop, brief reverse direction,
+E-stop priority and latched rejection, reset/recovery without automatic
+restart, and final UI/API/controller/physical truthfulness and stability.
+This is not a repeat of lower-layer speed, pulse, ramp, driver, stop, E-stop,
+or endurance qualification.
 
-**Stop gate:** Portal renders correctly on mobile browser. All panels
-functional. Motion panel visible only with `BROWSER` authority.
+**Stop gate:** SATISFIED. The portal rendered correctly, control eligibility
+tracked `BROWSER` authority, and the single powered UI-to-motor confirmation
+passed using the final controls. E-stop latched truthfully, disabled ordinary
+motion controls admitted no command, and reset did not automatically restart.
 
 ---
 
 ### 4B.6 — Exit, Apply/Reboot, Reset, and Physical Acceptance
 
+**Status:** NEXT PHASE - NOT YET IMPLEMENTED OR ACCEPTED
+
 **Scope:** Final integration testing. Exit/apply/reboot workflows.
-Factory reset. Full operator physical acceptance matching the acceptance
-criteria in §11.
+Factory reset. Final operator acceptance matching the phase-staged criteria in
+§11 and incorporating, without repeating, the accepted Phase 4B.5 powered
+UI-to-motor evidence.
 
 **Files:** Integration across all Phase 4B files.
 
@@ -741,13 +777,14 @@ criteria in §11.
 2. Load portal, verify status display.
 3. Commission device (stage, validate, apply, reboot).
 4. Enter service mode, verify browser authority.
-5. Execute motion controls, verify command dispatch.
-6. Run non-owner rejection probes.
+5. Confirm the accepted Phase 4B.5 real-control integration evidence; do not run a second API-to-motor campaign.
+6. Confirm the accepted automation-only non-owner rejection evidence; do not manufacture an authority mismatch.
 7. Exit service, verify reboot and recovery.
 8. Factory reset, verify uncommissioned state.
 
-**Stop gate:** All physical acceptance scenarios pass. Documentation
-updated with operator-supplied evidence.
+**Stop gate:** All remaining portal, commissioning, service-lifecycle, reboot,
+and reset acceptance scenarios pass. Documentation incorporates the Phase 4B.5
+powered integration evidence without reopening lower-layer motor acceptance.
 
 ---
 

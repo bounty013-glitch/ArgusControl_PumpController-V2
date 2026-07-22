@@ -57,7 +57,7 @@ esp_err_t argus_identity_init(void)
         strlcpy(s_identity.fw_version, app_desc->version,
                 sizeof(s_identity.fw_version));
     } else {
-        strlcpy(s_identity.fw_version, "v2-phase4b.3a-dev",
+        strlcpy(s_identity.fw_version, "v2-phase4b.5-dev",
                 sizeof(s_identity.fw_version));
     }
 

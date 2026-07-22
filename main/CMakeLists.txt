@@ -20,9 +20,16 @@ idf_component_register(
         "argus_config_overlay.c"
         "argus_json.c"
         "argus_service_policy.c"
+        "argus_browser_command.c"
+        "argus_browser_command_endpoint.c"
         "argus_tests_4a.c"
+        "argus_tests_4b4.c"
+        "argus_tests_4b4_step2.c"
+        "argus_tests_4b5.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES
+        "argus_controls.html"
     REQUIRES
         console
         esp_driver_usb_serial_jtag

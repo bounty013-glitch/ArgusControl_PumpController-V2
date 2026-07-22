@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Argus Motion Controls</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101114;
+      --surface: #191a1f;
+      --surface-2: #22242a;
+      --line: #35373e;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --violet: #7c3aed;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #dc2626;
+      --blue: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    button, input { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    .shell { width: min(1120px, 100%); margin: 0 auto; padding: 12px; }
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding: 4px 0 12px;
+    }
+    h1 { margin: 0; font-size: 1.25rem; font-weight: 650; }
+    h2 { margin: 0 0 12px; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; }
+    .subtitle, .fine { color: var(--muted); font-size: 0.78rem; margin-top: 4px; }
+    .top-actions { display: flex; gap: 8px; align-items: center; }
+    .link {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .freshness {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      margin: 12px 0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--muted);
+      background: var(--surface);
+      border-radius: 6px;
+    }
+    .freshness.current { border-left-color: var(--green); }
+    .freshness.fetching, .freshness.stale { border-left-color: var(--amber); }
+    .freshness.disconnected, .freshness.unauthorized, .freshness.invalid { border-left-color: var(--red); }
+    .freshness-main { min-width: 0; flex: 1; }
+    .freshness-title { font-weight: 650; }
+    .freshness-detail { color: var(--muted); font-size: 0.75rem; margin-top: 2px; overflow-wrap: anywhere; }
+    .retry { display: none; }
+    .retry.visible { display: inline-flex; }
+    .layout { display: grid; grid-template-columns: minmax(300px, 0.9fr) minmax(360px, 1.1fr); gap: 12px; }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .primary { border-top: 3px solid var(--violet); }
+    .field-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, 0.55fr); gap: 10px; }
+    label { display: block; color: var(--muted); font-size: 0.78rem; margin-bottom: 5px; }
+    input[type="text"] {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 9px 10px;
+    }
+    input:focus { outline: 2px solid var(--violet); outline-offset: 1px; }
+    .segmented { display: grid; grid-template-columns: 1fr 1fr; min-height: 42px; }
+    .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+    .segmented label {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .segmented label:first-of-type { border-radius: 6px 0 0 6px; }
+    .segmented label:last-of-type { border-radius: 0 6px 6px 0; border-left: 0; }
+    .segmented input:checked + label { background: #312e81; color: #fff; border-color: #6366f1; }
+    .button-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+    .btn {
+      min-height: 42px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 9px 10px;
+      color: #fff;
+      background: #3f3f46;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .btn:hover:not(:disabled) { filter: brightness(1.12); }
+    .btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .btn:disabled { opacity: 0.38; cursor: not-allowed; }
+    .apply { background: var(--violet); width: 100%; margin-top: 10px; }
+    .start { background: #15803d; }
+    .stop { background: #b45309; }
+    .unlock { background: #3f3f46; }
+    .recover { background: #0369a1; }
+    .reset { background: #7c2d12; }
+    .estop-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--bg);
+      padding: 4px 0 10px;
+    }
+    .estop {
+      width: 100%;
+      min-height: 58px;
+      background: var(--red);
+      border: 3px solid #fecaca;
+      font-size: 1.05rem;
+    }
+    .command-result {
+      min-height: 56px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--muted);
+      border-radius: 6px;
+      background: var(--surface-2);
+    }
+    .command-result.pending { border-left-color: var(--amber); }
+    .command-result.accepted { border-left-color: var(--green); }
+    .command-result.rejected, .command-result.failure { border-left-color: var(--red); }
+    .result-title { font-weight: 650; }
+    .result-detail { color: var(--muted); font-size: 0.76rem; margin-top: 3px; overflow-wrap: anywhere; }
+    .state-hero { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 10px; }
+    .state-name { font-size: 1.35rem; font-weight: 700; }
+    .state-name.good { color: var(--green); }
+    .state-name.warn { color: var(--amber); }
+    .state-name.bad { color: #f87171; }
+    .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+    .row { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line); padding: 7px 0; min-width: 0; }
+    .row .label { color: var(--muted); min-width: 0; }
+    .row .value { text-align: right; font-weight: 550; overflow-wrap: anywhere; min-width: 0; }
+    .pill { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; }
+    .pill.good { background: #064e3b; color: #6ee7b7; }
+    .pill.warn { background: #451a03; color: #fbbf24; }
+    .pill.bad { background: #450a0a; color: #fca5a5; }
+    .pill.neutral { background: #303239; color: #d4d4d8; }
+    .authoritative.stale-values { opacity: 0.58; }
+    .stale-note { display: none; color: var(--amber); font-size: 0.76rem; margin-bottom: 8px; }
+    .stale-note.visible { display: block; }
+    .fault { display: none; border-left: 4px solid var(--red); }
+    .fault.visible { display: block; }
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: 1fr; }
+      .rows { grid-template-columns: 1fr; }
+      .topbar { grid-template-columns: 1fr; }
+      .top-actions { justify-content: space-between; }
+    }
+    @media (max-width: 420px) {
+      .shell { padding: 8px; }
+      .field-grid { grid-template-columns: 1fr; }
+      .button-grid { grid-template-columns: 1fr 1fr; }
+      .btn { min-height: 46px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>Argus Motion Controls</h1>
+        <div class="subtitle" id="controller-title">Controller metadata loading</div>
+      </div>
+      <nav class="top-actions" aria-label="Portal navigation">
+        <a class="link" href="/">Dashboard</a>
+        <a class="link" href="/api/logout">Log Out</a>
+      </nav>
+    </header>
+
+    <section class="freshness disconnected" id="freshness" aria-live="polite">
+      <div class="freshness-main">
+        <div class="freshness-title" id="freshness-title">Connecting</div>
+        <div class="freshness-detail" id="freshness-detail">No authoritative status received</div>
+      </div>
+      <button class="btn retry" id="retry-status" type="button">Retry</button>
+    </section>
+
+    <div class="layout">
+      <div>
+        <div class="estop-wrap">
+          <button class="btn estop" id="cmd-estop" type="button">&#9888; EMERGENCY STOP</button>
+        </div>
+
+        <section class="panel primary" aria-labelledby="motion-heading">
+          <h2 id="motion-heading">Motion Command</h2>
+          <div class="field-grid">
+            <div>
+              <label for="target-rpm">Target speed (RPM, 0.000 to 200.000)</label>
+              <input id="target-rpm" type="text" inputmode="decimal" autocomplete="off" value="8.000">
+            </div>
+            <div>
+              <label>Direction</label>
+              <div class="segmented" role="radiogroup" aria-label="Direction">
+                <input id="dir-forward" name="direction" type="radio" value="forward" checked>
+                <label for="dir-forward">Forward</label>
+                <input id="dir-reverse" name="direction" type="radio" value="reverse">
+                <label for="dir-reverse">Reverse</label>
+              </div>
+            </div>
+          </div>
+          <button class="btn apply" id="cmd-set-target" type="button">Apply Target</button>
+          <div class="fine" id="input-message">Typed values are not controller setpoints until accepted.</div>
+          <div class="button-grid">
+            <button class="btn start" id="cmd-start" type="button">&#9654; Start</button>
+            <button class="btn stop" id="cmd-stop" type="button">&#9632; Stop</button>
+            <button class="btn unlock" id="cmd-unlock" type="button">Unlock</button>
+            <button class="btn reset" id="cmd-reset-estop" type="button">Reset E-stop</button>
+            <button class="btn recover" id="cmd-recover" type="button">Recover</button>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="command-result-heading">
+          <h2 id="command-result-heading">Last Command Result</h2>
+          <div class="command-result" id="command-result" aria-live="polite">
+            <div class="result-title" id="command-result-title">No command issued</div>
+            <div class="result-detail" id="command-result-detail">Controller status remains authoritative.</div>
+          </div>
+        </section>
+
+        <section class="panel fault" id="fault-panel" aria-labelledby="fault-heading">
+          <h2 id="fault-heading">Controller Fault</h2>
+          <div class="rows">
+            <div class="row"><span class="label">Fault code</span><span class="value" id="fault-code">-</span></div>
+            <div class="row"><span class="label">Last rejection</span><span class="value" id="last-rejection">-</span></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="authoritative stale-values" id="authoritative-values">
+        <div class="stale-note visible" id="stale-note">Last known values are stale and must not be treated as current.</div>
+
+        <section class="panel" aria-labelledby="machine-heading">
+          <h2 id="machine-heading">Authoritative Machine State</h2>
+          <div class="state-hero">
+            <span class="state-name" id="machine-state">UNKNOWN</span>
+            <span class="pill neutral" id="estop-state">E-stop unknown</span>
+          </div>
+          <div class="rows">
+            <div class="row"><span class="label">Configured target</span><span class="value" id="target-value">-</span></div>
+            <div class="row"><span class="label">Requested direction</span><span class="value" id="requested-direction">-</span></div>
+            <div class="row"><span class="label">Applied speed</span><span class="value" id="applied-value">-</span></div>
+            <div class="row"><span class="label">Applied direction</span><span class="value" id="applied-direction">-</span></div>
+            <div class="row"><span class="label">Generated speed</span><span class="value" id="generated-value">-</span></div>
+            <div class="row"><span class="label">Driver</span><span class="value" id="driver-state">-</span></div>
+            <div class="row"><span class="label">Ramp</span><span class="value" id="ramp-state">-</span></div>
+            <div class="row"><span class="label">Feedback available</span><span class="value" id="feedback-state">-</span></div>
+            <div class="row"><span class="label">Command generation</span><span class="value" id="command-generation">-</span></div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="authority-heading">
+          <h2 id="authority-heading">Network and Command Authority</h2>
+          <div class="rows">
+            <div class="row"><span class="label">Network mode</span><span class="value" id="network-mode">-</span></div>
+            <div class="row"><span class="label">Service AP</span><span class="value" id="ap-state">-</span></div>
+            <div class="row"><span class="label">STA state</span><span class="value" id="sta-state">-</span></div>
+            <div class="row"><span class="label">STA address</span><span class="value" id="sta-address">-</span></div>
+            <div class="row"><span class="label">MQTT broker</span><span class="value" id="broker-state">-</span></div>
+            <div class="row"><span class="label">Authority mode</span><span class="value" id="authority-mode">-</span></div>
+            <div class="row"><span class="label">Authority owner</span><span class="value" id="authority-owner">-</span></div>
+            <div class="row"><span class="label">Authority generation</span><span class="value" id="authority-generation">-</span></div>
+            <div class="row"><span class="label">Browser commands</span><span class="value" id="command-admission">Unknown</span></div>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="identity-heading">
+          <h2 id="identity-heading">Controller and Firmware</h2>
+          <div class="rows">
+            <div class="row"><span class="label">Controller name</span><span class="value" id="device-name">-</span></div>
+            <div class="row"><span class="label">Model</span><span class="value" id="device-model">-</span></div>
+            <div class="row"><span class="label">Firmware</span><span class="value" id="firmware-version">-</span></div>
+            <div class="row"><span class="label">Hardware UID</span><span class="value" id="hardware-uid">-</span></div>
+            <div class="row"><span class="label">Client ID</span><span class="value" id="client-id">-</span></div>
+            <div class="row"><span class="label">Unit ID</span><span class="value" id="unit-id">-</span></div>
+            <div class="row"><span class="label">Service SSID</span><span class="value" id="service-ssid">-</span></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    "use strict";
+    const POLL_MS = 750;
+    const HIDDEN_POLL_MS = 5000;
+    const REQUEST_TIMEOUT_MS = 2000;
+    const STALE_MS = 3000;
+
+    const runtime = {
+      status: null,
+      lastSuccessMs: 0,
+      statusInFlight: false,
+      ordinaryCommandPending: false,
+      estopCommandPending: false,
+      commandSequence: 0,
+      displayedCommandSequence: 0,
+      reconcileRequested: false,
+      unauthorized: false,
+      failures: 0,
+      pollTimer: null,
+      ageTimer: null,
+      statusAbort: null,
+      pageActive: true,
+      freshness: "disconnected"
+    };
+
+    const byId = (id) => document.getElementById(id);
+    const setText = (id, value) => { byId(id).textContent = String(value); };
+    const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+    function rpmStringToMilli(value) {
+      const text = String(value).trim();
+      const match = /^(\d{1,3})(?:\.(\d{1,3}))?$/.exec(text);
+      if (!match) return null;
+      const whole = Number(match[1]);
+      const fraction = Number((match[2] || "").padEnd(3, "0") || "0");
+      const milli = whole * 1000 + fraction;
+      return Number.isSafeInteger(milli) && milli >= 0 && milli <= 200000 ? milli : null;
+    }
+
+    function validStatus(data) {
+      if (!isObject(data) || !isObject(data.machine) || !isObject(data.authority) ||
+          !isObject(data.network) || !isObject(data.broker)) return false;
+      const m = data.machine;
+      const a = data.authority;
+      const n = data.network;
+      const b = data.broker;
+      return typeof m.state === "string" &&
+        isNumber(m.target_rpm_milli) && isNumber(m.applied_rpm_milli) &&
+        isNumber(m.generated_rpm_milli) && typeof m.requested_forward === "boolean" &&
+        typeof m.applied_forward === "boolean" && typeof m.driver_enabled === "boolean" &&
+        typeof m.estop_latched === "boolean" && typeof m.ramp_active === "boolean" &&
+        isNumber(m.fault_code) && isNumber(m.command_generation) &&
+        typeof m.feedback_available === "boolean" && typeof m.last_rejection_reason === "string" &&
+        typeof a.mode === "string" && typeof a.owner === "string" && isNumber(a.generation) &&
+        typeof n.mode === "string" && typeof n.ap_started === "boolean" &&
+        typeof n.sta_state === "string" && typeof n.sta_ip_acquired === "boolean" &&
+        typeof n.sta_ip_address === "string" && typeof b.running === "boolean" &&
+        typeof b.stopped === "boolean" && typeof b.observable === "boolean";
+    }
+
+    function formatRpm(milli) {
+      return isNumber(milli) ? (milli / 1000).toFixed(3) + " RPM" : "-";
+    }
+
+    function admittedByStatus(status) {
+      return status.network.mode === "SERVICE_AP_ONLY" &&
+        status.authority.mode === "LOCAL_SERVICE" &&
+        status.authority.owner === "BROWSER";
+    }
+
+    function stateTone(state) {
+      if (state === "RUNNING" || state === "HOLDING") return "good";
+      if (state === "EMERGENCY_STOPPED" || state === "FAULTED") return "bad";
+      return "warn";
+    }
+
+    function setFreshness(kind, title, detail) {
+      runtime.freshness = kind;
+      const box = byId("freshness");
+      box.className = "freshness " + kind;
+      setText("freshness-title", title);
+      setText("freshness-detail", detail);
+      byId("retry-status").classList.toggle("visible", kind === "disconnected" || kind === "invalid" || kind === "unauthorized");
+      const stale = kind !== "current" && kind !== "fetching";
+      byId("authoritative-values").classList.toggle("stale-values", stale);
+      byId("stale-note").classList.toggle("visible", stale);
+      updateEligibility();
+    }
+
+    function refreshFreshnessClock() {
+      if (runtime.unauthorized) {
+        setFreshness("unauthorized", "Session expired", "Authentication is required before status or commands can continue.");
+        return;
+      }
+      if (!runtime.lastSuccessMs) return;
+      const age = Date.now() - runtime.lastSuccessMs;
+      const stamp = new Date(runtime.lastSuccessMs).toLocaleTimeString();
+      if (age > STALE_MS) {
+        const kind = runtime.failures >= 2 ? "disconnected" : "stale";
+        setFreshness(kind, kind === "stale" ? "Status stale" : "Controller unreachable",
+          "Last successful update " + (age / 1000).toFixed(1) + " s ago at " + stamp + ". Last known values are marked stale.");
+      } else if (!runtime.statusInFlight) {
+        setFreshness("current", "Controller status live", "Last successful update " + (age / 1000).toFixed(1) + " s ago at " + stamp + ".");
+      }
+    }
+
+    function renderStatus(status) {
+      const m = status.machine;
+      const a = status.authority;
+      const n = status.network;
+      const b = status.broker;
+      const state = byId("machine-state");
+      state.textContent = m.state;
+      state.className = "state-name " + stateTone(m.state);
+      setText("target-value", formatRpm(m.target_rpm_milli));
+      setText("requested-direction", m.requested_forward ? "Forward" : "Reverse");
+      setText("applied-value", formatRpm(m.applied_rpm_milli));
+      setText("applied-direction", m.applied_forward ? "Forward" : "Reverse");
+      setText("generated-value", formatRpm(m.generated_rpm_milli));
+      setText("driver-state", m.driver_enabled ? "Enabled" : "Disabled");
+      setText("ramp-state", m.ramp_active ? "Active" : "Idle");
+      setText("feedback-state", m.feedback_available ? "Yes" : "No (open loop)");
+      setText("command-generation", m.command_generation);
+      const estop = byId("estop-state");
+      estop.textContent = m.estop_latched ? "E-STOP LATCHED" : "E-stop clear";
+      estop.className = "pill " + (m.estop_latched ? "bad" : "good");
+
+      setText("network-mode", n.mode);
+      setText("ap-state", n.ap_started ? "Started" : "Stopped");
+      setText("sta-state", n.sta_state);
+      setText("sta-address", n.sta_ip_acquired ? (n.sta_ip_address || "Unknown") : "No STA address");
+      setText("broker-state", !b.observable ? "Unobservable" : b.running ? "Running" : b.stopped ? "Stopped" : "Not converged");
+      setText("authority-mode", a.mode);
+      setText("authority-owner", a.owner);
+      setText("authority-generation", a.generation);
+      setText("command-admission", admittedByStatus(status) ? "Admissible" : "Not admitted");
+
+      const faultVisible = m.fault_code !== 0 || m.state === "FAULTED" || m.estop_latched;
+      byId("fault-panel").classList.toggle("visible", faultVisible);
+      setText("fault-code", m.fault_code);
+      setText("last-rejection", m.last_rejection_reason || "None");
+      updateEligibility();
+    }
+
+    function updateEligibility() {
+      const status = runtime.status;
+      const fresh = runtime.freshness === "current" || runtime.freshness === "fetching";
+      const admitted = fresh && status && admittedByStatus(status);
+      const m = status ? status.machine : null;
+      const faulted = !m || m.state === "FAULTED" || m.fault_code !== 0;
+      const commandBlocked = runtime.ordinaryCommandPending || runtime.estopCommandPending;
+      const ordinaryReady = admitted && !commandBlocked && !m.estop_latched && !faulted;
+      const stationary = m && (m.state === "UNLOCKED" || m.state === "HOLDING");
+      const moving = m && (m.state === "STARTING" || m.state === "RUNNING" || m.state === "DECELERATING");
+
+      byId("cmd-set-target").disabled = !(ordinaryReady && stationary);
+      byId("target-rpm").disabled = !(ordinaryReady && stationary);
+      byId("dir-forward").disabled = !(ordinaryReady && stationary);
+      byId("dir-reverse").disabled = !(ordinaryReady && stationary);
+      byId("cmd-start").disabled = !(ordinaryReady && stationary && m.target_rpm_milli > 0);
+      byId("cmd-stop").disabled = !(admitted && !commandBlocked && moving);
+      byId("cmd-unlock").disabled = !(ordinaryReady && m.state === "HOLDING");
+      byId("cmd-reset-estop").disabled = !(admitted && !commandBlocked && m && m.estop_latched && m.state === "EMERGENCY_STOPPED");
+      byId("cmd-recover").disabled = !(admitted && !commandBlocked && m && !m.estop_latched &&
+        (m.state === "UNLOCKED" || m.state === "HOLDING" || m.state === "FAULTED"));
+      byId("cmd-estop").disabled = runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive;
+    }
+
+    function schedulePoll(delay) {
+      clearTimeout(runtime.pollTimer);
+      if (!runtime.pageActive || runtime.unauthorized) return;
+      runtime.pollTimer = setTimeout(() => requestStatus(false), delay);
+    }
+
+    async function requestStatus(reconcile) {
+      if (!runtime.pageActive || runtime.unauthorized) return;
+      if (runtime.statusInFlight) {
+        runtime.reconcileRequested = runtime.reconcileRequested || Boolean(reconcile);
+        return;
+      }
+      clearTimeout(runtime.pollTimer);
+      runtime.statusInFlight = true;
+      if (runtime.lastSuccessMs && Date.now() - runtime.lastSuccessMs <= STALE_MS) {
+        setFreshness("fetching", "Refreshing controller status", "Last known values remain authoritative until the response is validated.");
+      }
+      const controller = new AbortController();
+      runtime.statusAbort = controller;
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch("/api/status", {
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal
+        });
+        if (response.status === 401) {
+          runtime.unauthorized = true;
+          throw new Error("UNAUTHORIZED");
+        }
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        let data;
+        try { data = await response.json(); } catch (_) { throw new Error("INVALID_RESPONSE"); }
+        if (!validStatus(data)) throw new Error("INVALID_RESPONSE");
+        runtime.status = data;
+        runtime.lastSuccessMs = Date.now();
+        runtime.failures = 0;
+        renderStatus(data);
+        setFreshness("current", "Controller status live", "Authoritative status updated at " + new Date(runtime.lastSuccessMs).toLocaleTimeString() + ".");
+      } catch (error) {
+        runtime.failures += 1;
+        if (error.message === "UNAUTHORIZED") {
+          setFreshness("unauthorized", "Session expired", "Authentication is required before status or commands can continue.");
+        } else if (error.message === "INVALID_RESPONSE") {
+          setFreshness("invalid", "Invalid controller status", "The response was incomplete or malformed. Last known values are marked stale.");
+        } else {
+          const detail = error.name === "AbortError" ? "Status request timed out." : "Status request failed.";
+          const kind = runtime.failures >= 2 || !runtime.lastSuccessMs ? "disconnected" : "stale";
+          setFreshness(kind, kind === "disconnected" ? "Controller unreachable" : "Status stale", detail + " Last known values are not current.");
+        }
+      } finally {
+        clearTimeout(timeout);
+        runtime.statusInFlight = false;
+        runtime.statusAbort = null;
+        if (runtime.reconcileRequested && !runtime.unauthorized) {
+          runtime.reconcileRequested = false;
+          Promise.resolve().then(() => requestStatus(false));
+        } else {
+          schedulePoll(document.hidden ? HIDDEN_POLL_MS : POLL_MS);
+        }
+      }
+    }
+
+    async function loadIdentity() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch("/api/identity", {
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal
+        });
+        if (response.status === 401) {
+          runtime.unauthorized = true;
+          setFreshness("unauthorized", "Session expired", "Authentication is required before status or commands can continue.");
+          return;
+        }
+        if (!response.ok) throw new Error("Identity unavailable");
+        const data = await response.json();
+        if (!isObject(data)) throw new Error("Identity unavailable");
+        setText("device-name", data.device_name || "Not configured");
+        setText("device-model", data.device_model || "Unavailable");
+        setText("firmware-version", data.firmware_version || "Unavailable");
+        setText("hardware-uid", data.hardware_uid || "Unavailable");
+        setText("client-id", data.client_id || "Not configured");
+        setText("unit-id", data.unit_id || "Not configured");
+        setText("service-ssid", data.service_ssid || "Unavailable");
+        setText("controller-title", (data.device_name || data.device_model || "Argus Controller") + " | " + (data.firmware_version || "firmware unknown"));
+      } catch (_) {
+        setText("controller-title", "Controller metadata unavailable");
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    function commandMessage(kind, title, detail) {
+      const box = byId("command-result");
+      box.className = "command-result " + kind;
+      setText("command-result-title", title);
+      setText("command-result-detail", detail);
+    }
+
+    function commandMessageFor(sequence, kind, title, detail) {
+      if (sequence !== runtime.displayedCommandSequence) return;
+      commandMessage(kind, title, detail);
+    }
+
+    async function sendCommand(payload, label) {
+      const isEstop = payload.command === "estop";
+      if (runtime.unauthorized || !runtime.pageActive) return;
+      if (isEstop) {
+        if (runtime.estopCommandPending) return;
+        runtime.estopCommandPending = true;
+      } else {
+        if (runtime.ordinaryCommandPending || runtime.estopCommandPending) return;
+        runtime.ordinaryCommandPending = true;
+      }
+      const sequence = ++runtime.commandSequence;
+      runtime.displayedCommandSequence = sequence;
+      updateEligibility();
+      commandMessageFor(sequence, "pending", label + " pending", "Request in flight. Controller status has not been changed optimistically.");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch("/api/command", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        const text = await response.text();
+        let body = null;
+        try { body = JSON.parse(text); } catch (_) { body = null; }
+        if (!body || !isObject(body)) {
+          commandMessageFor(sequence, "failure", label + " result unknown", "Malformed API response. Authoritative status will be refreshed.");
+        } else if (response.status === 200 && body.ok === true) {
+          commandMessageFor(sequence, "accepted", label + " accepted by API", "Admission is not proof of physical motion. Await authoritative controller status.");
+        } else if (response.status === 401) {
+          runtime.unauthorized = true;
+          commandMessageFor(sequence, "rejected", label + " unauthorized", "The authenticated session is no longer valid.");
+          setFreshness("unauthorized", "Session expired", "Authentication is required before status or commands can continue.");
+        } else {
+          const categories = {
+            400: "Invalid request",
+            403: "Command not admitted",
+            409: "Command conflict",
+            500: "Controller internal failure"
+          };
+          commandMessageFor(sequence, "rejected", label + " rejected", (categories[response.status] || "HTTP " + response.status) + ". Controller state remains authoritative.");
+        }
+      } catch (error) {
+        const detail = error.name === "AbortError" ? "Command request timed out." : "Command transport failed.";
+        commandMessageFor(sequence, "failure", label + " not confirmed", detail + " No retry was attempted; verify authoritative status.");
+      } finally {
+        clearTimeout(timeout);
+        if (isEstop) runtime.estopCommandPending = false;
+        else runtime.ordinaryCommandPending = false;
+        updateEligibility();
+        requestStatus(true);
+      }
+    }
+
+    function applyTarget() {
+      const milli = rpmStringToMilli(byId("target-rpm").value);
+      if (milli === null) {
+        setText("input-message", "Enter 0.000 to 200.000 RPM with at most three decimal places.");
+        return;
+      }
+      setText("input-message", "Typed value awaiting API admission; controller status remains authoritative.");
+      sendCommand({
+        command: "set_target",
+        target_rpm_milli: milli,
+        forward: byId("dir-forward").checked
+      }, "Set target");
+    }
+
+    byId("cmd-set-target").addEventListener("click", applyTarget);
+    byId("cmd-start").addEventListener("click", () => sendCommand({ command: "start" }, "Start"));
+    byId("cmd-stop").addEventListener("click", () => sendCommand({ command: "stop" }, "Stop"));
+    byId("cmd-unlock").addEventListener("click", () => sendCommand({ command: "unlock" }, "Unlock"));
+    byId("cmd-estop").addEventListener("click", () => sendCommand({ command: "estop" }, "Emergency stop"));
+    byId("cmd-reset-estop").addEventListener("click", () => sendCommand({ command: "reset_estop" }, "Reset E-stop"));
+    byId("cmd-recover").addEventListener("click", () => sendCommand({ command: "recover" }, "Recover"));
+    byId("retry-status").addEventListener("click", () => {
+      runtime.unauthorized = false;
+      runtime.failures = 0;
+      requestStatus(true);
+      loadIdentity();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      clearTimeout(runtime.pollTimer);
+      if (document.hidden) schedulePoll(HIDDEN_POLL_MS);
+      else requestStatus(true);
+    });
+    window.addEventListener("pagehide", () => {
+      runtime.pageActive = false;
+      clearTimeout(runtime.pollTimer);
+      clearInterval(runtime.ageTimer);
+      if (runtime.statusAbort) runtime.statusAbort.abort();
+    });
+
+    updateEligibility();
+    loadIdentity();
+    requestStatus(true);
+    runtime.ageTimer = setInterval(refreshFreshnessClock, 250);
+  </script>
+</body>
+</html>
