@@ -66,6 +66,8 @@
 #include "argus_config_overlay.h"
 #include "argus_json.h"
 #include "argus_service_policy.h"
+#include "argus_browser_command_endpoint.h"
+#include "argus_cmd_router.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -1635,6 +1637,101 @@ static esp_err_t service_exit_handler(httpd_req_t *req)
 /* ── URI handler registrations ───────────────────────────────────── */
 
 
+/* Phase 4B.4: POST /api/command */
+
+typedef struct {
+    httpd_req_t *req;
+} command_body_recv_ctx_t;
+
+static int command_body_recv(void *ctx, uint8_t *dst, size_t max_len)
+{
+    command_body_recv_ctx_t *recv_ctx = (command_body_recv_ctx_t *)ctx;
+    int received = httpd_req_recv(recv_ctx->req, (char *)dst, max_len);
+    if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+        return ARGUS_BROWSER_BODY_RECV_TIMEOUT;
+    }
+    return received;
+}
+
+static esp_err_t command_get_network_snapshot(void *ctx, argus_net_snapshot_t *out_snap)
+{
+    (void)ctx;
+    return argus_net_mgr_get_snapshot(out_snap);
+}
+
+static esp_err_t command_get_authority_snapshot(void *ctx,
+                                                argus_authority_snapshot_t *out_snap)
+{
+    (void)ctx;
+    return argus_authority_mgr_get_snapshot(out_snap);
+}
+
+static esp_err_t command_dispatch(void *ctx, const argus_command_envelope_t *envelope)
+{
+    (void)ctx;
+    return argus_cmd_router_dispatch(envelope);
+}
+
+static esp_err_t send_command_response(
+    httpd_req_t *req,
+    argus_browser_command_endpoint_result_t endpoint_result)
+{
+    argus_browser_command_http_response_t response;
+    if (!argus_browser_command_response_for(endpoint_result, &response)) {
+        (void)argus_browser_command_response_for(ARGUS_BROWSER_ENDPOINT_INTERNAL_ERROR,
+                                                 &response);
+    }
+
+    set_api_headers(req);
+    httpd_resp_set_status(req, response.status_line);
+    return httpd_resp_sendstr(req, response.json_body);
+}
+
+static esp_err_t command_post_handler(httpd_req_t *req)
+{
+    /* Set security headers before authentication so 401 responses are no-store. */
+    set_api_headers(req);
+    if (!check_auth(req)) {
+        return ESP_OK;
+    }
+
+    uint8_t body[ARGUS_BROWSER_COMMAND_MAX_BODY_LEN];
+    size_t body_len = 0U;
+    command_body_recv_ctx_t recv_ctx = { .req = req };
+    argus_browser_body_receive_result_t receive_result =
+        argus_browser_command_receive_body(req->content_len,
+                                           command_body_recv,
+                                           &recv_ctx,
+                                           body,
+                                           sizeof(body),
+                                           &body_len);
+    if (receive_result != ARGUS_BROWSER_BODY_RECEIVE_OK) {
+        if (receive_result == ARGUS_BROWSER_BODY_RECEIVE_TOO_LARGE) {
+            /* Never drain an attacker-controlled declared length. Close this
+             * session after the bounded error response instead. */
+            httpd_resp_set_hdr(req, "Connection", "close");
+            esp_err_t response_err =
+                send_command_response(req, ARGUS_BROWSER_ENDPOINT_BAD_REQUEST);
+            esp_err_t close_err =
+                httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+            return response_err != ESP_OK ? response_err : close_err;
+        }
+        return send_command_response(req, ARGUS_BROWSER_ENDPOINT_BAD_REQUEST);
+    }
+
+    const argus_browser_command_endpoint_ops_t ops = {
+        .get_network_snapshot = command_get_network_snapshot,
+        .get_authority_snapshot = command_get_authority_snapshot,
+        .dispatch = command_dispatch,
+        .ctx = NULL,
+    };
+    argus_browser_command_endpoint_outcome_t outcome;
+    argus_browser_command_endpoint_result_t endpoint_result =
+        argus_browser_command_endpoint_process(true, body, body_len, &ops, &outcome);
+
+    return send_command_response(req, endpoint_result);
+}
+
 static const httpd_uri_t uri_status = {
     .uri       = "/api/status",
     .method    = HTTP_GET,
@@ -1823,6 +1920,22 @@ static const httpd_uri_t uri_service_exit = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t uri_command = {
+    .uri       = ARGUS_BROWSER_COMMAND_URI,
+    .method    = HTTP_POST,
+    .handler   = command_post_handler,
+    .user_ctx  = NULL
+};
+
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+bool argus_http_test_command_registration(void)
+{
+    return strcmp(uri_command.uri, ARGUS_BROWSER_COMMAND_URI) == 0 &&
+           uri_command.method == HTTP_POST &&
+           uri_command.handler == command_post_handler;
+}
+#endif
+
 /* ── Lifecycle implementation ────────────────────────────────────── */
 
 esp_err_t argus_http_server_init(void)
@@ -1887,7 +2000,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 16;  /* 14 registered handlers + headroom */
+    config.max_uri_handlers   = 16;  /* 15 registered handlers + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -1937,7 +2050,10 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
         if (reg_err != ESP_OK) goto rollback;
 
-        reg_err = httpd_register_uri_handler(s_server, &uri_reconnect);
+    reg_err = httpd_register_uri_handler(s_server, &uri_reconnect);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.4 endpoint */
+    reg_err = httpd_register_uri_handler(s_server, &uri_command);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);

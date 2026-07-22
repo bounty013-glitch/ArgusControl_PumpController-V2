@@ -21,8 +21,10 @@ idf_component_register(
         "argus_json.c"
         "argus_service_policy.c"
         "argus_browser_command.c"
+        "argus_browser_command_endpoint.c"
         "argus_tests_4a.c"
         "argus_tests_4b4.c"
+        "argus_tests_4b4_step2.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     REQUIRES

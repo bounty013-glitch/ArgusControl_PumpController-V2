@@ -2,8 +2,8 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1 through 4B.3a status, identity, configuration, service,
- * credential-management, and Wi-Fi recovery API with embedded mobile portal.
+ * Phase 4B.1 through 4B.4 status, identity, configuration, service,
+ * credential-management, Wi-Fi recovery, and local command API.
  *
  * Lifecycle:
  *   argus_http_server_init() — One-time creation of lifecycle objects.
@@ -33,7 +33,10 @@
  *   Phase 4B.3/4B.3a:
  *   - Authenticated service entry/exit POST endpoints.
  *   - Authenticated manual Wi-Fi reconnect POST endpoint.
- *   - Motion-control POST endpoints remain outside the current portal scope.
+ *
+ *   Phase 4B.4:
+ *   - POST /api/command: Strict browser-local command admission and routing.
+ *   - Available only in SERVICE_AP_ONLY with LOCAL_SERVICE/BROWSER authority.
  *
  * Access control:
  *   The portal is reachable through all interfaces on which the HTTP server
@@ -135,6 +138,11 @@ bool argus_http_server_is_running(void);
  * uses a separate h() function for DOM-safe rendering.
  */
 void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size);
+
+/**
+ * @brief Confirm the production browser-command POST registration contract.
+ */
+bool argus_http_test_command_registration(void);
 #endif
 
 #ifdef __cplusplus
