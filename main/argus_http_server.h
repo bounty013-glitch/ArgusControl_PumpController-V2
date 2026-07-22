@@ -2,7 +2,7 @@
  * @file argus_http_server.h
  * @brief Controller-Hosted HTTP Server for Local Browser Portal
  *
- * Phase 4B.1 through 4B.5 status, identity, configuration, service,
+ * Phase 4B.1 through 4B.6 status, identity, configuration, service,
  * credential-management, Wi-Fi recovery, and local command API.
  *
  * Lifecycle:
@@ -40,6 +40,9 @@
  *
  *   Phase 4B.5:
  *   - GET /controls: Authenticated technician motion controls and live status.
+ *
+ *   Phase 4B.6:
+ *   - POST /api/factory-reset: Strictly confirmed, deferred configuration reset.
  *
  * Access control:
  *   The portal is reachable through all interfaces on which the HTTP server
@@ -153,6 +156,12 @@ int argus_http_test_format_machine_status_json(
  * @brief Confirm the production browser-command POST registration contract.
  */
 bool argus_http_test_command_registration(void);
+
+/** @brief Confirm the factory-reset production POST registration. */
+bool argus_http_test_factory_reset_registration(void);
+
+/** @brief Return the embedded service dashboard for pure contract tests. */
+const char *argus_http_test_portal_page(size_t *out_len);
 
 /** @brief Confirm the dedicated controls-page production registration. */
 bool argus_http_test_controls_registration(void);

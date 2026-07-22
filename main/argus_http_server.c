@@ -68,6 +68,7 @@
 #include "argus_service_policy.h"
 #include "argus_browser_command_endpoint.h"
 #include "argus_cmd_router.h"
+#include "argus_factory_reset.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -520,6 +521,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"seconds_until_retry\":%" PRIu32 ","
         "\"manual_reconnect_permitted\":%s,"
         "\"service_entry_permitted\":%s,"
+        "\"factory_reset_pending\":%s,"
         "\"operator_action_required\":%s,"
         "\"timer_cancel_failure\":\"%s\","
         "\"timer_cancel_error\":\"%s\","
@@ -546,6 +548,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         net_snap.seconds_until_retry,
         net_snap.manual_reconnect_permitted ? "true" : "false",
         service_entry_permitted ? "true" : "false",
+        net_snap.factory_reset_pending ? "true" : "false",
         net_snap.action_required ? "true" : "false",
         timer_cancel_failure,
         esp_err_to_name(net_snap.last_service_cancel_error),
@@ -711,10 +714,10 @@ static const char PORTAL_HTML[] =
     "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
     "</div>"
     "<div style=\"display:flex;gap:8px;margin-top:16px;flex-wrap:wrap\">"
-    "<a href='/controls' style='flex:1;text-align:center;text-decoration:none;background:#7c3aed;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Motion Controls</a>"
+    "<a id='nav-controls' href='/controls' style='flex:1;text-align:center;text-decoration:none;background:#7c3aed;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Motion Controls</a>"
     "<a href='/config/identity' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Identity</a>"
     "<a href='/config/wifi' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>WiFi Config</a>"
-    "<button onclick='doRestart()' style='flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Restart</button>"
+    "<button id='btn-restart' onclick='doRestart()' style='flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Restart</button>"
     "</div>"
     "<div class=\"note\">Service portal. Generated speeds are not proof of physical shaft motion.</div>"
     "<script>"
@@ -731,6 +734,10 @@ static const char PORTAL_HTML[] =
     "function nc(s){return s==='COMMISSIONED_STA'||s==='AP_DISCOVERABLE'?'badge-ok':\n"
     "s==='SERVICE_AP_ONLY'?'badge-warn':s==='NETWORK_FAULT'?'badge-err':'badge-off'}\n"
     "function fmt(v){return (v/1000).toFixed(1)+' RPM'}\n"
+    "var lifecyclePending=false;\n"
+    "function stationarySafe(m){return (m.state==='UNLOCKED'||m.state==='HOLDING')&&!m.estop_latched&&!m.ramp_active&&m.applied_rpm_milli===0&&m.generated_rpm_milli===0&&m.fault_code===0}\n"
+    "function setLifecyclePending(v){lifecyclePending=v;document.querySelectorAll('#service-controls button,#btn-restart').forEach(function(b){b.disabled=v})}\n"
+    "function transitionView(title,message){document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>'+h(title)+'</h2><p style=\"color:#a1a1aa;margin-top:8px\">'+h(message)+'</p></div>'}\n"
     "function refresh(){\n"
     "fetch('/api/status').then(r=>r.json()).then(d=>{\n"
     "var m=d.machine,a=d.authority,n=d.network;\n"
@@ -763,14 +770,16 @@ static const char PORTAL_HTML[] =
     "((n.retry_count||0)>0?row('Failures',n.retry_count,'badge-err'):'')+\n"
     "((n.seconds_until_retry||0)>0?row('Retry In',n.seconds_until_retry+'s','badge-warn'):'')+\n"
     "row('Guidance',n.operator_guidance||'Unknown',n.operator_action_required?'badge-err':'badge-ok');\n"
-    "if(n.manual_reconnect_permitted){\n"
+    "if(n.manual_reconnect_permitted&&!lifecyclePending){\n"
     "sc.innerHTML+='<button id=\"btn-reconnect\" class=\"refresh-btn\" style=\"background:#3b82f6;margin-bottom:8px\" onclick=\"doReconnect()\">Reconnect Wi-Fi</button>';\n"
     "}\n"
-    "if(n.service_entry_permitted){\n"
+    "if(n.service_entry_permitted&&!lifecyclePending){\n"
     "sc.innerHTML+='<button id=\"btn-enter\" class=\"refresh-btn\" style=\"background:#eab308;color:#000;margin-bottom:8px\" onclick=\"doSvcEnter()\">Enter Local Service</button>';\n"
     "}else if(nmode==='SERVICE_AP_ONLY'&&a.mode==='LOCAL_SERVICE'&&a.owner==='BROWSER'){\n"
     "sc.innerHTML+='<button id=\"btn-exit\" class=\"refresh-btn\" style=\"background:#10b981;margin-bottom:8px\" onclick=\"doSvcExit()\">Exit Local Service</button>';\n"
+    "if(stationarySafe(m)&&!n.factory_reset_pending&&!lifecyclePending){sc.innerHTML+='<button id=\"btn-factory-reset\" class=\"refresh-btn\" style=\"background:#b91c1c;margin-bottom:8px\" onclick=\"doFactoryReset()\">Factory Reset</button>'}\n"
     "}\n"
+    "var rb=document.getElementById('btn-restart');if(rb)rb.disabled=lifecyclePending||!stationarySafe(m);\n"
     "}).catch(e=>{document.getElementById('machine-rows').innerHTML=\n"
     "row('Error','Failed to load status','badge-err')});\n"
     "fetch('/api/identity').then(r=>r.json()).then(d=>{\n"
@@ -783,34 +792,47 @@ static const char PORTAL_HTML[] =
     "row('Model',d.device_model);\n"
     "}).catch(e=>{})}\n"
     "function doRestart(){\n"
+    "if(lifecyclePending)return;\n"
     "if(!confirm('Restart the controller? Active connections will be lost.'))return;\n"
+    "setLifecyclePending(true);\n"
     "fetch('/api/restart',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
     "if(d.status==='restart_initiated'){\n"
-    "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Restarting...</h2><p style=\"color:#a1a1aa;margin-top:8px\">The controller is restarting.</p></div>';\n"
-    "}else{alert(d.message||d.error||'Restart failed')}\n"
-    "}).catch(()=>alert('Connection lost'))}\n"
+    "transitionView('Restart Requested','Connection may be lost. Reconnect and verify authoritative status before continuing.');\n"
+    "}else{setLifecyclePending(false);alert(d.message||d.error||'Restart failed')}\n"
+    "}).catch(()=>transitionView('Restart Result Unknown','Transport was lost. Reconnect and verify /api/status; do not assume success or failure.'))}\n"
     "function doSvcEnter(){\n"
+    "if(lifecyclePending)return;\n"
     "if(!confirm('Enter Local Service?\\n\\n- MQTT authority will be relinquished\\n- STA connectivity will be disabled\\n- Portal may disconnect briefly\\n- The pump will enter browser-owned local service after transition completes.'))return;\n"
-    "var b=document.getElementById('btn-enter');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
+    "setLifecyclePending(true);var b=document.getElementById('btn-enter');if(b){b.textContent='Requesting...';}\n"
     "fetch('/api/service/enter',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
     "if(d.status==='accepted'||d.status==='ok'){\n"
     "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Transition Pending</h2><p style=\"color:#a1a1aa;margin-top:8px\">Service entry requested. You may temporarily lose connection. Please reconnect to the Service AP if necessary and wait for the dashboard to refresh.</p><button onclick=\"location.reload()\" class=\"refresh-btn\" style=\"margin-top:16px\">Reload Dashboard</button></div>';\n"
-    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Enter Local Service';}}\n"
+    "}else{setLifecyclePending(false);alert(d.reason||d.error||'Request failed');if(b){b.textContent='Enter Local Service';}}\n"
     "}).catch(()=>{\n"
     "alert('Network error. The request status is unknown. Please reconnect to the Service AP and reload to verify /api/status.');\n"
-    "if(b){b.disabled=false;b.textContent='Enter Local Service';}\n"
+    "transitionView('Service Entry Result Unknown','Reconnect to the Service AP and verify /api/status. Do not assume the transition failed.');\n"
     "})}\n"
     "function doSvcExit(){\n"
+    "if(lifecyclePending)return;\n"
     "if(!confirm('Exit Local Service?\\n\\nThe controller will safely exit local service and reboot. You will lose connection.'))return;\n"
-    "var b=document.getElementById('btn-exit');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
+    "setLifecyclePending(true);var b=document.getElementById('btn-exit');if(b){b.textContent='Requesting...';}\n"
     "fetch('/api/service/exit',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
     "if(d.status==='accepted'){\n"
     "document.body.innerHTML='<div style=\"text-align:center;padding:40px;color:#a78bfa\"><h2>Exiting Service...</h2><p style=\"color:#a1a1aa;margin-top:8px\">Device reboot requested. Connection will be lost.</p></div>';\n"
-    "}else{alert(d.reason||d.error||'Request failed');if(b){b.disabled=false;b.textContent='Exit Local Service';}}\n"
+    "}else{setLifecyclePending(false);alert(d.reason||d.error||'Request failed');if(b){b.textContent='Exit Local Service';}}\n"
     "}).catch(()=>{\n"
     "alert('Network error. Exit status unknown. Reconnect to the network and verify controller state.');\n"
-    "if(b){b.disabled=false;b.textContent='Exit Local Service';}\n"
+    "transitionView('Service Exit Result Unknown','Reconnect to the configured network and verify /api/status. Do not assume the transition failed.');\n"
     "})}\n"
+    "function doFactoryReset(){\n"
+    "if(lifecyclePending)return;\n"
+    "var warning='Factory Reset erases identity, identity lock, and Wi-Fi configuration. The portal password is preserved. The controller will reboot uncommissioned and this connection will be lost. Continue?';\n"
+    "if(!confirm(warning))return;\n"
+    "setLifecyclePending(true);\n"
+    "fetch('/api/factory-reset',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'FACTORY_RESET'})}).then(async r=>({status:r.status,data:await r.json()})).then(x=>{\n"
+    "if(x.status===202&&x.data.status==='factory_reset_accepted'){transitionView('Factory Reset Accepted','Configuration reset and reboot are pending. Reconnect to the Service AP, authenticate with the existing portal password, and verify uncommissioned authoritative status.')}\n"
+    "else{setLifecyclePending(false);alert(x.data.error||'Factory reset rejected');refresh()}\n"
+    "}).catch(()=>transitionView('Factory Reset Result Unknown','Transport was lost. Reconnect to the Service AP and verify identity, configuration, and /api/status before continuing.'))}\n"
     "function doReconnect(){\n"
     "var b=document.getElementById('btn-reconnect');if(b){b.disabled=true;b.textContent='Requesting...';}\n"
     "fetch('/api/network/reconnect',{method:'POST'}).then(r=>{\n"
@@ -1823,6 +1845,108 @@ static esp_err_t command_post_handler(httpd_req_t *req)
     return send_command_response(req, endpoint_result);
 }
 
+typedef struct {
+    httpd_req_t *req;
+} factory_reset_recv_ctx_t;
+
+static int factory_reset_body_recv(void *ctx, uint8_t *dst, size_t max_len)
+{
+    factory_reset_recv_ctx_t *recv_ctx = (factory_reset_recv_ctx_t *)ctx;
+    int received = httpd_req_recv(recv_ctx->req, (char *)dst, max_len);
+    return received == HTTPD_SOCK_ERR_TIMEOUT
+               ? ARGUS_FACTORY_RESET_BODY_RECV_TIMEOUT
+               : received;
+}
+
+static esp_err_t send_factory_reset_response(httpd_req_t *req, int status_code)
+{
+    const char *status = "500 Internal Server Error";
+    const char *body = "{\"ok\":false,\"error\":\"internal_error\"}";
+    switch (status_code) {
+        case 202:
+            status = "202 Accepted";
+            body = "{\"ok\":true,\"status\":\"factory_reset_accepted\","
+                   "\"note\":\"Configuration reset and reboot pending. Reconnect to the Service AP and verify authoritative status.\"}";
+            break;
+        case 400:
+            status = "400 Bad Request";
+            body = "{\"ok\":false,\"error\":\"invalid_request\"}";
+            break;
+        case 403:
+            status = "403 Forbidden";
+            body = "{\"ok\":false,\"error\":\"factory_reset_not_admitted\"}";
+            break;
+        case 409:
+            status = "409 Conflict";
+            body = "{\"ok\":false,\"error\":\"lifecycle_conflict\"}";
+            break;
+        case 415:
+            status = "415 Unsupported Media Type";
+            body = "{\"ok\":false,\"error\":\"unsupported_media_type\"}";
+            break;
+        case 503:
+            status = "503 Service Unavailable";
+            body = "{\"ok\":false,\"error\":\"queue_unavailable\"}";
+            break;
+        default:
+            break;
+    }
+    set_api_headers(req);
+    httpd_resp_set_status(req, status);
+    return httpd_resp_sendstr(req, body);
+}
+
+static esp_err_t factory_reset_post_handler(httpd_req_t *req)
+{
+    set_api_headers(req);
+    if (req->method != HTTP_POST) return send_factory_reset_response(req, 400);
+    if (!check_auth(req)) return ESP_OK;
+
+    char content_type[48];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type,
+                                    sizeof(content_type)) != ESP_OK ||
+        !argus_factory_reset_content_type_valid(content_type)) {
+        return send_factory_reset_response(req, 415);
+    }
+
+    uint8_t body[ARGUS_FACTORY_RESET_MAX_BODY_LEN];
+    size_t body_len = 0U;
+    factory_reset_recv_ctx_t recv_ctx = {.req = req};
+    argus_factory_reset_receive_result_t receive_result =
+        argus_factory_reset_receive_body(req->content_len,
+                                         factory_reset_body_recv, &recv_ctx,
+                                         body, sizeof(body), &body_len);
+    argus_factory_reset_receive_disposition_t disposition;
+    if (!argus_factory_reset_receive_disposition(receive_result, &disposition)) {
+        disposition = (argus_factory_reset_receive_disposition_t){
+            .close_session = true,
+            .status_code = 500,
+            .handler_result_after_response = ESP_FAIL,
+        };
+    }
+    if (!disposition.continue_request) {
+        if (disposition.close_session) {
+            httpd_resp_set_hdr(req, "Connection", "close");
+        }
+        esp_err_t response_err =
+            send_factory_reset_response(req, disposition.status_code);
+        return response_err != ESP_OK ? response_err
+                                      : disposition.handler_result_after_response;
+    }
+
+    if (argus_factory_reset_decode(body, body_len) !=
+        ARGUS_FACTORY_RESET_DECODE_OK) {
+        return send_factory_reset_response(req, 400);
+    }
+
+    esp_err_t err = argus_net_mgr_request_factory_reset();
+    if (err == ESP_OK) return send_factory_reset_response(req, 202);
+    if (err == ESP_ERR_NOT_SUPPORTED) return send_factory_reset_response(req, 409);
+    if (err == ESP_ERR_INVALID_STATE) return send_factory_reset_response(req, 403);
+    if (err == ESP_ERR_NO_MEM) return send_factory_reset_response(req, 503);
+    return send_factory_reset_response(req, 500);
+}
+
 static const httpd_uri_t uri_status = {
     .uri       = "/api/status",
     .method    = HTTP_GET,
@@ -2025,12 +2149,32 @@ static const httpd_uri_t uri_command = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t uri_factory_reset = {
+    .uri       = ARGUS_FACTORY_RESET_URI,
+    .method    = HTTP_POST,
+    .handler   = factory_reset_post_handler,
+    .user_ctx  = NULL
+};
+
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 bool argus_http_test_command_registration(void)
 {
     return strcmp(uri_command.uri, ARGUS_BROWSER_COMMAND_URI) == 0 &&
            uri_command.method == HTTP_POST &&
            uri_command.handler == command_post_handler;
+}
+
+bool argus_http_test_factory_reset_registration(void)
+{
+    return strcmp(uri_factory_reset.uri, ARGUS_FACTORY_RESET_URI) == 0 &&
+           uri_factory_reset.method == HTTP_POST &&
+           uri_factory_reset.handler == factory_reset_post_handler;
+}
+
+const char *argus_http_test_portal_page(size_t *out_len)
+{
+    if (out_len != NULL) *out_len = sizeof(PORTAL_HTML) - 1U;
+    return PORTAL_HTML;
 }
 
 bool argus_http_test_controls_registration(void)
@@ -2111,7 +2255,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 17;  /* 16 registered handlers + headroom */
+    config.max_uri_handlers   = 18;  /* 17 registered handlers + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -2167,6 +2311,9 @@ esp_err_t argus_http_server_start(void)
     if (reg_err != ESP_OK) goto rollback;
     /* Phase 4B.4 endpoint */
     reg_err = httpd_register_uri_handler(s_server, &uri_command);
+    if (reg_err != ESP_OK) goto rollback;
+    /* Phase 4B.6 endpoint */
+    reg_err = httpd_register_uri_handler(s_server, &uri_factory_reset);
     if (reg_err != ESP_OK) goto rollback;
 
     ESP_LOGI(TAG, "HTTP server started on port 80 (max_conn=%d)", HTTP_MAX_CONNECTIONS);

@@ -147,6 +147,14 @@ esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg);
 esp_err_t argus_nvs_config_factory_reset(void);
 
 /**
+ * @brief Return whether an NVS namespace belongs to configuration-reset scope.
+ *
+ * The durable reset marker and portal credential namespaces are deliberately
+ * outside this scope.
+ */
+bool argus_nvs_config_namespace_in_factory_reset_scope(const char *namespace_name);
+
+/**
  * @brief Export configuration payload with sensitive fields (passwords) masked.
  * @param in_cfg Source configuration.
  * @param[out] out_masked Destination masked configuration.

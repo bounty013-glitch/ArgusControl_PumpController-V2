@@ -17,6 +17,7 @@ idf_component_register(
         "argus_console_helpers.c"
         "argus_http_server.c"
         "argus_restart_mgr.c"
+        "argus_factory_reset.c"
         "argus_config_overlay.c"
         "argus_json.c"
         "argus_service_policy.c"
@@ -26,6 +27,7 @@ idf_component_register(
         "argus_tests_4b4.c"
         "argus_tests_4b4_step2.c"
         "argus_tests_4b5.c"
+        "argus_tests_4b6.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES

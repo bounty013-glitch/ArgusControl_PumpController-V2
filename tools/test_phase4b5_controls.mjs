@@ -9,7 +9,7 @@ assert.ok(scriptMatch, "inline controls script is present");
 new vm.Script(scriptMatch[1], { filename: "argus_controls.html" });
 
 const recoverBody = trajectorySource.match(
-  /esp_err_t argus_trajectory_recover\(void\)\s*\{([\s\S]*?)\n\}\n\nvoid argus_trajectory_clear_error/,
+  /esp_err_t argus_trajectory_recover\(void\)\s*\{([\s\S]*?)\r?\n\}\r?\n\r?\nvoid argus_trajectory_clear_error/,
 );
 assert.ok(recoverBody, "trajectory recovery implementation is present");
 assert.match(recoverBody[1], /clear_error_locked\(\)/);

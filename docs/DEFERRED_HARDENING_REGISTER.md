@@ -252,17 +252,13 @@
 | **Target Phase** | Post-field-evaluation |
 | **Operator Decision** | 2026-07-19 |
 
-**Limitation:** Identity fields (client_id, unit_id, device_name) are locked after initial provisioning via the portal. There is currently no mechanism for password-protected identity modification or factory reset through the portal. Identity can only be changed via serial console NVS erase.
+**Original limitation:** Identity fields (client_id, unit_id, device_name) lock after initial provisioning, and no authenticated portal workflow existed to clear that lock and recommission the controller.
 
-**Rationale:** The operator deferred factory reset and privileged identity modification to gain field experience with the provisioning flow. The monotonic high-water marker (NVS `prov_hwm` key) ensures identity lock survives LKG rollback and slot corruption.
+**Phase 4B.6 disposition:** CLOSED for configuration factory reset. Authenticated `POST /api/factory-reset`, available only in safe browser-owned Local Service, now erases configuration slots, selector metadata, the provisioning high-water marker, identity configuration, and STA configuration through the durable reset transaction. Live acceptance proved `identity_provisioned:false`, truthful uncommissioned recovery, exact one-time identity reprovisioning, and rejection of a second mutation after relock.
 
-**Deferred items:**
-- Factory reset mechanism (portal button, physical button hold, or CLI command)
-- Password-protected identity modification fields
-- Decision on whether factory reset should clear the portal password
-- Unified reset across all NVS namespaces (config, portal, system)
+Portal authentication in `argus_portal` is intentionally outside configuration-reset scope. Live acceptance proved the existing nondefault portal credential remained valid and default `admin/admin` remained rejected after reset.
 
-**Decision criteria:** Extended field evaluation will determine the appropriate identity modification and reset user experience.
+Direct privileged mutation of a locked identity remains intentionally unsupported; the supported path is configuration factory reset followed by first provisioning. Unified configuration-and-portal-credential recovery remains open under the existing Phase 4D credential-recovery and security-hardening entries. CSRF, rate limiting, session management, and other recorded security limitations are unchanged by this closure.
 
 ---
 
