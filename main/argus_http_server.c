@@ -1705,18 +1705,24 @@ static esp_err_t command_post_handler(httpd_req_t *req)
                                            body,
                                            sizeof(body),
                                            &body_len);
-    if (receive_result != ARGUS_BROWSER_BODY_RECEIVE_OK) {
-        if (receive_result == ARGUS_BROWSER_BODY_RECEIVE_TOO_LARGE) {
-            /* Never drain an attacker-controlled declared length. Close this
-             * session after the bounded error response instead. */
+    argus_browser_command_receive_disposition_t disposition;
+    if (!argus_browser_command_receive_disposition(receive_result, &disposition)) {
+        disposition = (argus_browser_command_receive_disposition_t){
+            .continue_request = false,
+            .close_session = true,
+            .response_result = ARGUS_BROWSER_ENDPOINT_INTERNAL_ERROR,
+            .handler_result_after_response = ESP_FAIL,
+        };
+    }
+    if (!disposition.continue_request) {
+        if (disposition.close_session) {
             httpd_resp_set_hdr(req, "Connection", "close");
-            esp_err_t response_err =
-                send_command_response(req, ARGUS_BROWSER_ENDPOINT_BAD_REQUEST);
-            esp_err_t close_err =
-                httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
-            return response_err != ESP_OK ? response_err : close_err;
         }
-        return send_command_response(req, ARGUS_BROWSER_ENDPOINT_BAD_REQUEST);
+        esp_err_t response_err = send_command_response(req, disposition.response_result);
+        /* ESP-IDF closes and cleans up the session when a URI handler returns
+         * an error after httpd_req_recv() failed or framing is uncertain. */
+        return response_err != ESP_OK ? response_err
+                                      : disposition.handler_result_after_response;
     }
 
     const argus_browser_command_endpoint_ops_t ops = {

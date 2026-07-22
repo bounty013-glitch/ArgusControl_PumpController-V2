@@ -65,6 +65,21 @@ typedef enum {
 } argus_browser_command_endpoint_result_t;
 
 typedef struct {
+    bool continue_request;
+    bool close_session;
+    argus_browser_command_endpoint_result_t response_result;
+    esp_err_t handler_result_after_response;
+} argus_browser_command_receive_disposition_t;
+
+/**
+ * @brief Map body-receive outcomes to the production handler's response and
+ *        connection-framing decision.
+ */
+bool argus_browser_command_receive_disposition(
+    argus_browser_body_receive_result_t receive_result,
+    argus_browser_command_receive_disposition_t *out_disposition);
+
+typedef struct {
     argus_browser_command_endpoint_result_t result;
     argus_browser_command_decode_result_t decode_result;
     esp_err_t operation_error;

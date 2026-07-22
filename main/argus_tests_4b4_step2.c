@@ -200,6 +200,54 @@ esp_err_t test_4b4_endpoint_body_receive_failures(void)
     TEST_CHECK(argus_browser_command_receive_body(1U, NULL, NULL,
                                                    output, sizeof(output), &received) ==
                ARGUS_BROWSER_BODY_RECEIVE_INVALID_ARGUMENT);
+
+    static const struct {
+        argus_browser_body_receive_result_t receive_result;
+        bool continue_request;
+        bool close_session;
+        argus_browser_command_endpoint_result_t response_result;
+        esp_err_t handler_result;
+    } policy_cases[] = {
+        {ARGUS_BROWSER_BODY_RECEIVE_OK, true, false, ARGUS_BROWSER_ENDPOINT_OK, ESP_OK},
+        {ARGUS_BROWSER_BODY_RECEIVE_EMPTY, false, false,
+         ARGUS_BROWSER_ENDPOINT_BAD_REQUEST, ESP_OK},
+        {ARGUS_BROWSER_BODY_RECEIVE_TOO_LARGE, false, true,
+         ARGUS_BROWSER_ENDPOINT_BAD_REQUEST, ESP_FAIL},
+        {ARGUS_BROWSER_BODY_RECEIVE_TRUNCATED, false, true,
+         ARGUS_BROWSER_ENDPOINT_BAD_REQUEST, ESP_FAIL},
+        {ARGUS_BROWSER_BODY_RECEIVE_TIMEOUT, false, true,
+         ARGUS_BROWSER_ENDPOINT_BAD_REQUEST, ESP_FAIL},
+        {ARGUS_BROWSER_BODY_RECEIVE_ERROR, false, true,
+         ARGUS_BROWSER_ENDPOINT_BAD_REQUEST, ESP_FAIL},
+        {ARGUS_BROWSER_BODY_RECEIVE_INVALID_ARGUMENT, false, true,
+         ARGUS_BROWSER_ENDPOINT_INTERNAL_ERROR, ESP_FAIL},
+        {(argus_browser_body_receive_result_t)99, false, true,
+         ARGUS_BROWSER_ENDPOINT_INTERNAL_ERROR, ESP_FAIL},
+    };
+
+    endpoint_trace_t endpoint_trace;
+    init_admitted_trace(&endpoint_trace);
+    for (size_t i = 0; i < ARRAY_LEN(policy_cases); i++) {
+        argus_browser_command_receive_disposition_t disposition;
+        TEST_CHECK(argus_browser_command_receive_disposition(
+            policy_cases[i].receive_result, &disposition));
+        TEST_CHECK(disposition.continue_request == policy_cases[i].continue_request);
+        TEST_CHECK(disposition.close_session == policy_cases[i].close_session);
+        TEST_CHECK(disposition.response_result == policy_cases[i].response_result);
+        TEST_CHECK(disposition.handler_result_after_response ==
+                   policy_cases[i].handler_result);
+
+        if (!disposition.continue_request) {
+            argus_browser_command_http_response_t response;
+            TEST_CHECK(argus_browser_command_response_for(disposition.response_result,
+                                                           &response));
+            TEST_CHECK(response.json_body != NULL && strlen(response.json_body) < 96U);
+            TEST_CHECK(strcmp(response.cache_control, "no-store") == 0);
+        }
+    }
+    TEST_CHECK(endpoint_trace.dispatch_calls == 0);
+    TEST_CHECK(!argus_browser_command_receive_disposition(
+        ARGUS_BROWSER_BODY_RECEIVE_OK, NULL));
     return ESP_OK;
 }
 

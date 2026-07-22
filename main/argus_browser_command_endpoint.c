@@ -51,6 +51,45 @@ argus_browser_body_receive_result_t argus_browser_command_receive_body(
     return ARGUS_BROWSER_BODY_RECEIVE_OK;
 }
 
+bool argus_browser_command_receive_disposition(
+    argus_browser_body_receive_result_t receive_result,
+    argus_browser_command_receive_disposition_t *out_disposition)
+{
+    if (out_disposition == NULL) {
+        return false;
+    }
+
+    *out_disposition = (argus_browser_command_receive_disposition_t){
+        .continue_request = false,
+        .close_session = true,
+        .response_result = ARGUS_BROWSER_ENDPOINT_INTERNAL_ERROR,
+        .handler_result_after_response = ESP_FAIL,
+    };
+
+    switch (receive_result) {
+        case ARGUS_BROWSER_BODY_RECEIVE_OK:
+            out_disposition->continue_request = true;
+            out_disposition->close_session = false;
+            out_disposition->response_result = ARGUS_BROWSER_ENDPOINT_OK;
+            out_disposition->handler_result_after_response = ESP_OK;
+            return true;
+        case ARGUS_BROWSER_BODY_RECEIVE_EMPTY:
+            out_disposition->close_session = false;
+            out_disposition->response_result = ARGUS_BROWSER_ENDPOINT_BAD_REQUEST;
+            out_disposition->handler_result_after_response = ESP_OK;
+            return true;
+        case ARGUS_BROWSER_BODY_RECEIVE_TOO_LARGE:
+        case ARGUS_BROWSER_BODY_RECEIVE_TRUNCATED:
+        case ARGUS_BROWSER_BODY_RECEIVE_TIMEOUT:
+        case ARGUS_BROWSER_BODY_RECEIVE_ERROR:
+            out_disposition->response_result = ARGUS_BROWSER_ENDPOINT_BAD_REQUEST;
+            return true;
+        case ARGUS_BROWSER_BODY_RECEIVE_INVALID_ARGUMENT:
+        default:
+            return true;
+    }
+}
+
 static void reset_outcome(argus_browser_command_endpoint_outcome_t *outcome)
 {
     memset(outcome, 0, sizeof(*outcome));
