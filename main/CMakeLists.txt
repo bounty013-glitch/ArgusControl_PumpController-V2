@@ -2,6 +2,8 @@ idf_component_register(
     SRCS
         "app_main.c"
         "argus_mqtt_broker.c"
+        "argus_mqtt_contract.c"
+        "argus_mqtt_runtime.c"
         "argus_config.c"
         "argus_conversions.c"
         "argus_feedback.c"
@@ -28,6 +30,7 @@ idf_component_register(
         "argus_tests_4b4_step2.c"
         "argus_tests_4b5.c"
         "argus_tests_4b6.c"
+        "argus_tests_4c.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES

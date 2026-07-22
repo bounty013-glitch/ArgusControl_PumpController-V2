@@ -22,6 +22,7 @@
 #include "argus_tests_4b4_step2.h"
 #include "argus_tests_4b5.h"
 #include "argus_tests_4b6.h"
+#include "argus_tests_4c.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5340,6 +5341,26 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b6_factory_reset_orchestration_revalidation);
     RUN_TEST(test_4b6_factory_reset_orchestration_failures);
     RUN_TEST(test_4b6_factory_reset_http_and_ui_contract);
+    /* Phase 4C dynamic MQTT contract and fail-operational tests */
+    RUN_TEST(test_4c_topic_root_and_canonical_topics);
+    RUN_TEST(test_4c_topic_component_rejections);
+    RUN_TEST(test_4c_topic_ownership_policy);
+    RUN_TEST(test_4c_command_decoder_all_actions);
+    RUN_TEST(test_4c_command_decoder_strict_structure);
+    RUN_TEST(test_4c_command_decoder_value_contract);
+    RUN_TEST(test_4c_command_decoder_identity_fields);
+    RUN_TEST(test_4c_command_decoder_length_and_nul);
+    RUN_TEST(test_4c_heartbeat_decoder_contract);
+    RUN_TEST(test_4c_heartbeat_decoder_rejections);
+    RUN_TEST(test_4c_serial_number_arithmetic);
+    RUN_TEST(test_4c_heartbeat_lease_binding);
+    RUN_TEST(test_4c_heartbeat_expiry_is_observability_only);
+    RUN_TEST(test_4c_disconnect_releases_matching_lease);
+    RUN_TEST(test_4c_sequence_first_and_newer);
+    RUN_TEST(test_4c_sequence_duplicate_and_conflict);
+    RUN_TEST(test_4c_sequence_stale_and_wrap);
+    RUN_TEST(test_4c_session_restart_invalidates_prior_envelope);
+    RUN_TEST(test_4c_retained_capacity_covers_baseline);
     }
 
     int total_executions = passed_executions + failed_executions;

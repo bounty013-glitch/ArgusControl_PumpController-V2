@@ -20,6 +20,7 @@
 
 #include "esp_timer.h"
 #include "argus_mqtt_broker.h"
+#include "argus_mqtt_runtime.h"
 #include "argus_config.h"
 #include "argus_conversions.h"
 #include "argus_feedback.h"
@@ -38,19 +39,6 @@
 #include "argus_tests.h"
 
 #define MQTT_BROKER_PORT      1883U
-
-#define MQTT_TOPIC_ROOT       "argus/peristaltic"
-#define CMD_RUN_TOPIC         MQTT_TOPIC_ROOT "/cmd/run"
-#define CMD_SPEED_PCT_TOPIC   MQTT_TOPIC_ROOT "/cmd/speed_pct"
-#define CMD_STOP_TOPIC        MQTT_TOPIC_ROOT "/cmd/stop"
-#define CMD_ESTOP_TOPIC       MQTT_TOPIC_ROOT "/cmd/e_stop"
-#define CMD_RESET_ESTOP_TOPIC MQTT_TOPIC_ROOT "/cmd/reset_estop"
-#define CMD_UNLOCK_TOPIC      MQTT_TOPIC_ROOT "/cmd/unlock"
-
-#define STATUS_STATE_TOPIC    MQTT_TOPIC_ROOT "/status/state"
-#define STATUS_RPM_TOPIC      MQTT_TOPIC_ROOT "/status/rpm"
-#define STATUS_RUN_TOPIC      MQTT_TOPIC_ROOT "/status/target_rpm"
-#define STATUS_ONLINE_TOPIC   MQTT_TOPIC_ROOT "/status/online"
 
 #include <stdatomic.h>
 
@@ -76,166 +64,6 @@ void argus_app_main_print_oneshot_status(void)
     (void)freq_mhz;
 }
 
-// ================= TELEMETRY =================
-
-static void publish_status_topic(const char *topic, const char *payload, bool retain)
-{
-    if (!argus_mqtt_broker_is_running()) {
-        return;
-    }
-    esp_err_t err = argus_mqtt_broker_publish(topic, payload, retain);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "Failed to publish %s: %s", topic, esp_err_to_name(err));
-    }
-}
-
-static void publish_status(void)
-{
-    if (!argus_mqtt_broker_is_running()) {
-        return;
-    }
-
-    argus_state_snapshot_t snap;
-    argus_state_mgr_get_snapshot(&snap);
-
-    publish_status_topic(STATUS_STATE_TOPIC, argus_state_mgr_get_state_name(snap.machine_state), true);
-
-    char payload[64];
-    snprintf(payload, sizeof(payload), "%ld.%03ld",
-             (long)(snap.generated_rpm_milli / 1000),
-             (long)((snap.generated_rpm_milli < 0 ? -snap.generated_rpm_milli : snap.generated_rpm_milli) % 1000));
-    publish_status_topic(STATUS_RPM_TOPIC, payload, true);
-
-    snprintf(payload, sizeof(payload), "%ld", (long)snap.configured_target_rpm_milli);
-    publish_status_topic(STATUS_RUN_TOPIC, payload, true);
-}
-
-// ================= COMMAND ARBITRATION VIA ROUTER =================
-
-static void handle_mqtt_command(const char *topic, const char *data, bool retain)
-{
-    ESP_LOGI(TAG, "MQTT RX topic=[%s] payload=[%s] retain=%d", topic, data, retain);
-
-    if (argus_cmd_parser_validate_control_message(topic, data, retain) != ESP_OK) {
-        ESP_LOGW(TAG, "Command rejected: Retained control payload ignored on topic %s", topic);
-        return;
-    }
-
-    argus_authority_snapshot_t snap;
-    argus_authority_mgr_get_snapshot(&snap);
-
-    argus_command_envelope_t env = {
-        .source = ARGUS_CMD_SRC_MQTT_SUPERVISORY,
-        .authority_generation = snap.generation,
-        .target_rpm_milli = 0,
-        .forward = true
-    };
-
-    if (strcmp(topic, CMD_SPEED_PCT_TOPIC) == 0) {
-        int pct = 0;
-        if (argus_cmd_parser_speed_pct(data, &pct) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed speed_pct payload: '%s'", data);
-            return;
-        }
-        const argus_config_t *cfg = argus_config_get();
-        int32_t range = cfg->max_output_milli_rpm - cfg->min_output_milli_rpm;
-        int32_t rpm_milli = cfg->min_output_milli_rpm + (pct * range) / 100;
-        if (pct == 0) rpm_milli = 0;
-
-        env.command_type = ARGUS_CMD_TYPE_SET_TARGET;
-        env.target_rpm_milli = rpm_milli;
-
-        esp_err_t err = argus_cmd_router_dispatch(&env);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Setpoint updated: %d%% (%ld mRPM)", pct, (long)rpm_milli);
-        } else {
-            ESP_LOGW(TAG, "Setpoint dispatch rejected: %s", esp_err_to_name(err));
-        }
-        publish_status();
-        return;
-    }
-
-    if (strcmp(topic, CMD_RUN_TOPIC) == 0) {
-        bool run_val = false;
-        if (argus_cmd_parser_bool(data, &run_val) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed run payload: '%s'", data);
-            return;
-        }
-        env.command_type = run_val ? ARGUS_CMD_TYPE_START : ARGUS_CMD_TYPE_STOP_NORMAL;
-        argus_cmd_router_dispatch(&env);
-        publish_status();
-        return;
-    }
-
-    if (strcmp(topic, CMD_STOP_TOPIC) == 0) {
-        bool stop_val = false;
-        if (argus_cmd_parser_bool(data, &stop_val) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed stop payload: '%s'", data);
-            return;
-        }
-        if (stop_val) {
-            env.command_type = ARGUS_CMD_TYPE_STOP_NORMAL;
-            argus_cmd_router_dispatch(&env);
-        }
-        publish_status();
-        return;
-    }
-
-    if (strcmp(topic, CMD_ESTOP_TOPIC) == 0) {
-        bool estop_val = false;
-        if (argus_cmd_parser_bool(data, &estop_val) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed e_stop payload: '%s'", data);
-            return;
-        }
-        env.command_type = estop_val ? ARGUS_CMD_TYPE_ESTOP : ARGUS_CMD_TYPE_RESET_ESTOP;
-        argus_cmd_router_dispatch(&env);
-        publish_status();
-        return;
-    }
-
-    if (strcmp(topic, CMD_RESET_ESTOP_TOPIC) == 0) {
-        bool reset_val = false;
-        if (argus_cmd_parser_bool(data, &reset_val) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed reset_estop payload: '%s'", data);
-            return;
-        }
-        if (reset_val) {
-            env.command_type = ARGUS_CMD_TYPE_RESET_ESTOP;
-            argus_cmd_router_dispatch(&env);
-        }
-        publish_status();
-        return;
-    }
-
-    if (strcmp(topic, CMD_UNLOCK_TOPIC) == 0) {
-        bool unlock_val = false;
-        if (argus_cmd_parser_bool(data, &unlock_val) != ESP_OK) {
-            ESP_LOGW(TAG, "Command rejected: Malformed unlock payload: '%s'", data);
-            return;
-        }
-        if (unlock_val) {
-            env.command_type = ARGUS_CMD_TYPE_UNLOCK;
-            argus_cmd_router_dispatch(&env);
-        }
-        publish_status();
-        return;
-    }
-}
-
-// ================= MQTT BROKER & POLICY SEAM =================
-
-static esp_err_t mqtt_policy_check(const char *topic, const char *payload, bool retain, void *user_ctx)
-{
-    (void)user_ctx;
-    return argus_cmd_parser_validate_control_message(topic, payload, retain);
-}
-
-static void mqtt_broker_message_cb(const char *topic, const char *payload, bool retain, void *user_ctx)
-{
-    (void)user_ctx;
-    handle_mqtt_command(topic, payload, retain);
-}
-
 static void mqtt_broker_start(void)
 {
     if (argus_mqtt_broker_is_running()) {
@@ -243,17 +71,18 @@ static void mqtt_broker_start(void)
         return;
     }
 
-    const argus_mqtt_broker_config_t broker_config = {
-        .port = MQTT_BROKER_PORT,
-        .on_message = mqtt_broker_message_cb,
-        .policy_check = mqtt_policy_check,
-        .user_ctx = NULL,
-    };
+    esp_err_t err = argus_mqtt_runtime_prepare_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT contract preparation failed closed: %s",
+                 esp_err_to_name(err));
+        return;
+    }
 
-    esp_err_t err = argus_mqtt_broker_start(&broker_config);
+    argus_mqtt_broker_config_t broker_config;
+    argus_mqtt_runtime_get_broker_config(MQTT_BROKER_PORT, &broker_config);
+    err = argus_mqtt_broker_start(&broker_config);
     if (err == ESP_OK) {
-        publish_status_topic(STATUS_ONLINE_TOPIC, "online", true);
-        publish_status();
+        ESP_ERROR_CHECK_WITHOUT_ABORT(argus_mqtt_runtime_broker_started());
     } else if (err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "Failed to start MQTT broker: %s", esp_err_to_name(err));
     }
@@ -281,7 +110,7 @@ static void status_task(void *arg)
         }
 
         if (argus_mqtt_broker_is_running()) {
-            publish_status();
+            argus_mqtt_runtime_tick();
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -903,6 +732,7 @@ void app_main(void)
 
     // 10. Initialize MQTT Broker Lifecycle Objects (once, firmware-lifetime)
     ESP_ERROR_CHECK(argus_mqtt_broker_init());
+    ESP_ERROR_CHECK(argus_mqtt_runtime_init());
 
     // 11. Register MQTT Broker Startup Callback with Network Manager
     argus_net_mgr_register_broker_start_cb(mqtt_broker_start);
@@ -917,7 +747,7 @@ void app_main(void)
     }
 
     // Launch background tasks
-    xTaskCreate(status_task, "status_task", 4096, NULL, 5, NULL);
+    xTaskCreate(status_task, "status_task", 6144, NULL, 5, NULL);
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
     esp_err_t console_err = argus_console_transport_init();
     if (console_err == ESP_OK) {
