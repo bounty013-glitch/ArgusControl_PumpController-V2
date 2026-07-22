@@ -20,6 +20,7 @@
 #include "argus_service_policy.h"
 #include "argus_tests_4b4.h"
 #include "argus_tests_4b4_step2.h"
+#include "argus_tests_4b5.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5322,6 +5323,11 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4b4_endpoint_response_contract);
     RUN_TEST(test_4b4_endpoint_routing_field_rejections);
     RUN_TEST(test_4b4_endpoint_invalid_ops_are_isolated);
+    /* Phase 4B.5 dedicated controls page and live status tests */
+    RUN_TEST(test_4b5_machine_status_json_contract);
+    RUN_TEST(test_4b5_controls_route_and_navigation_contract);
+    RUN_TEST(test_4b5_controls_command_contract);
+    RUN_TEST(test_4b5_controls_live_status_contract);
     }
 
     int total_executions = passed_executions + failed_executions;

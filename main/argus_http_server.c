@@ -338,11 +338,66 @@ static void json_escape(const char *src, char *dst, size_t dst_size)
     dst[di] = '\0';
 }
 
+#define ARGUS_MACHINE_STATUS_JSON_MAX 512U
+
+static int format_machine_status_json(const argus_state_snapshot_t *snapshot,
+                                      char *out,
+                                      size_t out_size)
+{
+    if (snapshot == NULL || out == NULL || out_size == 0U) {
+        return -1;
+    }
+
+    char escaped_rejection[sizeof(snapshot->last_rejection_reason) * 2U + 1U];
+    json_escape(snapshot->last_rejection_reason, escaped_rejection,
+                sizeof(escaped_rejection));
+
+    int len = snprintf(out, out_size,
+        "{"
+        "\"state\":\"%s\","
+        "\"target_rpm_milli\":%" PRId32 ","
+        "\"applied_rpm_milli\":%" PRId32 ","
+        "\"generated_rpm_milli\":%" PRId32 ","
+        "\"requested_forward\":%s,"
+        "\"applied_forward\":%s,"
+        "\"driver_enabled\":%s,"
+        "\"estop_latched\":%s,"
+        "\"ramp_active\":%s,"
+        "\"fault_code\":%" PRIu32 ","
+        "\"command_generation\":%" PRIu32 ","
+        "\"feedback_available\":%s,"
+        "\"last_rejection_reason\":\"%s\""
+        "}",
+        argus_state_mgr_get_state_name(snapshot->machine_state),
+        snapshot->configured_target_rpm_milli,
+        snapshot->applied_rpm_milli,
+        snapshot->generated_rpm_milli,
+        snapshot->requested_forward ? "true" : "false",
+        snapshot->applied_forward ? "true" : "false",
+        snapshot->driver_enabled ? "true" : "false",
+        snapshot->estop_latched ? "true" : "false",
+        snapshot->ramp_active ? "true" : "false",
+        snapshot->fault_code,
+        snapshot->command_generation,
+        snapshot->feedback_available ? "true" : "false",
+        escaped_rejection);
+
+    return (len >= 0 && (size_t)len < out_size) ? len : -1;
+}
+
 /* Expose json_escape for pure testing in diagnostic builds */
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 void argus_http_test_json_escape(const char *src, char *dst, size_t dst_size)
 {
     json_escape(src, dst, dst_size);
+}
+
+int argus_http_test_format_machine_status_json(
+    const argus_state_snapshot_t *snapshot,
+    char *out,
+    size_t out_size)
+{
+    return format_machine_status_json(snapshot, out, out_size);
 }
 #endif
 
@@ -389,7 +444,6 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     argus_mqtt_broker_lifecycle_obs_t broker_obs = {0};
     esp_err_t broker_err = argus_mqtt_broker_get_lifecycle_obs(&broker_obs);
 
-    const char *machine_state_str = argus_state_mgr_get_state_name(state_snap.machine_state);
     const char *net_mode_str = argus_net_mgr_get_mode_name(net_snap.mode);
     const char *auth_mode_str = argus_authority_mgr_get_mode_name(auth_snap.mode);
     const char *auth_owner_str = argus_authority_mgr_get_owner_name(auth_snap.owner);
@@ -438,17 +492,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         default: break;
     }
 
+    char machine_json[ARGUS_MACHINE_STATUS_JSON_MAX];
+    if (format_machine_status_json(&state_snap, machine_json,
+                                   sizeof(machine_json)) < 0) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"error\":\"machine status overflow\"}");
+        return ESP_OK;
+    }
+
     /* Build JSON response */
-    char buf[1536];
+    char buf[1792];
     int len = snprintf(buf, sizeof(buf),
         "{"
-        "\"machine\":{\"state\":\"%s\","
-        "\"target_rpm_milli\":%" PRId32 ","
-        "\"applied_rpm_milli\":%" PRId32 ","
-        "\"generated_rpm_milli\":%" PRId32 ","
-        "\"driver_enabled\":%s,"
-        "\"estop_latched\":%s,"
-        "\"ramp_active\":%s},"
+        "\"machine\":%s,"
         "\"authority\":{\"mode\":\"%s\",\"owner\":\"%s\","
         "\"generation\":%" PRIu32 "},"
         "\"network\":{\"mode\":\"%s\","
@@ -473,13 +529,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"observable\":%s},"
         "\"commissioned\":%s"
         "}",
-        machine_state_str,
-        state_snap.configured_target_rpm_milli,
-        state_snap.applied_rpm_milli,
-        state_snap.generated_rpm_milli,
-        state_snap.driver_enabled ? "true" : "false",
-        state_snap.estop_latched ? "true" : "false",
-        state_snap.ramp_active ? "true" : "false",
+        machine_json,
         auth_mode_str, auth_owner_str,
         auth_snap.generation,
         net_mode_str,
@@ -661,6 +711,7 @@ static const char PORTAL_HTML[] =
     "<button class=\"refresh-btn\" style=\"background:#dc2626\" onclick=\"window.location='/api/logout'\">Log Out</button>"
     "</div>"
     "<div style=\"display:flex;gap:8px;margin-top:16px;flex-wrap:wrap\">"
+    "<a href='/controls' style='flex:1;text-align:center;text-decoration:none;background:#7c3aed;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Motion Controls</a>"
     "<a href='/config/identity' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Identity</a>"
     "<a href='/config/wifi' style='flex:1;text-align:center;text-decoration:none;background:#3f3f46;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>WiFi Config</a>"
     "<button onclick='doRestart()' style='flex:1;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:0.875rem;font-weight:500;cursor:pointer;transition:background 0.15s'>Restart</button>"
@@ -897,6 +948,40 @@ static esp_err_t portal_get_handler(httpd_req_t *req)
     /* Normal portal */
     httpd_resp_send(req, PORTAL_HTML, sizeof(PORTAL_HTML) - 1);
     return ESP_OK;
+}
+
+extern const uint8_t argus_controls_html_start[]
+    asm("_binary_argus_controls_html_start");
+extern const uint8_t argus_controls_html_end[]
+    asm("_binary_argus_controls_html_end");
+
+static size_t controls_page_length(void)
+{
+    size_t len = (size_t)(argus_controls_html_end - argus_controls_html_start);
+    if (len > 0U && argus_controls_html_start[len - 1U] == '\0') len--;
+    return len;
+}
+
+static esp_err_t controls_get_handler(httpd_req_t *req)
+{
+    if (!check_auth(req)) return ESP_OK;
+    if (req->method != HTTP_GET) return send_method_not_allowed(req);
+
+    char stored_pw[PORTAL_MAX_PW_LEN + 1];
+    bool is_default;
+    portal_get_credentials(stored_pw, &is_default);
+    memset(stored_pw, 0, sizeof(stored_pw));
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
+
+    if (is_default) {
+        return httpd_resp_send(req, PW_CHANGE_HTML, sizeof(PW_CHANGE_HTML) - 1);
+    }
+
+    return httpd_resp_send(req, (const char *)argus_controls_html_start,
+                           (ssize_t)controls_page_length());
 }
 
 /* ── Phase 4B.2: Bounded HTTP body receiver ──────────────────────── */
@@ -1759,6 +1844,13 @@ static const httpd_uri_t uri_portal = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t uri_controls = {
+    .uri       = "/controls",
+    .method    = HTTP_GET,
+    .handler   = controls_get_handler,
+    .user_ctx  = NULL
+};
+
 /**
  * @brief POST handler to change the portal password.
  *
@@ -1940,6 +2032,19 @@ bool argus_http_test_command_registration(void)
            uri_command.method == HTTP_POST &&
            uri_command.handler == command_post_handler;
 }
+
+bool argus_http_test_controls_registration(void)
+{
+    return strcmp(uri_controls.uri, "/controls") == 0 &&
+           uri_controls.method == HTTP_GET &&
+           uri_controls.handler == controls_get_handler;
+}
+
+const char *argus_http_test_controls_page(size_t *out_len)
+{
+    if (out_len != NULL) *out_len = controls_page_length();
+    return (const char *)argus_controls_html_start;
+}
 #endif
 
 /* ── Lifecycle implementation ────────────────────────────────────── */
@@ -2006,7 +2111,7 @@ esp_err_t argus_http_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers   = 16;  /* 15 registered handlers + headroom */
+    config.max_uri_handlers   = 17;  /* 16 registered handlers + headroom */
     config.max_open_sockets   = HTTP_MAX_CONNECTIONS;
     config.recv_wait_timeout  = HTTP_RECV_TIMEOUT_S;
     config.send_wait_timeout  = HTTP_SEND_TIMEOUT_S;
@@ -2032,6 +2137,8 @@ esp_err_t argus_http_server_start(void)
     reg_err = httpd_register_uri_handler(s_server, &uri_identity);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_portal);
+    if (reg_err != ESP_OK) goto rollback;
+    reg_err = httpd_register_uri_handler(s_server, &uri_controls);
     if (reg_err != ESP_OK) goto rollback;
     reg_err = httpd_register_uri_handler(s_server, &uri_password);
     if (reg_err != ESP_OK) goto rollback;
