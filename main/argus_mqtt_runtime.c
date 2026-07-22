@@ -346,7 +346,12 @@ static void broker_client_cb(argus_mqtt_broker_client_event_t broker_event,
                              void *user_ctx)
 {
     (void)user_ctx;
-    if (broker_event == ARGUS_MQTT_BROKER_CLIENT_DISCONNECTED) {
+    if (broker_event == ARGUS_MQTT_BROKER_CLIENT_CONNECTED) {
+        runtime_event_t event = {.type = RUNTIME_EVENT_PUBLISH_BASELINE};
+        if (xQueueSend(s_runtime.queue, &event, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "protocol queue full; reconnect baseline deferred to periodic refresh");
+        }
+    } else if (broker_event == ARGUS_MQTT_BROKER_CLIENT_DISCONNECTED) {
         xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
         bool changed = argus_mqtt_session_disconnect(
             &s_runtime.session, client->connection_id);
@@ -436,13 +441,6 @@ void argus_mqtt_runtime_tick(void)
         ESP_LOGW(TAG, "supervisor heartbeat stale; motion state intentionally unchanged");
     }
     publish_operational_snapshot();
-}
-
-esp_err_t argus_mqtt_runtime_get_topics(argus_mqtt_topics_t *out)
-{
-    if (out == NULL || !s_runtime.prepared) return ESP_ERR_INVALID_STATE;
-    *out = s_runtime.topics;
-    return ESP_OK;
 }
 
 esp_err_t argus_mqtt_runtime_get_session(char *out, size_t out_size)

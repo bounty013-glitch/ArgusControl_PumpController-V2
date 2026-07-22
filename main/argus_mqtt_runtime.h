@@ -11,5 +11,4 @@ void argus_mqtt_runtime_get_broker_config(uint16_t port,
                                           argus_mqtt_broker_config_t *out);
 esp_err_t argus_mqtt_runtime_broker_started(void);
 void argus_mqtt_runtime_tick(void);
-esp_err_t argus_mqtt_runtime_get_topics(argus_mqtt_topics_t *out);
 esp_err_t argus_mqtt_runtime_get_session(char *out, size_t out_size);
