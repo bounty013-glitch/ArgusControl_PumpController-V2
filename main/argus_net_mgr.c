@@ -14,6 +14,8 @@
 #include "argus_restart_mgr.h"
 #include "argus_factory_reset.h"
 #include "argus_service_policy.h"
+#include "argus_password_verifier.h"
+#include "argus_security_store.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -40,23 +42,10 @@ static bool s_initialized = false;
 static esp_netif_t *s_netif_ap = NULL;
 static esp_netif_t *s_netif_sta = NULL;
 
-#ifndef CONFIG_ARGUS_SERVICE_AP_PASS
-#error "CONFIG_ARGUS_SERVICE_AP_PASS is not defined. Provision via sdkconfig."
-#endif
-
-_Static_assert(sizeof(CONFIG_ARGUS_SERVICE_AP_PASS) - 1 >= 8,
-               "CONFIG_ARGUS_SERVICE_AP_PASS must be at least 8 characters");
-
-_Static_assert(sizeof(CONFIG_ARGUS_SERVICE_AP_PASS) - 1 <= 63,
-               "CONFIG_ARGUS_SERVICE_AP_PASS must not exceed 63 characters");
-
-static bool validate_build_service_credential(void)
-{
-    const char *pass = CONFIG_ARGUS_SERVICE_AP_PASS;
-    if (!pass) return false;
-    size_t len = strlen(pass);
-    return (len >= 8 && len <= 63);
-}
+static esp_err_t populate_service_ap_config(bool factory,
+                                            const argus_identity_t *identity,
+                                            wifi_config_t *out_config);
+static esp_err_t prod_stop_broker(void *ctx);
 
 static _Atomic bool s_sta_started = false;
 static _Atomic bool s_sta_connected = false;
@@ -189,13 +178,15 @@ argus_sta_event_action_t argus_net_decide_sta_event(
     bool sta_connected,
     bool sta_ip_acquired)
 {
-    if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+    if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY ||
+        mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY) {
         return (event == ARGUS_STA_EVENT_DISCONNECTED ||
                 event == ARGUS_STA_EVENT_STOPPED)
                    ? ARGUS_STA_EVENT_CONFIRM_DISABLED
                    : ARGUS_STA_EVENT_IGNORE;
     }
     if (mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
+        mode == ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION ||
         mode == ARGUS_NET_MODE_BOOTSTRAP) {
         return ARGUS_STA_EVENT_IGNORE;
     }
@@ -245,7 +236,9 @@ void argus_net_apply_sta_event_action(argus_network_mode_t mode,
     }
 
     bool service_mode = mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
-                        mode == ARGUS_NET_MODE_SERVICE_AP_ONLY;
+                        mode == ARGUS_NET_MODE_SERVICE_AP_ONLY ||
+                        mode == ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION ||
+                        mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY;
     if (service_mode && action != ARGUS_STA_EVENT_PROCESS) {
         *sta_started = false;
         *sta_connected = false;
@@ -261,7 +254,8 @@ void argus_net_apply_sta_event_action(argus_network_mode_t mode,
         *sta_connected = false;
         *sta_ip_acquired = false;
     }
-    if (mode == ARGUS_NET_MODE_SERVICE_AP_ONLY &&
+    if ((mode == ARGUS_NET_MODE_SERVICE_AP_ONLY ||
+         mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY) &&
         action == ARGUS_STA_EVENT_CONFIRM_DISABLED) {
         *sta_state = ARGUS_STA_DISABLED;
     }
@@ -440,6 +434,73 @@ static void apply_sta_event_action_locked(argus_sta_lifecycle_event_t event,
     atomic_store(&s_sta_ip_acquired, ip_acquired);
 }
 
+bool argus_net_security_recovery_request_is_idempotent(
+    argus_network_mode_t mode)
+{
+    return mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY;
+}
+
+static esp_err_t enter_security_recovery_network(void)
+{
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    bool already_active =
+        argus_net_security_recovery_request_is_idempotent(s_net_mode);
+    xSemaphoreGive(s_net_mutex);
+    if (already_active) {
+        ESP_LOGW(TAG, "Physical security recovery already active");
+        return ESP_OK;
+    }
+
+    argus_identity_t identity;
+    argus_identity_get(&identity);
+    wifi_config_t ap_config = {0};
+    esp_err_t err = populate_service_ap_config(true, &identity, &ap_config);
+    if (err != ESP_OK) return err;
+
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    set_net_mode(ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION);
+    s_sta_state = ARGUS_STA_DISABLED;
+    s_consecutive_failures = 0U;
+    s_auth_failures = 0U;
+    xSemaphoreGive(s_net_mutex);
+
+    esp_err_t broker_err = prod_stop_broker(NULL);
+    if (broker_err != ESP_OK) {
+        xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+        set_net_mode(ARGUS_NET_MODE_NETWORK_FAULT);
+        s_last_error = ARGUS_NET_ERR_SECURITY_RECOVERY_FAILED;
+        xSemaphoreGive(s_net_mutex);
+        ESP_LOGE(TAG, "Broker stop blocked security recovery: %s",
+                 esp_err_to_name(broker_err));
+        return broker_err;
+    }
+    esp_err_t disconnect_err = esp_wifi_disconnect();
+    if (disconnect_err != ESP_OK &&
+        disconnect_err != ESP_ERR_WIFI_NOT_CONNECT) {
+        err = disconnect_err;
+    }
+    if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err == ESP_OK) {
+        err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    }
+    argus_password_zeroize(&ap_config, sizeof(ap_config));
+
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    if (err == ESP_OK) {
+        set_net_mode(ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY);
+        s_last_error = ARGUS_NET_ERR_NONE;
+        ESP_LOGW(TAG,
+                 "Entered explicit AP-only physical security recovery; machine and authority untouched");
+    } else {
+        set_net_mode(ARGUS_NET_MODE_NETWORK_FAULT);
+        s_last_error = ARGUS_NET_ERR_SECURITY_RECOVERY_FAILED;
+        ESP_LOGE(TAG, "Security recovery network transition failed: %s",
+                 esp_err_to_name(err));
+    }
+    xSemaphoreGive(s_net_mutex);
+    return err;
+}
+
 static void net_mgr_task(void *pvParameters)
 {
     argus_net_event_t evt;
@@ -454,6 +515,10 @@ static void net_mgr_task(void *pvParameters)
 
                 case ARGUS_NET_EVT_SERVICE_EXIT:
                     argus_net_mgr_request_service_exit(evt.requested_owner);
+                    break;
+
+                case ARGUS_NET_EVT_SECURITY_RECOVERY_REQUEST:
+                    (void)enter_security_recovery_network();
                     break;
 
                 case ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST:
@@ -818,6 +883,34 @@ static void net_mgr_task(void *pvParameters)
     }
 }
 
+static esp_err_t populate_service_ap_config(bool factory,
+                                            const argus_identity_t *identity,
+                                            wifi_config_t *out_config)
+{
+    if (identity == NULL || out_config == NULL) return ESP_ERR_INVALID_ARG;
+    uint8_t secret[ARGUS_SECURITY_AP_SECRET_MAX + 1U] = {0};
+    size_t secret_len = 0U;
+    esp_err_t err = factory
+        ? argus_security_store_get_factory_ap_secret(
+              secret, sizeof(secret), &secret_len)
+        : argus_security_store_get_active_ap_secret(
+              secret, sizeof(secret), &secret_len);
+    if (err != ESP_OK) {
+        argus_password_zeroize(secret, sizeof(secret));
+        return err;
+    }
+    memset(out_config, 0, sizeof(*out_config));
+    strlcpy((char *)out_config->ap.ssid, identity->service_ssid,
+            sizeof(out_config->ap.ssid));
+    memcpy(out_config->ap.password, secret, secret_len);
+    out_config->ap.password[secret_len] = 0U;
+    out_config->ap.ssid_len = strlen(identity->service_ssid);
+    out_config->ap.max_connection = 1;
+    out_config->ap.authmode = WIFI_AUTH_WPA2_PSK;
+    argus_password_zeroize(secret, sizeof(secret));
+    return ESP_OK;
+}
+
 esp_err_t argus_net_mgr_init(void)
 {
     if (s_initialized) return ESP_OK;
@@ -833,13 +926,6 @@ esp_err_t argus_net_mgr_init(void)
     }
     argus_wifi_transaction_init(&s_wifi_transaction);
 
-    // Validate build service credential
-    if (!validate_build_service_credential()) {
-        s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
-        ESP_LOGE(TAG, "Build service AP credential missing or invalid (<8 chars). Failing closed.");
-        return ESP_ERR_INVALID_STATE;
-    }
-
     esp_netif_init();
     esp_event_loop_create_default();
 
@@ -847,7 +933,14 @@ esp_err_t argus_net_mgr_init(void)
     s_netif_sta = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    esp_err_t wifi_err = esp_wifi_init(&cfg);
+    if (wifi_err != ESP_OK) return wifi_err;
+    wifi_err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (wifi_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to select RAM-only ESP-IDF Wi-Fi storage: %s",
+                 esp_err_to_name(wifi_err));
+        return wifi_err;
+    }
 
     // Disable Wi-Fi power-save to eliminate STEP pulse jitter
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -858,27 +951,61 @@ esp_err_t argus_net_mgr_init(void)
     argus_identity_t id;
     argus_identity_get(&id);
 
-    argus_config_payload_t cfg_payload;
+    argus_config_payload_t cfg_payload = {0};
     bool has_cfg = false;
     bool commissioned = (argus_nvs_config_get_effective(&cfg_payload, &has_cfg) == ESP_OK) &&
                          has_cfg && argus_nvs_config_is_commissioned(&cfg_payload);
+    bool security_recovery =
+        argus_security_store_get_recovery_state() ==
+        ARGUS_SECURITY_RECOVERY_REQUESTED;
 
-    if (!commissioned) {
+    if (security_recovery) {
+        s_net_mode = ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY;
+        s_sta_state = ARGUS_STA_DISABLED;
+        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE,
+                                     ARGUS_AUTH_OWNER_NONE);
+        wifi_config_t ap_config = {0};
+        esp_err_t ap_err = populate_service_ap_config(true, &id, &ap_config);
+        if (ap_err != ESP_OK) {
+            s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
+            argus_password_zeroize(&cfg_payload, sizeof(cfg_payload));
+            return ap_err;
+        }
+        ap_err = esp_wifi_set_mode(WIFI_MODE_AP);
+        if (ap_err == ESP_OK) {
+            ap_err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+        }
+        if (ap_err == ESP_OK) ap_err = esp_wifi_start();
+        argus_password_zeroize(&ap_config, sizeof(ap_config));
+        if (ap_err != ESP_OK) {
+            s_last_error = ARGUS_NET_ERR_SECURITY_RECOVERY_FAILED;
+            argus_password_zeroize(&cfg_payload, sizeof(cfg_payload));
+            return ap_err;
+        }
+        esp_err_t http_err = argus_http_server_start();
+        if (http_err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP start failed in security recovery: %s",
+                     esp_err_to_name(http_err));
+        }
+        ESP_LOGW(TAG, "Persistent physical network recovery is active");
+    } else if (!commissioned) {
         // Uncommissioned AP-only mode
         s_net_mode = ARGUS_NET_MODE_UNCOMMISSIONED_AP;
         s_sta_state = ARGUS_STA_DISABLED;
         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
 
         wifi_config_t ap_config = {0};
-        strlcpy((char *)ap_config.ap.ssid, id.service_ssid, sizeof(ap_config.ap.ssid));
-        strlcpy((char *)ap_config.ap.password, CONFIG_ARGUS_SERVICE_AP_PASS, sizeof(ap_config.ap.password));
-        ap_config.ap.ssid_len = strlen(id.service_ssid);
-        ap_config.ap.max_connection = 1;
-        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+        esp_err_t ap_err = populate_service_ap_config(false, &id, &ap_config);
+        if (ap_err != ESP_OK) {
+            s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
+            argus_password_zeroize(&cfg_payload, sizeof(cfg_payload));
+            return ap_err;
+        }
 
         esp_wifi_set_mode(WIFI_MODE_AP);
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_start();
+        argus_password_zeroize(&ap_config, sizeof(ap_config));
 
         /* Start HTTP server for commissioning portal (non-fatal) */
         esp_err_t http_err = argus_http_server_start();
@@ -893,16 +1020,14 @@ esp_err_t argus_net_mgr_init(void)
         s_net_mode = ARGUS_NET_MODE_AP_DISCOVERABLE;
         argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
 
-        argus_identity_t id;
-        argus_identity_get(&id);
-
         /* Configure AP interface */
         wifi_config_t ap_config = {0};
-        strlcpy((char *)ap_config.ap.ssid, id.service_ssid, sizeof(ap_config.ap.ssid));
-        strlcpy((char *)ap_config.ap.password, CONFIG_ARGUS_SERVICE_AP_PASS, sizeof(ap_config.ap.password));
-        ap_config.ap.ssid_len = strlen(id.service_ssid);
-        ap_config.ap.max_connection = 1;
-        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+        esp_err_t ap_err = populate_service_ap_config(false, &id, &ap_config);
+        if (ap_err != ESP_OK) {
+            s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
+            argus_password_zeroize(&cfg_payload, sizeof(cfg_payload));
+            return ap_err;
+        }
 
         /* Configure STA interface */
         wifi_config_t sta_config = {0};
@@ -913,6 +1038,8 @@ esp_err_t argus_net_mgr_init(void)
         esp_wifi_set_config(WIFI_IF_AP, &ap_config);
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
         esp_wifi_start();
+        argus_password_zeroize(&ap_config, sizeof(ap_config));
+        argus_password_zeroize(&sta_config, sizeof(sta_config));
         s_sta_state = ARGUS_STA_CONNECTING;
         if (esp_wifi_connect() != ESP_OK) {
             ESP_LOGE(TAG, "esp_wifi_connect() failed");
@@ -925,6 +1052,8 @@ esp_err_t argus_net_mgr_init(void)
             ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
         }
     }
+
+    argus_password_zeroize(&cfg_payload, sizeof(cfg_payload));
 
     if (xTaskCreate(net_mgr_task, "argus_net_mgr", 4096, NULL, 4, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create network manager task");
@@ -943,6 +1072,10 @@ const char *argus_net_mgr_get_mode_name(argus_network_mode_t mode)
         case ARGUS_NET_MODE_AP_DISCOVERABLE: return "AP_DISCOVERABLE";
         case ARGUS_NET_MODE_SERVICE_TRANSITION: return "SERVICE_TRANSITION";
         case ARGUS_NET_MODE_SERVICE_AP_ONLY: return "SERVICE_AP_ONLY";
+        case ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION:
+            return "SECURITY_RECOVERY_TRANSITION";
+        case ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY:
+            return "SECURITY_RECOVERY_AP_ONLY";
         case ARGUS_NET_MODE_NETWORK_FAULT: return "NETWORK_FAULT";
         default: return "UNKNOWN";
     }
@@ -954,7 +1087,10 @@ static void set_net_mode(argus_network_mode_t new_mode)
         ESP_LOGI(TAG, "network: %s -> %s", argus_net_mgr_get_mode_name(s_net_mode), argus_net_mgr_get_mode_name(new_mode));
         s_net_mode = new_mode;
 
-        if (s_net_mode == ARGUS_NET_MODE_SERVICE_TRANSITION || s_net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY) {
+        if (s_net_mode == ARGUS_NET_MODE_SERVICE_TRANSITION ||
+            s_net_mode == ARGUS_NET_MODE_SERVICE_AP_ONLY ||
+            s_net_mode == ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION ||
+            s_net_mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY) {
             s_timer_generation++;
             atomic_store(&s_active_transaction_generation, 0);
             argus_wifi_transaction_cancel(&s_wifi_transaction);
@@ -988,13 +1124,14 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     argus_identity_get(&id);
 
     wifi_config_t ap_config = {0};
-    strlcpy((char *)ap_config.ap.ssid, id.service_ssid, sizeof(ap_config.ap.ssid));
-    strlcpy((char *)ap_config.ap.password, CONFIG_ARGUS_SERVICE_AP_PASS, sizeof(ap_config.ap.password));
-    ap_config.ap.ssid_len = strlen(id.service_ssid);
-    ap_config.ap.max_connection = 1;
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_err_t err = populate_service_ap_config(false, &id, &ap_config);
+    if (err != ESP_OK) {
+        s_last_error = ARGUS_NET_ERR_SERVICE_CRED_MISSING;
+        xSemaphoreGive(s_net_mutex);
+        return err;
+    }
 
-    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err == ESP_OK) {
         err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
     }
@@ -1010,6 +1147,7 @@ esp_err_t argus_net_mgr_enable_ap_discoverable(void)
     } else {
         ESP_LOGE(TAG, "Failed to enable Service AP: %s. Preserving COMMISSIONED_STA.", esp_err_to_name(err));
     }
+    argus_password_zeroize(&ap_config, sizeof(ap_config));
     xSemaphoreGive(s_net_mutex);
 
     /* Start HTTP server outside s_net_mutex. The status handler takes
@@ -2062,6 +2200,15 @@ esp_err_t argus_net_mgr_post_event(const argus_net_event_t *evt)
         return post_status;
     }
     return ESP_OK;
+}
+
+esp_err_t argus_net_mgr_request_security_recovery(void)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    argus_net_event_t event = {
+        .type = ARGUS_NET_EVT_SECURITY_RECOVERY_REQUEST,
+    };
+    return argus_net_mgr_post_event(&event);
 }
 
 esp_err_t argus_net_mgr_get_snapshot(argus_net_snapshot_t *out_snap)

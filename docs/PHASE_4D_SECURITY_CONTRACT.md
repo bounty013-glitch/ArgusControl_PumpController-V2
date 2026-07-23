@@ -142,6 +142,7 @@ Legend: `Y` built-in; `G` may be explicitly granted within the role ceiling; `N`
 | Reset software E-stop | Y | G | Y | Y | N | A |
 | Acknowledge alarms | Y | G | Y | Y | N | A |
 | Manage users below caller ceiling | Y | Y | G, Operator/Viewer only | N | N | A, service-tool only |
+| Manage Client Admins (`manage_client_admins`) | Y | G, only when explicitly assigned by Argus Personnel | N | N | N | N |
 | Manage custom roles below caller ceiling | Y | Y | N | N | N | A, service-tool only |
 | Enroll machine clients | Y | Y | N | N | N | A, service-tool only |
 | Revoke machine clients | Y | Y | N | N | N | A, service-tool only |
@@ -171,6 +172,11 @@ Authorization is deny by default. UI visibility never grants permission. Every p
 - Protected Argus identities and permissions are immutable to all client-level actors.
 - Permission or role changes increment a security epoch and revoke affected sessions and pending authority requests.
 - Machine enrollment cannot produce a credential with greater permissions or broader topic/API scope than the enrolling actor may delegate.
+- Ordinary Client Admin authority is downward-only: every Client Admin may manage permitted Supervisor, Operator, and Viewer accounts beneath the Client Admin ceiling.
+- Creating, promoting, modifying, disabling, or deleting a Client Admin requires the separate `manage_client_admins` capability.
+- Argus Personnel always possess `manage_client_admins` and may assign or revoke it for an individual Client Admin within client scope.
+- `manage_client_admins` is protected and non-delegable by Client Admins. A Client Admin cannot grant, copy, inherit through a custom role, or delegate that capability merely because the Client Admin possesses it.
+- `manage_client_admins` never permits creating, modifying, impersonating, demoting, deleting, or delegating Argus Personnel access.
 
 ## 10. Authentication, Authorization, and Operating Authority
 

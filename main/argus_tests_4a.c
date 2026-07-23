@@ -23,6 +23,7 @@
 #include "argus_tests_4b5.h"
 #include "argus_tests_4b6.h"
 #include "argus_tests_4c.h"
+#include "argus_tests_4d2.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5109,7 +5110,7 @@ static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1 Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2 Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -5362,6 +5363,30 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_session_restart_invalidates_prior_envelope);
     RUN_TEST(test_4c_session_generation_contract);
     RUN_TEST(test_4c_retained_capacity_covers_baseline);
+    /* Phase 4D.2 security storage, verifier, and local recovery foundation */
+    RUN_TEST(test_4d2_permission_ceiling_metadata);
+    RUN_TEST(test_4d2_record_schema_validation);
+    RUN_TEST(test_4d2_manifest_validation);
+    RUN_TEST(test_4d2_store_missing_initialization);
+    RUN_TEST(test_4d2_store_atomic_commit_readback);
+    RUN_TEST(test_4d2_store_interrupted_write);
+    RUN_TEST(test_4d2_store_selector_failure);
+    RUN_TEST(test_4d2_store_initial_selector_failure);
+    RUN_TEST(test_4d2_store_corrupt_fallback);
+    RUN_TEST(test_4d2_store_unsupported_version);
+    RUN_TEST(test_4d2_pbkdf2_known_answer);
+    RUN_TEST(test_4d2_verifier_create_verify);
+    RUN_TEST(test_4d2_verifier_salt_uniqueness);
+    RUN_TEST(test_4d2_verifier_malformed_records);
+    RUN_TEST(test_4d2_recovery_startup_low_and_short_press);
+    RUN_TEST(test_4d2_recovery_bounce_rejection);
+    RUN_TEST(test_4d2_recovery_long_hold_release_once);
+    RUN_TEST(test_4d2_recovery_commit_order_and_failures);
+    RUN_TEST(test_4d2_capacity_and_domain_bounds);
+    RUN_TEST(test_4d2_provisioning_synthetic_success);
+    RUN_TEST(test_4d2_provisioning_rejections);
+    RUN_TEST(test_4d2_migration_power_loss_idempotence);
+    RUN_TEST(test_4d2_migration_deferred_and_malformed);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -5403,7 +5428,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1 Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2 Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -5446,7 +5471,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4C PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4D.2 PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
