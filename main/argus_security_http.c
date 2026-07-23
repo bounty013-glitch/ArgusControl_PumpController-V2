@@ -1,5 +1,6 @@
 #include "argus_security_http.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,15 +12,21 @@
 #include "argus_security_audit.h"
 #include "argus_security_directory.h"
 #include "argus_security_store.h"
+#include "argus_security_transition.h"
 #include "argus_session_manager.h"
 #include "cJSON.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 
 #define SECURITY_BODY_MAX 1024U
 #define SECURITY_RESPONSE_MAX 4096U
+#define AUDIT_QUERY_MAX 96U
 
 static esp_timer_handle_t s_ap_apply_timer;
 static esp_timer_handle_t s_recovery_timer;
+static argus_security_transition_t s_ap_transition;
+static argus_security_transition_t s_recovery_transition;
+static const char *TAG = "argus_security_http";
 
 static argus_security_directory_snapshot_t *directory_snapshot_alloc(void)
 {
@@ -233,17 +240,28 @@ static bool custom_role_mask_field(
     return valid;
 }
 
-static esp_err_t reserve_admin_audit(
+static esp_err_t begin_admin_audit(
     const argus_http_security_context_t *security,
     argus_audit_event_type_t type,
     const char *target,
-    const char *reason)
+    const char *action,
+    argus_security_audit_mutation_t *mutation)
 {
-    return argus_security_audit_append(
-        type, ARGUS_AUDIT_OUTCOME_SUCCESS,
+    return argus_security_audit_mutation_begin(
+        type,
         (uint8_t)security->principal.type,
         security->principal.identifier, target, "SOFTAP",
-        reason, security->principal.security_epoch, true);
+        action, security->principal.security_epoch, mutation);
+}
+
+static esp_err_t finish_admin_audit(
+    const argus_security_audit_mutation_t *mutation,
+    esp_err_t mutation_result)
+{
+    esp_err_t audit_result = argus_security_audit_mutation_finish(
+        mutation, mutation_result == ESP_OK);
+    return audit_result == ESP_OK
+               ? mutation_result : ESP_ERR_INVALID_RESPONSE;
 }
 
 static bool string_field(
@@ -371,18 +389,17 @@ static esp_err_t accounts_post(httpd_req_t *req)
             &permissions);
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (valid) {
-        esp_err_t audit_err = argus_security_audit_append(
-                ARGUS_AUDIT_ACCOUNT_CHANGED,
-                ARGUS_AUDIT_OUTCOME_SUCCESS,
-                (uint8_t)security.principal.type,
-                security.principal.identifier, id, "SOFTAP",
-                "create_reserved", security.principal.security_epoch,
-                true);
+        argus_security_audit_mutation_t mutation;
+        esp_err_t audit_err = begin_admin_audit(
+            &security, ARGUS_AUDIT_ACCOUNT_CHANGED, id, "create",
+            &mutation);
         if (audit_err == ESP_OK) {
             err = argus_security_admin_create_human(
                 &security.principal, id, username, display, scope,
                 level, permissions, (const uint8_t *)password,
                 strlen(password));
+            err = finish_admin_audit(&mutation, err);
+            memset(&mutation, 0, sizeof(mutation));
         } else {
             err = ESP_FAIL;
         }
@@ -403,7 +420,7 @@ static esp_err_t accounts_post(httpd_req_t *req)
             req, "409 Conflict",
             "{\"ok\":false,\"error\":\"account_conflict\"}");
     }
-    if (err == ESP_FAIL) {
+    if (err == ESP_FAIL || err == ESP_ERR_INVALID_RESPONSE) {
         return send_json(
             req, "503 Service Unavailable",
             "{\"ok\":false,\"error\":\"audit_unavailable\"}");
@@ -444,16 +461,18 @@ static esp_err_t account_action_post(httpd_req_t *req)
         }
     }
     esp_err_t err = ESP_ERR_INVALID_ARG;
+    argus_security_audit_mutation_t mutation = {0};
     if (valid && strcmp(action, "enable") == 0) {
         static const char *const KEYS[] = {"action", "id"};
         valid = object_keys(root, KEYS, 2U);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ACCOUNT_CHANGED,
-                id, "enable_reserved");
+                id, "enable", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_set_enabled(
                     &security.principal, id, true);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -462,12 +481,13 @@ static esp_err_t account_action_post(httpd_req_t *req)
         static const char *const KEYS[] = {"action", "id"};
         valid = object_keys(root, KEYS, 2U);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ACCOUNT_CHANGED,
-                id, "disable_reserved");
+                id, "disable", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_set_enabled(
                     &security.principal, id, false);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -476,12 +496,13 @@ static esp_err_t account_action_post(httpd_req_t *req)
         static const char *const KEYS[] = {"action", "id"};
         valid = object_keys(root, KEYS, 2U);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ACCOUNT_CHANGED,
-                id, "delete_reserved");
+                id, "delete", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_delete_human(
                     &security.principal, id);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -490,11 +511,13 @@ static esp_err_t account_action_post(httpd_req_t *req)
         static const char *const KEYS[] = {"action", "id"};
         valid = object_keys(root, KEYS, 2U);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_SESSION_REVOKED,
-                id, "revoke_reserved");
+                id, "revoke_sessions", &mutation);
             if (err == ESP_OK) {
-                (void)argus_session_manager_revoke_principal(id);
+                err = argus_session_manager_revoke_principal(id)
+                          ? ESP_OK : ESP_ERR_NOT_FOUND;
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -506,13 +529,14 @@ static esp_err_t account_action_post(httpd_req_t *req)
                     root, "password", &password,
                     ARGUS_PASSWORD_INPUT_MAX, false);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_PASSWORD_CHANGED,
-                id, "reset_reserved");
+                id, "reset_password", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_replace_password(
                     &security.principal, id, (const uint8_t *)password,
                     strlen(password));
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -527,12 +551,13 @@ static esp_err_t account_action_post(httpd_req_t *req)
                     root, "display_name", &display_name,
                     ARGUS_SECURITY_DISPLAY_MAX, false);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ACCOUNT_CHANGED,
-                id, "display_reserved");
+                id, "update_display", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_update_display_name(
                     &security.principal, id, display_name);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -543,12 +568,13 @@ static esp_err_t account_action_post(httpd_req_t *req)
         valid = object_keys(root, KEYS, 3U) &&
                 custom_role_mask_field(root, "roles", &role_mask);
         if (valid) {
-            err = reserve_admin_audit(
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ACCOUNT_CHANGED,
-                id, "roles_reserved");
+                id, "assign_roles", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_assign_custom_roles(
                     &security.principal, id, role_mask);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
@@ -558,6 +584,7 @@ static esp_err_t account_action_post(httpd_req_t *req)
     }
     zeroize_json_string(root, "password");
     cJSON_Delete(root);
+    memset(&mutation, 0, sizeof(mutation));
     memset(&security, 0, sizeof(security));
     if (!valid) {
         return send_json(
@@ -570,7 +597,7 @@ static esp_err_t account_action_post(httpd_req_t *req)
             "{\"ok\":false,\"error\":\"target_denied\"}");
     }
     if (err != ESP_OK) {
-        if (err == ESP_FAIL) {
+        if (err == ESP_FAIL || err == ESP_ERR_INVALID_RESPONSE) {
             return send_json(
                 req, "503 Service Unavailable",
                 "{\"ok\":false,\"error\":\"audit_unavailable\"}");
@@ -640,15 +667,18 @@ static esp_err_t roles_post(httpd_req_t *req)
             string_field(root, "id", &id, ARGUS_SECURITY_ID_MAX, false);
         esp_err_t err = ESP_ERR_INVALID_ARG;
         if (valid) {
-            err = reserve_admin_audit(
+            argus_security_audit_mutation_t mutation;
+            err = begin_admin_audit(
                 &security, ARGUS_AUDIT_ROLE_CHANGED,
-                id, "delete_reserved");
+                id, "delete", &mutation);
             if (err == ESP_OK) {
                 err = argus_security_admin_delete_role(
                     &security.principal, id);
+                err = finish_admin_audit(&mutation, err);
             } else {
                 err = ESP_FAIL;
             }
+            memset(&mutation, 0, sizeof(mutation));
         }
         cJSON_Delete(root);
         memset(&security, 0, sizeof(security));
@@ -665,7 +695,7 @@ static esp_err_t roles_post(httpd_req_t *req)
                 req, "403 Forbidden",
                 "{\"ok\":false,\"error\":\"delegation_denied\"}");
         }
-        if (err == ESP_FAIL) {
+        if (err == ESP_FAIL || err == ESP_ERR_INVALID_RESPONSE) {
             return send_json(
                 req, "503 Service Unavailable",
                 "{\"ok\":false,\"error\":\"audit_unavailable\"}");
@@ -692,15 +722,18 @@ static esp_err_t roles_post(httpd_req_t *req)
                 root, "delegable_permissions"), &delegable);
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (valid) {
-        err = reserve_admin_audit(
+        argus_security_audit_mutation_t mutation;
+        err = begin_admin_audit(
             &security, ARGUS_AUDIT_ROLE_CHANGED,
-            id, "create_reserved");
+            id, "create", &mutation);
         if (err == ESP_OK) {
             err = argus_security_admin_create_role(
                 &security.principal, id, level, permissions, delegable);
+            err = finish_admin_audit(&mutation, err);
         } else {
             err = ESP_FAIL;
         }
+        memset(&mutation, 0, sizeof(mutation));
     }
     cJSON_Delete(root);
     memset(&security, 0, sizeof(security));
@@ -710,7 +743,7 @@ static esp_err_t roles_post(httpd_req_t *req)
             req, "403 Forbidden",
             "{\"ok\":false,\"error\":\"delegation_denied\"}");
     }
-    if (err == ESP_FAIL) {
+    if (err == ESP_FAIL || err == ESP_ERR_INVALID_RESPONSE) {
         return send_json(
             req, "503 Service Unavailable",
             "{\"ok\":false,\"error\":\"audit_unavailable\"}");
@@ -720,6 +753,80 @@ static esp_err_t roles_post(httpd_req_t *req)
         "{\"ok\":false,\"error\":\"invalid_request\"}");
 }
 
+typedef struct {
+    uint64_t before_sequence;
+    uint32_t limit;
+} audit_query_t;
+
+static bool parse_decimal_u64(
+    const char *text, size_t length, uint64_t *out)
+{
+    if (text == NULL || out == NULL || length == 0U || length > 20U) {
+        return false;
+    }
+    uint64_t value = 0U;
+    for (size_t i = 0U; i < length; ++i) {
+        if (text[i] < '0' || text[i] > '9') return false;
+        uint8_t digit = (uint8_t)(text[i] - '0');
+        if (value > (UINT64_MAX - digit) / 10U) return false;
+        value = value * 10U + digit;
+    }
+    *out = value;
+    return true;
+}
+
+static bool parse_audit_query(
+    const char *query, audit_query_t *out)
+{
+    if (out == NULL) return false;
+    *out = (audit_query_t) {
+        .before_sequence = 0U,
+        .limit = ARGUS_AUDIT_PAGE_MAX,
+    };
+    if (query == NULL || query[0] == '\0') return true;
+    size_t length = strnlen(query, AUDIT_QUERY_MAX + 1U);
+    if (length == 0U || length > AUDIT_QUERY_MAX) return false;
+    bool saw_before = false;
+    bool saw_limit = false;
+    size_t position = 0U;
+    while (position < length) {
+        size_t end = position;
+        while (end < length && query[end] != '&') end++;
+        if (end == position || (end < length && end + 1U == length)) {
+            return false;
+        }
+        size_t equals = position;
+        while (equals < end && query[equals] != '=') equals++;
+        if (equals == position || equals == end) return false;
+        const char *value = query + equals + 1U;
+        size_t value_length = end - equals - 1U;
+        uint64_t decoded = 0U;
+        if (equals - position == 6U &&
+            memcmp(query + position, "before", 6U) == 0) {
+            if (saw_before ||
+                !parse_decimal_u64(value, value_length, &decoded) ||
+                decoded == 0U) {
+                return false;
+            }
+            out->before_sequence = decoded;
+            saw_before = true;
+        } else if (equals - position == 5U &&
+                   memcmp(query + position, "limit", 5U) == 0) {
+            if (saw_limit ||
+                !parse_decimal_u64(value, value_length, &decoded) ||
+                decoded == 0U || decoded > ARGUS_AUDIT_PAGE_MAX) {
+                return false;
+            }
+            out->limit = (uint32_t)decoded;
+            saw_limit = true;
+        } else {
+            return false;
+        }
+        position = end + 1U;
+    }
+    return true;
+}
+
 static esp_err_t audit_get(httpd_req_t *req)
 {
     argus_http_security_context_t security;
@@ -727,33 +834,92 @@ static esp_err_t audit_get(httpd_req_t *req)
             req, ARGUS_PERMISSION_VIEW_AUDIT, false, &security)) {
         return ESP_OK;
     }
+    audit_query_t query;
+    size_t query_length = httpd_req_get_url_query_len(req);
+    if (query_length > AUDIT_QUERY_MAX) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_pagination\"}");
+    }
+    char query_text[AUDIT_QUERY_MAX + 1U] = {0};
+    if (query_length > 0U &&
+        (httpd_req_get_url_query_str(
+             req, query_text, sizeof(query_text)) != ESP_OK ||
+         !parse_audit_query(query_text, &query))) {
+        memset(query_text, 0, sizeof(query_text));
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_pagination\"}");
+    }
+    if (query_length == 0U) {
+        (void)parse_audit_query(NULL, &query);
+    }
+    memset(query_text, 0, sizeof(query_text));
     argus_security_audit_status_t status;
     if (argus_security_audit_get_status(&status) != ESP_OK) {
+        memset(&security, 0, sizeof(security));
         return send_json(
             req, "503 Service Unavailable",
             "{\"ok\":false,\"error\":\"audit_unavailable\"}");
     }
-    uint32_t start = status.count > 16U ? status.count - 16U : 0U;
+    argus_security_audit_page_t page;
+    esp_err_t page_err = argus_security_audit_read_page(
+        query.before_sequence, query.limit, &page);
+    if (page_err == ESP_ERR_INVALID_ARG) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_pagination\"}");
+    }
+    if (page_err != ESP_OK) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"audit_unavailable\"}");
+    }
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "count", status.count);
     cJSON_AddNumberToObject(root, "overwritten", status.overwritten);
-    cJSON *events = cJSON_AddArrayToObject(root, "events");
-    for (uint32_t i = start; i < status.count; ++i) {
-        argus_security_audit_record_t record;
-        if (argus_security_audit_read(i, &record) != ESP_OK) break;
-        cJSON *entry = cJSON_CreateObject();
-        cJSON_AddNumberToObject(entry, "sequence", (double)record.sequence);
-        cJSON_AddNumberToObject(entry, "event_type", record.event_type);
-        cJSON_AddNumberToObject(entry, "outcome", record.outcome);
-        cJSON_AddStringToObject(entry, "actor", record.actor);
-        cJSON_AddStringToObject(entry, "target", record.target);
-        cJSON_AddStringToObject(entry, "source", record.source);
-        cJSON_AddStringToObject(entry, "reason", record.reason);
-        cJSON_AddNumberToObject(
-            entry, "uptime_ms", (double)(record.uptime_us / 1000U));
-        cJSON_AddItemToArray(events, entry);
-        memset(&record, 0, sizeof(record));
+    cJSON_AddBoolToObject(
+        root, "finalization_degraded",
+        status.finalization_degraded);
+    cJSON_AddNumberToObject(root, "page_count", page.count);
+    cJSON_AddBoolToObject(root, "has_more", page.has_more);
+    cJSON_AddBoolToObject(
+        root, "corruption_gap", page.corruption_gap);
+    if (page.has_more) {
+        char cursor[24];
+        snprintf(
+            cursor, sizeof(cursor), "%llu",
+            (unsigned long long)page.next_before);
+        cJSON_AddStringToObject(root, "next_before", cursor);
+    } else {
+        cJSON_AddNullToObject(root, "next_before");
     }
+    cJSON *events = cJSON_AddArrayToObject(root, "events");
+    for (uint32_t i = 0U; i < page.count; ++i) {
+        argus_security_audit_record_t *record = &page.records[i];
+        cJSON *entry = cJSON_CreateObject();
+        char sequence[24];
+        snprintf(
+            sequence, sizeof(sequence), "%llu",
+            (unsigned long long)record->sequence);
+        cJSON_AddStringToObject(entry, "sequence", sequence);
+        cJSON_AddNumberToObject(entry, "event_type", record->event_type);
+        cJSON_AddNumberToObject(entry, "outcome", record->outcome);
+        cJSON_AddNumberToObject(
+            entry, "lifecycle_id", record->lifecycle_id);
+        cJSON_AddStringToObject(entry, "actor", record->actor);
+        cJSON_AddStringToObject(entry, "target", record->target);
+        cJSON_AddStringToObject(entry, "source", record->source);
+        cJSON_AddStringToObject(entry, "reason", record->reason);
+        cJSON_AddNumberToObject(
+            entry, "uptime_ms", (double)(record->uptime_us / 1000U));
+        cJSON_AddItemToArray(events, entry);
+    }
+    memset(&page, 0, sizeof(page));
     char *rendered = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     memset(&security, 0, sizeof(security));
@@ -773,13 +939,70 @@ static esp_err_t audit_get(httpd_req_t *req)
 static void ap_apply_callback(void *ctx)
 {
     (void)ctx;
+    if (!argus_security_transition_claim_callback(&s_ap_transition)) {
+        return;
+    }
     (void)argus_net_mgr_request_active_ap_secret_apply();
 }
 
 static void recovery_callback(void *ctx)
 {
     (void)ctx;
+    if (!argus_security_transition_claim_callback(
+            &s_recovery_transition)) {
+        return;
+    }
     (void)argus_net_mgr_request_restart();
+}
+
+typedef struct {
+    httpd_req_t *req;
+    const char *status;
+    const char *body;
+    esp_timer_handle_t timer;
+    bool response_completed;
+    bool arm_attempted;
+} transition_response_t;
+
+static esp_err_t send_transition_response(void *ctx)
+{
+    transition_response_t *response = ctx;
+    esp_err_t err = send_json(
+        response->req, response->status, response->body);
+    response->response_completed = err == ESP_OK;
+    return err;
+}
+
+static esp_err_t arm_transition_timer(void *ctx)
+{
+    transition_response_t *response = ctx;
+    response->arm_attempted = true;
+    return esp_timer_start_once(response->timer, 300000U);
+}
+
+static esp_err_t respond_then_arm_transition(
+    argus_security_transition_t *transition,
+    transition_response_t *response,
+    const char *transition_name)
+{
+    esp_err_t err = argus_security_transition_respond_then_arm(
+        transition, send_transition_response, arm_transition_timer,
+        response);
+    if (err == ESP_OK) return ESP_OK;
+    if (!response->response_completed) {
+        ESP_LOGE(
+            TAG, "%s response failed; transition not armed",
+            transition_name);
+        return err;
+    }
+    ESP_LOGE(
+        TAG, "%s timer arm failed after completed response",
+        transition_name);
+    (void)argus_security_audit_append(
+        ARGUS_AUDIT_STORAGE_FAILURE, ARGUS_AUDIT_OUTCOME_FAILED,
+        ARGUS_PRINCIPAL_NONE, "system", transition_name, "HTTP",
+        "transition_arm_failed", 0U, false);
+    return ESP_OK;
 }
 
 static esp_err_t ap_password_post(httpd_req_t *req)
@@ -816,18 +1039,25 @@ static esp_err_t ap_password_post(httpd_req_t *req)
         strcmp(replacement, confirmation) == 0;
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (valid) {
-        esp_err_t audit_err = argus_security_audit_append(
-            ARGUS_AUDIT_AP_SECRET_CHANGED,
-            ARGUS_AUDIT_OUTCOME_SUCCESS,
-            (uint8_t)security.principal.type,
-            security.principal.identifier, "active_ap", "SOFTAP",
-            "change_reserved", security.principal.security_epoch,
-            true);
-        err = audit_err == ESP_OK
-            ? argus_security_store_replace_active_ap_secret(
-                  (const uint8_t *)current, strlen(current),
-                  (const uint8_t *)replacement, strlen(replacement))
-            : ESP_FAIL;
+        err = argus_security_transition_prepare(&s_ap_transition);
+        if (err == ESP_OK) {
+            argus_security_audit_mutation_t mutation;
+            esp_err_t audit_err = begin_admin_audit(
+                &security, ARGUS_AUDIT_AP_SECRET_CHANGED, "active_ap",
+                "change_ap_secret", &mutation);
+            if (audit_err == ESP_OK) {
+                err = argus_security_store_replace_active_ap_secret(
+                    (const uint8_t *)current, strlen(current),
+                    (const uint8_t *)replacement, strlen(replacement));
+                err = finish_admin_audit(&mutation, err);
+            } else {
+                err = ESP_FAIL;
+            }
+            memset(&mutation, 0, sizeof(mutation));
+        } else {
+            err = err == ESP_ERR_NOT_FINISHED
+                      ? ESP_ERR_NOT_FINISHED : ESP_ERR_NO_MEM;
+        }
     }
     zeroize_json_string(root, "current_password");
     zeroize_json_string(root, "new_password");
@@ -835,24 +1065,30 @@ static esp_err_t ap_password_post(httpd_req_t *req)
     cJSON_Delete(root);
     memset(&security, 0, sizeof(security));
     if (err != ESP_OK) {
+        argus_security_transition_cancel(&s_ap_transition);
         return send_json(
-            req, err == ESP_FAIL
-                     ? "503 Service Unavailable"
-                     : err == ESP_ERR_INVALID_STATE
-                           ? "403 Forbidden" : "400 Bad Request",
+             req, err == ESP_ERR_NOT_FINISHED
+                      ? "409 Conflict"
+                      : (err == ESP_FAIL ||
+                         err == ESP_ERR_INVALID_RESPONSE ||
+                         err == ESP_ERR_NO_MEM)
+                      ? "503 Service Unavailable"
+                      : err == ESP_ERR_INVALID_STATE
+                            ? "403 Forbidden" : "400 Bad Request",
             "{\"ok\":false,\"error\":\"ap_password_change_rejected\"}");
     }
     (void)argus_session_manager_revoke_all();
-    if (esp_timer_start_once(s_ap_apply_timer, 300000U) != ESP_OK) {
-        return send_json(
-            req, "202 Accepted",
-            "{\"ok\":true,\"status\":\"ap_password_changed\","
-            "\"reconnect_required\":true,\"manual_restart_required\":true}");
-    }
-    return send_json(
-        req, "202 Accepted",
-        "{\"ok\":true,\"status\":\"ap_password_change_accepted\","
-        "\"reconnect_required\":true}");
+    transition_response_t response = {
+        .req = req,
+        .status = "202 Accepted",
+        .body =
+            "{\"ok\":true,\"status\":\"ap_password_change_committed\","
+            "\"reconnect_required\":true,"
+            "\"automatic_transition_requested\":true}",
+        .timer = s_ap_apply_timer,
+    };
+    return respond_then_arm_transition(
+        &s_ap_transition, &response, "ap_password_apply");
 }
 
 static esp_err_t recovery_exit_post(httpd_req_t *req)
@@ -882,31 +1118,44 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
             req, "409 Conflict",
             "{\"ok\":false,\"error\":\"recovery_not_active\"}");
     }
-    esp_err_t err = argus_security_audit_append(
-        ARGUS_AUDIT_RECOVERY_EXIT, ARGUS_AUDIT_OUTCOME_SUCCESS,
-        (uint8_t)security.principal.type,
-        security.principal.identifier, "network_recovery", "SOFTAP",
-        "exit_reserved", security.principal.security_epoch, true);
-    memset(&security, 0, sizeof(security));
+    esp_err_t prepare_err =
+        argus_security_transition_prepare(&s_recovery_transition);
+    if (prepare_err != ESP_OK) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req,
+            prepare_err == ESP_ERR_NOT_FINISHED
+                ? "409 Conflict" : "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"recovery_exit_failed\"}");
+    }
+    argus_security_audit_mutation_t mutation;
+    esp_err_t err = begin_admin_audit(
+        &security, ARGUS_AUDIT_RECOVERY_EXIT, "network_recovery",
+        "recovery_exit", &mutation);
     if (err == ESP_OK) {
         err = argus_security_store_set_recovery_state(
             ARGUS_SECURITY_RECOVERY_INACTIVE);
+        err = finish_admin_audit(&mutation, err);
     }
+    memset(&mutation, 0, sizeof(mutation));
+    memset(&security, 0, sizeof(security));
     if (err != ESP_OK) {
+        argus_security_transition_cancel(&s_recovery_transition);
         return send_json(
             req, "503 Service Unavailable",
             "{\"ok\":false,\"error\":\"recovery_exit_failed\"}");
     }
     (void)argus_session_manager_revoke_all();
-    if (esp_timer_start_once(s_recovery_timer, 300000U) != ESP_OK) {
-        return send_json(
-            req, "202 Accepted",
+    transition_response_t response = {
+        .req = req,
+        .status = "202 Accepted",
+        .body =
             "{\"ok\":true,\"status\":\"recovery_exit_committed\","
-            "\"manual_restart_required\":true}");
-    }
-    return send_json(
-        req, "202 Accepted",
-        "{\"ok\":true,\"status\":\"recovery_exit_accepted\"}");
+            "\"automatic_transition_requested\":true}",
+        .timer = s_recovery_timer,
+    };
+    return respond_then_arm_transition(
+        &s_recovery_transition, &response, "recovery_exit");
 }
 
 static const httpd_uri_t URI_ACCOUNTS_GET = {
@@ -942,6 +1191,17 @@ static const httpd_uri_t URI_RECOVERY_EXIT = {
     .handler = recovery_exit_post,
 };
 
+static const httpd_uri_t *const SECURITY_ROUTES[] = {
+    &URI_ACCOUNTS_GET,
+    &URI_ACCOUNTS_POST,
+    &URI_ACCOUNT_ACTION,
+    &URI_ROLES_GET,
+    &URI_ROLES_POST,
+    &URI_AUDIT_GET,
+    &URI_AP_PASSWORD,
+    &URI_RECOVERY_EXIT,
+};
+
 esp_err_t argus_security_http_init(void)
 {
     if (s_ap_apply_timer != NULL || s_recovery_timer != NULL) {
@@ -957,7 +1217,13 @@ esp_err_t argus_security_http_init(void)
     };
     esp_err_t err = esp_timer_create(&ap_args, &s_ap_apply_timer);
     if (err == ESP_OK) {
+        argus_security_transition_set_resource_ready(
+            &s_ap_transition, true);
         err = esp_timer_create(&recovery_args, &s_recovery_timer);
+        if (err == ESP_OK) {
+            argus_security_transition_set_resource_ready(
+                &s_recovery_transition, true);
+        }
     }
     return err;
 }
@@ -968,13 +1234,10 @@ esp_err_t argus_security_http_register(httpd_handle_t server)
         s_recovery_timer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    const httpd_uri_t *routes[] = {
-        &URI_ACCOUNTS_GET, &URI_ACCOUNTS_POST, &URI_ACCOUNT_ACTION,
-        &URI_ROLES_GET, &URI_ROLES_POST, &URI_AUDIT_GET,
-        &URI_AP_PASSWORD, &URI_RECOVERY_EXIT,
-    };
-    for (size_t i = 0U; i < sizeof(routes) / sizeof(routes[0]); ++i) {
-        esp_err_t err = httpd_register_uri_handler(server, routes[i]);
+    for (size_t i = 0U;
+         i < sizeof(SECURITY_ROUTES) / sizeof(SECURITY_ROUTES[0]); ++i) {
+        esp_err_t err =
+            httpd_register_uri_handler(server, SECURITY_ROUTES[i]);
         if (err != ESP_OK) return err;
     }
     return ESP_OK;
@@ -983,6 +1246,30 @@ esp_err_t argus_security_http_register(httpd_handle_t server)
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 size_t argus_security_http_test_route_count(void)
 {
-    return 8U;
+    return sizeof(SECURITY_ROUTES) / sizeof(SECURITY_ROUTES[0]);
+}
+
+bool argus_security_http_test_registered_route(
+    size_t index, const char **path, httpd_method_t *method)
+{
+    if (index >= argus_security_http_test_route_count() ||
+        path == NULL || method == NULL) {
+        return false;
+    }
+    *path = SECURITY_ROUTES[index]->uri;
+    *method = SECURITY_ROUTES[index]->method;
+    return true;
+}
+
+bool argus_security_http_test_parse_audit_query(
+    const char *query,
+    argus_security_http_audit_query_t *out)
+{
+    if (out == NULL) return false;
+    audit_query_t decoded;
+    if (!parse_audit_query(query, &decoded)) return false;
+    out->before_sequence = decoded.before_sequence;
+    out->limit = decoded.limit;
+    return true;
 }
 #endif

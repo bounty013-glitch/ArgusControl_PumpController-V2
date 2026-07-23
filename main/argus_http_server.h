@@ -71,6 +71,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "esp_http_server.h"
 #include "argus_state_mgr.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -173,6 +174,9 @@ bool argus_http_test_decode_login(const uint8_t *body, size_t body_len);
 
 /** @brief Return the production browser-command capability mapping. */
 uint64_t argus_http_test_command_capability(uint32_t command_type);
+size_t argus_http_test_registered_route_count(void);
+bool argus_http_test_registered_route(
+    size_t index, const char **path, httpd_method_t *method);
 #endif
 
 #ifdef __cplusplus

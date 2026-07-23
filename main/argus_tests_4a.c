@@ -25,6 +25,7 @@
 #include "argus_tests_4c.h"
 #include "argus_tests_4d2.h"
 #include "argus_tests_4d3.h"
+#include "argus_tests_4d3a.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5406,6 +5407,13 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d3_command_capability_mapping);
     RUN_TEST(test_4d3_browser_artifact_contract);
     RUN_TEST(test_4d3_security_route_inventory);
+    /* Phase 4D.3a security acceptance corrections */
+    RUN_TEST(test_4d3a_audit_mutation_lifecycle);
+    RUN_TEST(test_4d3a_audit_pagination);
+    RUN_TEST(test_4d3a_audit_query_strictness);
+    RUN_TEST(test_4d3a_transition_response_order);
+    RUN_TEST(test_4d3a_complete_route_inventory);
+    RUN_TEST(test_4d3a_browser_pagination_contract);
     }
 
     int total_executions = passed_executions + failed_executions;
