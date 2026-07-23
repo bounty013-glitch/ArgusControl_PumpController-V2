@@ -698,7 +698,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.1)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.2)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -757,5 +757,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.1 startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.2 startup completed successfully.");
 }
