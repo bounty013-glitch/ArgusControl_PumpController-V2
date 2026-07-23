@@ -685,7 +685,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             case 'k': {
                 argus_security_store_status_t security;
                 argus_local_recovery_status_t recovery;
-                printf("\n--- Phase 4D.3a Browser Security Corrections ---\n");
+                printf("\n--- Phase 4D.4 Machine Enrollment and MQTT Authentication ---\n");
                 if (argus_security_store_get_status(&security) == ESP_OK) {
                     printf("Store State        : %u\n", (unsigned)security.state);
                     printf("Schema/Generation  : %u / %lu\n",
@@ -766,7 +766,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.3a)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.4)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -857,5 +857,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.3a startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.4 startup completed successfully.");
 }
