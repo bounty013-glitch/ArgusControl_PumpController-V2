@@ -804,6 +804,55 @@ esp_err_t argus_security_store_get_active_ap_secret(
     return get_ap_secret(false, out, out_size, out_len);
 }
 
+esp_err_t argus_security_store_replace_active_ap_secret(
+    const uint8_t *current, size_t current_len,
+    const uint8_t *replacement, size_t replacement_len)
+{
+    if (current == NULL || replacement == NULL ||
+        current_len < ARGUS_SECURITY_AP_SECRET_MIN ||
+        current_len > ARGUS_SECURITY_AP_SECRET_MAX ||
+        replacement_len < 12U ||
+        replacement_len > ARGUS_SECURITY_AP_SECRET_MAX ||
+        replacement[0] == 0x20U ||
+        replacement[replacement_len - 1U] == 0x20U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0U; i < replacement_len; ++i) {
+        if (replacement[i] < 0x20U || replacement[i] > 0x7eU) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    argus_security_payload_t payload;
+    uint32_t generation;
+    esp_err_t err = snapshot_payload(&payload, &generation);
+    if (err != ESP_OK) return err;
+    argus_security_ap_secret_record_t *active = &payload.active_ap;
+    uint8_t mismatch = (uint8_t)(active->length ^ current_len);
+    size_t compare_len = active->length > current_len
+                             ? active->length : current_len;
+    for (size_t i = 0U; i < compare_len; ++i) {
+        uint8_t stored = i < active->length ? active->value[i] : 0U;
+        uint8_t supplied = i < current_len ? current[i] : 0U;
+        mismatch |= (uint8_t)(stored ^ supplied);
+    }
+    if (active->provisioned == 0U || mismatch != 0U) {
+        argus_password_zeroize(&payload, sizeof(payload));
+        return ESP_ERR_INVALID_STATE;
+    }
+    memset(active->value, 0, sizeof(active->value));
+    memcpy(active->value, replacement, replacement_len);
+    active->length = (uint8_t)replacement_len;
+    active->credential_version++;
+    if (active->credential_version == 0U) {
+        active->credential_version = 1U;
+    }
+    payload.security_epoch++;
+    if (payload.security_epoch == 0U) payload.security_epoch = 1U;
+    err = submit_payload(&payload, generation);
+    argus_password_zeroize(&payload, sizeof(payload));
+    return err;
+}
+
 esp_err_t argus_security_store_set_console_verifier(
     const argus_password_verifier_t *record, bool allow_replace)
 {

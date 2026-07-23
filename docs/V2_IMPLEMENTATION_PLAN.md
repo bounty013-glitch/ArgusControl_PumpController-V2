@@ -82,7 +82,18 @@ gantt
     *   GPIO0/KEY1 short-press rejection and 10-second post-boot hold/release recovery into persistent AP-only mode, including idempotent retrigger and stationary diagnostic cleanup.
     *   No command-router dispatch, motion mutation, customer-configuration erase, eFuse burn, secure boot, or flash-encryption change.
 *   **Evidence**: Three 660/660 controller suites, physical GPIO0 recovery and cleanup, unchanged AP credential reachability, zero-warning/error ESP-IDF v5.5.3 build, and 64% OTA headroom. See `PHASE_4D_2_IMPLEMENTATION_PLAN.md` and `Phase 4D.2 Tests.md`.
-*   **Next gate**: Phase 4D.3 must separately implement browser sessions, authorization integration, user administration, machine/MQTT authentication, and approved credential lifecycle behavior.
+*   **Next gate completed**: Phase 4D.3 separately implemented browser sessions, authorization integration, user administration, and approved local credential lifecycle behavior. Machine enrollment and MQTT CONNECT authentication remain Phase 4D.4 work.
+
+#### Phase 4D.3: Local Browser Authentication, Authorization, and Security Administration
+*   **Status**: COMPLETE AND ACCEPTED on July 23, 2026.
+*   **Delivered**:
+    *   SoftAP-only human routes with real accepted-socket interface proof and fail-closed STA rejection.
+    *   Strict local login, bounded pre-KDF throttling, synthetic unknown-principal verification, eight RAM-only sessions, per-session CSRF, and explicit logout/revocation.
+    *   Deny-by-default capability authorization, Client Admin delegation ceilings, bounded human-account/custom-role administration, and a 255-record redacted security-audit ring.
+    *   Legacy browser Basic-Auth retirement, protected active AP credential change/restoration, and authenticated exit from physical security recovery.
+    *   No authentication-to-authority coupling, no new direct motion path, and unchanged Phase 4C MQTT command architecture.
+*   **Evidence**: Three 711/711 controller suites, SoftAP success and STA rejection, live throttle/logout/CSRF checks, active AP credential change and restoration, physical recovery entry and authenticated exit, zero-warning/error ESP-IDF v5.5.3 no-ccache build, and 62% OTA headroom. See `PHASE_4D_3_IMPLEMENTATION_PLAN.md` and `Phase 4D.3 Tests.md`.
+*   **Next gate**: Phase 4D.4 may implement machine-client enrollment and MQTT CONNECT authentication under a separately approved scope. HTTPS/TLS, certificates, hostile-network acceptance, and irreversible protections remain separately gated.
 
 #### Phase 5: Field Integration and Calibration
 *   **Tasks**:

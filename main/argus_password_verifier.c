@@ -14,7 +14,7 @@
 #include "mbedtls/md.h"
 #include "mbedtls/platform_util.h"
 
-#define ARGUS_KDF_QUEUE_LENGTH 4U
+#define ARGUS_KDF_QUEUE_LENGTH 1U
 #define ARGUS_KDF_TASK_STACK 6144U
 #define ARGUS_KDF_TASK_PRIORITY 3U
 #define ARGUS_KDF_COOPERATE_INTERVAL 256U
@@ -273,7 +273,7 @@ static esp_err_t submit(argus_kdf_request_t *request)
         xSemaphoreCreateBinaryStatic(&request->completion_storage);
     if (request->completion == NULL) return ESP_ERR_NO_MEM;
     request->result = ESP_FAIL;
-    if (xQueueSend(s_queue, &request, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    if (xQueueSend(s_queue, &request, 0U) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
     (void)xSemaphoreTake(request->completion, portMAX_DELAY);

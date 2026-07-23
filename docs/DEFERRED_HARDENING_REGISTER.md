@@ -20,31 +20,31 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal |
-| **Current Implementation** | Portal is accessible through both the Service AP and the commissioned STA/LAN interface. `esp_http_server` binds to `INADDR_ANY:80` in APSTA mode. |
-| **Known Limitation** | No interface-level access restriction. Any device on the commissioned LAN can reach the portal if they know the controller's STA IP. |
-| **Operator Rationale** | Dual access is intentional and useful during development. The operator explicitly accepted LAN portal access as a secondary access path. Socket-level filtering was attempted (open_fn + getsockname, open_fn + getpeername, per-handler + getpeername) but lwip on ESP32 returns `0.0.0.0` for all peer/local address queries on accepted sockets in this project configuration. |
+| **Current Implementation** | Phase 4D.3 keeps the server bound in APSTA mode but requires the accepted socket's local destination to equal the active SoftAP address and the peer to belong to the SoftAP subnet before any human route performs sensitive work. Native IPv4 and IPv4-mapped IPv6 are normalized; ambiguous and native IPv6 cases fail closed. |
+| **Known Limitation** | Human browser access is intentionally unavailable through the commissioned STA/LAN interface. Plain HTTP remains observable to a capable participant already on the SoftAP. |
+| **Operator Rationale** | Human administration is physically and topologically scoped to the protected local SoftAP. Machine supervisory traffic remains a separate later-authentication boundary. |
 | **Current Exposure Assumptions** | Controller is on a trusted local network. Not Internet-exposed. No routing from public networks to the controller. |
 | **Reconsideration Trigger** | Before production field release. Before any architecture permits controller access from an untrusted or publicly routed network. |
 | **Target Phase** | Phase 4D (Security Hardening) |
 | **Status** | CLOSED |
-| **Closure Evidence** | Not yet applicable |
+| **Closure Evidence** | Phase 4D.3 live proof: SoftAP login succeeded at `192.168.4.1`; `/login` and `/api/auth/session` returned `403 local_ap_required` through STA `192.168.1.22`. See `Phase 4D.3 Tests.md`. |
 
 ---
 
-## DHR-002 — HTTP Basic Auth Over Unencrypted Transport
+## DHR-002 — Browser Authentication Over Unencrypted HTTP
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Authentication |
-| **Current Implementation** | HTTP Basic Auth (`Authorization: Basic <base64>`). Credentials are base64-encoded, not encrypted. Transport is plaintext HTTP on port 80. |
-| **Known Limitation** | Credentials are visible to any device that can observe network traffic between the client and the controller (AP or LAN). Base64 is encoding, not encryption. |
+| **Current Implementation** | Phase 4D.3 retired browser Basic Auth and uses an `HttpOnly; SameSite=Strict` RAM-only session cookie plus per-session CSRF. Transport remains plaintext HTTP on port 80, so the cookie intentionally omits `Secure`. |
+| **Known Limitation** | Credentials and sessions remain visible or modifiable to a capable local packet observer on the SoftAP. Session authentication is not represented as HTTPS-grade transport security. |
 | **Operator Rationale** | Acceptable for direct WPA2-PSK AP connections (encrypted at the WiFi layer). LAN exposure is accepted for development. HTTPS (TLS) requires certificate management infrastructure not yet designed. |
 | **Current Exposure Assumptions** | WPA2-PSK AP provides link-layer encryption for AP clients. LAN is trusted. No traffic exits the local network. |
 | **Reconsideration Trigger** | Before production field release. Before any untrusted network path exists between client and controller. |
 | **Target Phase** | Phase 4D (HTTPS / TLS) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | OPEN - TRANSPORT ENCRYPTION DEFERRED |
+| **Closure Evidence** | Basic-Auth retirement is accepted in Phase 4D.3; HTTPS/TLS and secure-cookie transport remain open. |
 
 ---
 
@@ -54,14 +54,14 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Credential Storage |
-| **Current Implementation** | Phase 4D.2 introduced a PBKDF2-HMAC-SHA-256 console verifier in dedicated encrypted `sec_store` NVS. A changed legacy portal password migrates only after verifier commit/readback and is then deleted. The temporary Basic-Auth compatibility path uses the verifier when present. |
-| **Known Limitation** | The XTS key is stored in `sec_keys` without eFuse/HMAC derivation or flash encryption and remains physically extractable. Compiled-bootstrap handling and the complete Phase 4D.3 account/session transition remain open. |
+| **Current Implementation** | Phase 4D.2 introduced encrypted `sec_store` and PBKDF2-HMAC-SHA-256 verifiers. Phase 4D.3 completed the separate console/human-account domains, transactional password administration, and browser-session transition; plaintext passwords are transient and zeroized. |
+| **Known Limitation** | The XTS key is stored in `sec_keys` without eFuse/HMAC derivation or flash encryption and remains physically extractable. |
 | **Operator Rationale** | Physical access to the ESP32 constitutes complete device compromise regardless of password storage format. Hashed storage (bcrypt/argon2) is preferred but adds complexity and is not justified for a development-phase portal. |
 | **Current Exposure Assumptions** | Controller is in a physically controlled environment. Physical access implies operator trust. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where physical access is not equivalent to operator trust. |
 | **Target Phase** | Phase 4D (Hashed Credential Storage) |
 | **Status** | OPEN - PARTIALLY RESOLVED |
-| **Closure Evidence** | Partially resolved by Phase 4D.2 implementation and `Phase 4D.2 Tests.md`; physical extraction and final authentication migration remain open. |
+| **Closure Evidence** | Logical credential storage and browser migration are accepted through Phase 4D.3. Physical-extraction resistance remains open. |
 
 ---
 
@@ -71,65 +71,65 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Initial Authentication |
-| **Current Implementation** | Default credentials are `admin`/`admin`. Forced password change is implemented: the portal serves a password-change page instead of the dashboard when the default password is active. After password change, the default `admin` password is explicitly rejected (defense-in-depth in `check_auth()`). |
-| **Known Limitation** | The bootstrap credentials are hardcoded and publicly documented. Between device boot and first portal access, anyone who connects can authenticate with the default. The forced-change mechanism requires the operator to navigate to the portal and complete the form — it does not prevent default-credential authentication on API endpoints before that occurs. |
-| **Operator Rationale** | The time window between boot and first operator access is short in practice. The forced-change flow is sufficient for development. |
-| **Current Exposure Assumptions** | Operator accesses the portal promptly after enabling service mode. No untrusted actors have access during the bootstrap window. |
+| **Current Implementation** | The legacy browser `admin`/`admin` path and Basic-Auth fallback are removed. Browser authentication uses the separately provisioned console verifier and bounded human records; factory provisioning remains an offline/manufacturing boundary. |
+| **Known Limitation** | Fleet bootstrap and factory-credential uniqueness still require deployment provisioning policy. No browser API can rotate the factory recovery credential. |
+| **Operator Rationale** | Browser access must use a provisioned verifier; recovery-secret rotation remains an offline manufacturing responsibility. |
+| **Current Exposure Assumptions** | Manufacturing and provisioning artifacts remain controlled and are not exposed through browser administration. |
 | **Reconsideration Trigger** | Before production field release. If the bootstrap window duration becomes a concern. |
 | **Target Phase** | Phase 4D |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | CLOSED FOR LEGACY BROWSER BOOTSTRAP |
+| **Closure Evidence** | Phase 4D.3 rejected legacy Basic headers and required the provisioned local login path. Factory credential lifecycle remains recorded under residual deployment risks. |
 
 ---
 
-## DHR-005 — Minimum Password Length
+## DHR-005 — Minimum Password Length (Resolved)
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Password Policy |
-| **Current Implementation** | Minimum password length is 4 characters. Maximum is 64. Cannot reuse "admin". No complexity requirements. |
-| **Known Limitation** | Short passwords are vulnerable to brute-force attacks. No authentication throttling (see DHR-006) compounds this. |
+| **Current Implementation** | New human passwords require 12 through 128 bytes. New active SoftAP passphrases require 12 through 63 printable ASCII characters. Accepted existing credentials are not invalidated solely by the stronger change policy. |
+| **Known Limitation** | Password strength still depends on operator choice; no arbitrary composition rule substitutes for length and throttling. |
 | **Operator Rationale** | Acceptable for development. Brute-force risk is mitigated by trusted-network assumption. |
 | **Current Exposure Assumptions** | No untrusted network access to the controller. |
 | **Reconsideration Trigger** | Before production field release. When authentication throttling is implemented. |
 | **Target Phase** | Phase 4D (Stronger Password Policy) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | CLOSED |
+| **Closure Evidence** | Phase 4D.3 policy, parser, administration, and live credential-change validation. |
 
 ---
 
-## DHR-006 — No Authentication Throttling
+## DHR-006 — Authentication Throttling (Resolved)
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Abuse Prevention |
-| **Current Implementation** | No rate limiting, lockout, or bounded backoff on failed authentication attempts. |
-| **Known Limitation** | Unlimited brute-force attempts are possible from any client that can reach the portal. |
+| **Current Implementation** | Phase 4D.3 enforces bounded peer, principal, and global pre-KDF throttle buckets; five failures within 60 seconds begin a 30-second cooldown with bounded exponential growth. KDF admission permits at most one active and one queued request. |
+| **Known Limitation** | Bounded throttling reduces brute-force and resource exhaustion but does not make plaintext HTTP safe on hostile networks. |
 | **Operator Rationale** | WPA2-PSK AP with single-client limit provides natural rate restriction on the AP interface. LAN brute-force is accepted for development. |
 | **Current Exposure Assumptions** | Trusted local network. AP limited to 1 client. |
 | **Reconsideration Trigger** | Before production field release. Before any untrusted network access. |
 | **Target Phase** | Phase 4D (Abuse Throttling) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | CLOSED FOR CURRENT TRUSTED-LOCAL RELEASE |
+| **Closure Evidence** | Pure admission tests and live six-attempt cooldown/recovery proof in `Phase 4D.3 Tests.md`. |
 
 ---
 
-## DHR-007 — No CSRF Mechanism
+## DHR-007 — CSRF Mechanism (Resolved)
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Request Integrity |
-| **Current Implementation** | No CSRF tokens. POST endpoints accept requests with valid Basic Auth credentials regardless of origin. |
-| **Known Limitation** | A malicious page loaded in the same browser could potentially forge requests to the portal if Basic Auth credentials are cached. |
+| **Current Implementation** | Every authenticated state-changing browser request requires a valid RAM-only session, per-session `X-Argus-CSRF` synchronizer token, exact content type, validated same-origin `Origin` and `Host`, and SoftAP socket proof. CORS is denied by default. |
+| **Known Limitation** | CSRF does not provide confidentiality or integrity against a packet observer capable of attacking the plaintext HTTP transport. |
 | **Operator Rationale** | Single-client AP with WPA2-PSK provides adequate isolation. The portal is accessed from a dedicated device (phone), not a shared browser. Current POST endpoints are limited to password change. |
 | **Current Exposure Assumptions** | Operator uses a dedicated device for portal access. No untrusted web content is loaded in the same browser session. |
 | **Reconsideration Trigger** | Before production field release. Before motion-control POST endpoints are added (Phase 4B.3). |
 | **Target Phase** | Phase 4D (CSRF Hardening) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | CLOSED |
+| **Closure Evidence** | Phase 4D.3 pure/browser tests and live session-bearing POST rejection with `403 request_protection_failed`. |
 
 
 **Update:** Acknowledging the existing service-entry/service-exit POST endpoints introduced in Phase 4B.3, while retaining Phase 4D hardening.
@@ -141,14 +141,14 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Credential Lifecycle |
-| **Current Implementation** | Phase 4D.2 provides a physically local GPIO0/KEY1 10-second hold/release path into persistent factory-credential AP-only recovery. It preserves commissioned/customer configuration and remains intentionally distinct from factory reset. |
-| **Known Limitation** | Phase 4D.2 exposes the recovery network foundation only. Authenticated Argus Personnel recovery actions and complete credential-reset/rotation workflows remain Phase 4D.3 work. |
+| **Current Implementation** | GPIO0/KEY1 enters persistent factory-credential AP-only recovery. Phase 4D.3 adds authenticated, capability-checked, recently reauthenticated, CSRF-protected recovery exit that clears only the marker and reboots to the preserved network disposition. Recovery remains intentionally distinct from factory reset. |
+| **Known Limitation** | The factory recovery credential remains an offline manufacturing/provisioning concern and is not browser-rotatable. |
 | **Operator Rationale** | Field personnel will not have serial-console access. Physically local AP recovery is required without coupling credential recovery to destructive factory reset. |
 | **Current Exposure Assumptions** | The operator has physical access to KEY1/BOOT and the protected service AP. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where serial console access is not guaranteed. |
 | **Target Phase** | Phase 4D (Unified Reset) |
-| **Status** | OPEN - PARTIALLY RESOLVED |
-| **Closure Evidence** | Physical recovery entry, persistence, idempotence, and cleanup are accepted in `Phase 4D.2 Tests.md`; credential administration remains open. |
+| **Status** | CLOSED FOR CURRENT RECOVERY CONTRACT |
+| **Closure Evidence** | Phase 4D.2 physical entry plus Phase 4D.3 authenticated browser exit, clean reboot, and preserved active credential in `Phase 4D.3 Tests.md`. |
 
 
 **Update:** Field personnel will not have serial-console access.
@@ -171,20 +171,20 @@
 
 ---
 
-## DHR-010 — HTTP Basic Auth Logout Browser Behavior
+## DHR-010 — Browser Logout Behavior (Resolved)
 
 | Field | Value |
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Logout |
-| **Current Implementation** | `GET /api/logout` returns 401 with `WWW-Authenticate` header and a styled "Logged Out" page containing a "Log in again" link to `/`. |
-| **Known Limitation** | HTTP Basic Auth has no standard logout mechanism. Browser behavior on receiving 401 after cached credentials is inconsistent: some browsers re-prompt immediately, others retain cached credentials. Observed operator behavior (Chrome mobile): after logout, the browser credential prompt appears but the correct password is not immediately accepted; pressing Cancel shows the Logged Out page, and the "Log in again" link then works correctly. |
+| **Current Implementation** | Logout is an authenticated CSRF-protected POST that revokes the RAM-only server session before clearing the browser cookie. Mutation-by-GET logout and Basic-Auth browser-cache behavior are retired. |
+| **Known Limitation** | Plain HTTP still permits session observation by a capable local packet attacker before logout. |
 | **Operator Rationale** | Operator-verified and accepted as usable. The workaround (Cancel → Log in again) reliably clears credentials and re-prompts. A session-based logout (cookie/token) would provide reliable cross-browser behavior but adds significant complexity. |
 | **Current Exposure Assumptions** | Single-operator usage. The quirk is a UX inconvenience, not a security vulnerability. |
 | **Reconsideration Trigger** | If session-based authentication is implemented in Phase 4D. If multi-user access is required. |
 | **Target Phase** | Phase 4D (Session-Based Auth) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | CLOSED |
+| **Closure Evidence** | Live Phase 4D.3 logout invalidated protected navigation and required a fresh login. |
 
 ---
 
@@ -202,7 +202,7 @@
 
 **Rationale:** The operator has determined that field-accessible configuration requires the portal to be reachable without CLI service entry. This is an accepted temporary lifecycle policy for bench and field evaluation. AP visibility does not grant motor authority — the portal is read/config only. Motor commands require MQTT supervisory authority from the STA network path.
 
-**Security posture:** Portal credential protection (DHR-002, DHR-003, DHR-004) applies. The AP is WPA2-PSK protected with build-time credentials. All endpoints require HTTP Basic Auth.
+**Security posture:** The AP is WPA2-PSK protected. Human routes are SoftAP-only and use Phase 4D.3 local sessions, CSRF, and deny-by-default authorization. Public login/bootstrap routes remain bounded; protected endpoints require an authorized session. Plain HTTP and always-advertised AP exposure remain accepted only for the trusted-local development release.
 
 **Deferred items:**
 - Persistent AP enable/disable toggle per-device

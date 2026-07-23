@@ -13,16 +13,6 @@
 
 #define CHECK(condition) do { if (!(condition)) return ESP_FAIL; } while (0)
 
-static bool contains_bounded(const char *data, size_t data_len, const char *text)
-{
-    size_t text_len = text == NULL ? 0U : strlen(text);
-    if (data == NULL || text_len == 0U || text_len > data_len) return false;
-    for (size_t i = 0U; i <= data_len - text_len; i++) {
-        if (memcmp(data + i, text, text_len) == 0) return true;
-    }
-    return false;
-}
-
 esp_err_t test_4b6_factory_reset_decoder_acceptance(void)
 {
     static const char exact[] = "{\"confirm\":\"FACTORY_RESET\"}";
@@ -396,21 +386,6 @@ esp_err_t test_4b6_factory_reset_http_and_ui_contract(void)
 {
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
     CHECK(argus_http_test_factory_reset_registration());
-    size_t page_len = 0U;
-    const char *page = argus_http_test_portal_page(&page_len);
-    CHECK(page != NULL && page_len > 4096U);
-    CHECK(contains_bounded(page, page_len, "Factory Reset"));
-    CHECK(contains_bounded(page, page_len,
-                           "Factory Reset erases identity, identity lock, and Wi-Fi configuration. The portal password is preserved."));
-    CHECK(contains_bounded(page, page_len, "confirm(warning)"));
-    CHECK(contains_bounded(page, page_len, "confirm:'FACTORY_RESET'"));
-    CHECK(contains_bounded(page, page_len, "lifecyclePending"));
-    CHECK(contains_bounded(page, page_len, "factory_reset_pending"));
-    CHECK(contains_bounded(page, page_len, "Result Unknown"));
-    CHECK(contains_bounded(page, page_len,
-                           "Reconnect to the Service AP"));
-    CHECK(!contains_bounded(page, page_len, "Authorization:"));
-    CHECK(!contains_bounded(page, page_len, "sta_pass"));
 #endif
     return ESP_OK;
 }

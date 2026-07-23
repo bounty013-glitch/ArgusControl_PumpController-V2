@@ -98,8 +98,10 @@ esp_err_t test_4b5_controls_route_and_navigation_contract(void)
     const char *page = argus_http_test_controls_page(&page_len);
     TEST_CHECK(page != NULL && page_len > 4096U && page_len < 65536U);
     TEST_CHECK(bounded_contains(page, page_len, "Argus Motion Controls"));
-    TEST_CHECK(bounded_contains(page, page_len, "href=\"/\""));
-    TEST_CHECK(bounded_contains(page, page_len, "href=\"/api/logout\""));
+    TEST_CHECK(bounded_contains(page, page_len, "href=\"/commission\""));
+    TEST_CHECK(bounded_contains(page, page_len, "/api/auth/logout"));
+    TEST_CHECK(bounded_contains(page, page_len, "X-Argus-CSRF"));
+    TEST_CHECK(!bounded_contains(page, page_len, "href=\"/api/logout\""));
     TEST_CHECK(bounded_contains(page, page_len, "credentials: \"same-origin\""));
     TEST_CHECK(bounded_contains(page, page_len, "cache: \"no-store\""));
     TEST_CHECK(!bounded_contains(page, page_len, "window.argusRaw"));
@@ -158,7 +160,7 @@ esp_err_t test_4b5_controls_live_status_contract(void)
     TEST_CHECK(bounded_contains(page, page_len, "m.state === \"FAULTED\""));
     TEST_CHECK(bounded_contains(page, page_len, "m.estop_latched"));
     TEST_CHECK(bounded_contains(page, page_len,
-                                "byId(\"cmd-estop\").disabled = runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive"));
+                                "byId(\"cmd-estop\").disabled = !canEstop || runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive"));
     TEST_CHECK(!bounded_contains(page, page_len,
                                  "byId(\"cmd-estop\").disabled = runtime.ordinaryCommandPending"));
     TEST_CHECK(!bounded_contains(page, page_len, "setInterval(requestStatus"));

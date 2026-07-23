@@ -39,6 +39,11 @@
 #include "argus_password_verifier.h"
 #include "argus_security_migration.h"
 #include "argus_security_store.h"
+#include "argus_security_directory.h"
+#include "argus_session_manager.h"
+#include "argus_auth_service.h"
+#include "argus_security_audit.h"
+#include "argus_security_http.h"
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
 
@@ -680,7 +685,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             case 'k': {
                 argus_security_store_status_t security;
                 argus_local_recovery_status_t recovery;
-                printf("\n--- Phase 4D.2 Security Foundation ---\n");
+                printf("\n--- Phase 4D.3 Browser Access Control ---\n");
                 if (argus_security_store_get_status(&security) == ESP_OK) {
                     printf("Store State        : %u\n", (unsigned)security.state);
                     printf("Schema/Generation  : %u / %lu\n",
@@ -761,7 +766,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.2)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.3)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -771,7 +776,12 @@ void app_main(void)
 
     // 2a. Initialize encrypted security storage and bounded KDF worker.
     ESP_ERROR_CHECK(argus_security_store_init());
+    ESP_ERROR_CHECK(argus_security_directory_init());
+    ESP_ERROR_CHECK(argus_session_manager_init());
     ESP_ERROR_CHECK(argus_password_verifier_init());
+    ESP_ERROR_CHECK(argus_auth_service_init());
+    ESP_ERROR_CHECK(argus_security_audit_init());
+    ESP_ERROR_CHECK(argus_security_http_init());
 
     // 2b. One-time staged migration of the unchanged build-provisioned AP
     // credential into separate factory and active encrypted records.
@@ -847,5 +857,5 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.2 startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.3 startup completed successfully.");
 }

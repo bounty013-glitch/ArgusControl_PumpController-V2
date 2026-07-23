@@ -27,7 +27,7 @@ No login, role, permission, session, recovery, or interface module may call a mo
 | MQTT connection | Untrusted until a machine identity authenticates. Client ID, connection ID, command session, sequence, and heartbeat are not credentials. |
 | Serial/USB | Development and last-resort disaster recovery only. It is not normal commissioning. |
 | Internet, routed WAN, port-forwarded network, or hostile LAN/AP peer | Unsupported and prohibited for this release. |
-| Physical flash and board access | Not protected by current repository configuration; secure boot, flash encryption, and NVS encryption are not active. |
+| Physical flash and board access | Security records use encrypted NVS with software-stored XTS keys. Secure boot and flash encryption are not active, and the XTS keys remain physically extractable. |
 
 Normal commissioning requires only power, the controller's AP, and a browser. A healthy new or replacement controller must not require serial access.
 
@@ -98,7 +98,7 @@ Storage classes are separate:
 | User, role, permission, and identity metadata | Versioned non-secret records with integrity and security epoch. |
 | Audit events | Dedicated bounded append/ring storage; no reusable credential content. |
 
-The existing 24 KiB `nvs` partition is not sufficient evidence of capacity or protection for this model. Before credential implementation, Phase 4D must size and add protected security and audit storage, select the ESP-IDF NVS encryption scheme, define key provisioning, and test power-loss recovery and wear. `CONFIG_NVS_ENCRYPTION`, secure boot, and flash encryption are currently off; no document may claim otherwise.
+Phase 4D.2 added dedicated 256 KiB `sec_store` and `sec_audit` partitions plus a 4 KiB `sec_keys` partition. `sec_store` uses ESP-IDF encrypted NVS with software-stored XTS keys and an atomic dual-slot record protocol. The implementation was tested for interrupted writes, corrupt-slot fallback, unsupported schemas, bounded capacity, and recovery. The software-stored key remains physically extractable; secure boot and flash encryption remain off, and no document may claim physical-extraction protection.
 
 The current Wi-Fi driver uses flash storage by default. Later implementation must prevent unplanned duplicate plaintext storage by explicitly selecting Wi-Fi storage behavior and making the protected Argus record authoritative.
 
@@ -130,6 +130,8 @@ Human accounts, browser sessions, machine clients, MQTT sockets/connections, Pha
 6. **MACHINE IDENTITY** is an identity type, not an automatic privilege level. Every machine receives an explicit bounded role/permission set and transport/topic scope.
 
 ## 8. Permission Matrix
+
+The accepted matrix contains 23 stable capabilities. The `manage_client_admins` amendment is a distinct protected capability; it is not implied by `manage_users`.
 
 Legend: `Y` built-in; `G` may be explicitly granted within the role ceiling; `N` prohibited; `A` assigned per machine enrollment and bounded by the enrolling actor.
 
@@ -251,9 +253,7 @@ Recovery is browser-first and physically local. Three operations remain distinct
 2. **Configuration factory reset** is the existing explicit operation that erases commissioned identity and STA configuration while preserving the security domain. It remains stationary, Local-Service, and policy gated.
 3. **Full security reset** is an Argus Personnel/factory-service operation that resets security records and sessions. It is not an implicit consequence of network recovery or configuration reset and must not alter motion, clear E-stop/fault, or acquire authority.
 
-The repository proves no dedicated physical recovery input. Existing GPIO definitions are motion outputs; serial/USB and software APIs are the only implemented recovery paths. Selection and physical validation of a locally accessible recovery trigger is a required hardware/product decision before Phase 4D.2 implementation. No BOOT button, reset pin, or invented GPIO is authorized by this contract.
-
-When selected, the trigger must be sampled through a bounded, debounced, boot/local-presence procedure that cannot be invoked remotely or during accidental transients. Serial remains disaster recovery only.
+Phase 4D.2 established and physically validated GPIO0/KEY1 (the BOOT button, not RESET) as the dedicated local recovery input. The runtime requires a released post-boot state, 100 ms debounce, a continuous 10-second hold, and a debounced release before persisting `SECURITY_RECOVERY_AP_ONLY`. Short presses, startup-low conditions, bounce, and repeated requests fail safely or remain idempotent. The trigger never dispatches a command, mutates machine state, or erases customer configuration. Serial remains disaster recovery only.
 
 ## 15. MQTT Security and Phase 4C
 
@@ -296,4 +296,4 @@ Security-sensitive administrative mutations reserve audit capacity before commit
 
 ## 18. Explicit Exclusions
 
-Phase 4D.1 does not implement credentials, users, roles, sessions, login APIs, CSRF, throttling, audit storage, AP-password mutation, MQTT authentication, recovery actions, HTTPS, TLS, certificates, firmware management, calibration, or physical recovery. It performs no motion, pump, hose, fluid, chemical, pressure, flow, load, process, endurance, or penetration acceptance.
+Phase 4D.2 implemented encrypted security storage, verifier/provisioning foundations, bounded migration, and the physically local recovery trigger. Phase 4D.3 has now implemented and accepted local browser authentication, human accounts, roles, RAM-only sessions, CSRF, authorization, audit storage, active AP-password mutation, and authenticated recovery exit. Machine enrollment and MQTT CONNECT authentication; HTTPS, TLS, certificates, firmware-management implementation, calibration, hostile-network operation, and penetration acceptance remain deferred. Phase 4D performs no pump, hose, fluid, chemical, pressure, flow, load, process, or endurance acceptance.

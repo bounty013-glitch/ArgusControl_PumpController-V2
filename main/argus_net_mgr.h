@@ -100,6 +100,7 @@ typedef enum {
     ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
     ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP,   /**< Timer wakeup for auto-reconnect */
     ARGUS_NET_EVT_APPLY_WIFI_CONFIG,       /**< Apply new Wi-Fi credentials without restart */
+    ARGUS_NET_EVT_APPLY_ACTIVE_AP_SECRET,  /**< Apply committed active AP secret */
     ARGUS_NET_EVT_STA_STOPPED,             /**< Wi-Fi driver confirms physical STA stop */
     ARGUS_NET_EVT_SECURITY_RECOVERY_REQUEST /**< Physical KEY1 recovery request */
 } argus_net_event_type_t;
@@ -479,6 +480,7 @@ esp_err_t argus_net_mgr_request_factory_reset(void);
  * command or mutate machine state, target, E-stop/fault, or authority.
  */
 esp_err_t argus_net_mgr_request_security_recovery(void);
+esp_err_t argus_net_mgr_request_active_ap_secret_apply(void);
 
 bool argus_net_security_recovery_request_is_idempotent(
     argus_network_mode_t mode);

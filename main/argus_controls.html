@@ -195,8 +195,8 @@
         <div class="subtitle" id="controller-title">Controller metadata loading</div>
       </div>
       <nav class="top-actions" aria-label="Portal navigation">
-        <a class="link" href="/">Dashboard</a>
-        <a class="link" href="/api/logout">Log Out</a>
+        <a class="link" id="admin-link" href="/commission">Administration</a>
+        <button class="link" id="logout" type="button">Log Out</button>
       </nav>
     </header>
 
@@ -320,6 +320,8 @@
     const STALE_MS = 3000;
 
     const runtime = {
+      csrf: "",
+      caps: new Set(),
       status: null,
       lastSuccessMs: 0,
       statusInFlight: false,
@@ -336,6 +338,46 @@
       pageActive: true,
       freshness: "disconnected"
     };
+
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = function(input, init = {}) {
+      const options = {...init};
+      const method = String(options.method || "GET").toUpperCase();
+      options.credentials = "same-origin";
+      if (!["GET", "HEAD"].includes(method)) {
+        if (!runtime.csrf) return Promise.reject(new Error("session unavailable"));
+        options.headers = new Headers(options.headers || {});
+        options.headers.set("Content-Type", "application/json");
+        options.headers.set("X-Argus-CSRF", runtime.csrf);
+        if (options.body === undefined) options.body = "{}";
+      }
+      return nativeFetch(input, options);
+    };
+
+    async function bootstrapSession() {
+      const response = await nativeFetch("/api/auth/session", {
+        credentials: "same-origin",
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        window.location.replace("/login");
+        return;
+      }
+      const session = await response.json();
+      runtime.csrf = session.csrf;
+      runtime.caps = new Set(session.capabilities || []);
+      const administration = [
+        "manage_users", "manage_roles", "view_audit", "manage_network",
+        "change_ap_secret", "manage_client_network", "modify_identity",
+        "modify_protected_config", "commission", "calibrate",
+        "manage_firmware", "invoke_recovery", "full_security_reset"
+      ];
+      byId("admin-link").hidden =
+        !administration.some(capability => runtime.caps.has(capability));
+      loadIdentity();
+      requestStatus(true);
+      runtime.ageTimer = setInterval(refreshFreshnessClock, 250);
+    }
 
     const byId = (id) => document.getElementById(id);
     const setText = (id, value) => { byId(id).textContent = String(value); };
@@ -464,7 +506,10 @@
       const m = status ? status.machine : null;
       const faulted = !m || m.state === "FAULTED" || m.fault_code !== 0;
       const commandBlocked = runtime.ordinaryCommandPending || runtime.estopCommandPending;
-      const ordinaryReady = admitted && !commandBlocked && !m.estop_latched && !faulted;
+      const canMotion = runtime.caps.has("motion");
+      const canEstop = runtime.caps.has("software_estop");
+      const canResetEstop = runtime.caps.has("reset_software_estop");
+      const ordinaryReady = canMotion && admitted && !commandBlocked && !m.estop_latched && !faulted;
       const stationary = m && (m.state === "UNLOCKED" || m.state === "HOLDING");
       const moving = m && (m.state === "STARTING" || m.state === "RUNNING" || m.state === "DECELERATING");
 
@@ -473,12 +518,12 @@
       byId("dir-forward").disabled = !(ordinaryReady && stationary);
       byId("dir-reverse").disabled = !(ordinaryReady && stationary);
       byId("cmd-start").disabled = !(ordinaryReady && stationary && m.target_rpm_milli > 0);
-      byId("cmd-stop").disabled = !(admitted && !commandBlocked && moving);
+      byId("cmd-stop").disabled = !(canMotion && admitted && !commandBlocked && moving);
       byId("cmd-unlock").disabled = !(ordinaryReady && m.state === "HOLDING");
-      byId("cmd-reset-estop").disabled = !(admitted && !commandBlocked && m && m.estop_latched && m.state === "EMERGENCY_STOPPED");
+      byId("cmd-reset-estop").disabled = !(canResetEstop && admitted && !commandBlocked && m && m.estop_latched && m.state === "EMERGENCY_STOPPED");
       byId("cmd-recover").disabled = !(admitted && !commandBlocked && m && !m.estop_latched &&
         (m.state === "UNLOCKED" || m.state === "HOLDING" || m.state === "FAULTED"));
-      byId("cmd-estop").disabled = runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive;
+      byId("cmd-estop").disabled = !canEstop || runtime.estopCommandPending || runtime.unauthorized || !runtime.pageActive;
     }
 
     function schedulePoll(delay) {
@@ -683,11 +728,17 @@
       clearInterval(runtime.ageTimer);
       if (runtime.statusAbort) runtime.statusAbort.abort();
     });
+    byId("logout").addEventListener("click", async () => {
+      try {
+        await fetch("/api/auth/logout", {method:"POST"});
+      } finally {
+        runtime.csrf = "";
+        window.location.replace("/login");
+      }
+    });
 
     updateEligibility();
-    loadIdentity();
-    requestStatus(true);
-    runtime.ageTimer = setInterval(refreshFreshnessClock, 250);
+    bootstrapSession().catch(() => window.location.replace("/login"));
   </script>
 </body>
 </html>

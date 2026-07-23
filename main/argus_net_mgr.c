@@ -811,6 +811,39 @@ static void net_mgr_task(void *pvParameters)
                     xSemaphoreGive(s_net_mutex);
                     break;
 
+                case ARGUS_NET_EVT_APPLY_ACTIVE_AP_SECRET: {
+                    argus_identity_t identity;
+                    wifi_config_t ap_config = {0};
+                    esp_err_t err = argus_identity_get(&identity);
+                    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+                    if (err == ESP_OK &&
+                        s_net_mode !=
+                            ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY &&
+                        atomic_load(&s_ap_started)) {
+                        err = populate_service_ap_config(
+                            false, &identity, &ap_config);
+                    } else if (err == ESP_OK) {
+                        err = ESP_ERR_INVALID_STATE;
+                    }
+                    if (err == ESP_OK) {
+                        err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+                    }
+                    if (err != ESP_OK) {
+                        s_last_error =
+                            ARGUS_NET_ERR_SECURITY_RECOVERY_FAILED;
+                        ESP_LOGE(TAG,
+                                 "Active AP credential apply failed: %s",
+                                 esp_err_to_name(err));
+                    } else {
+                        ESP_LOGI(TAG,
+                                 "Committed active AP credential applied");
+                    }
+                    argus_password_zeroize(
+                        &ap_config, sizeof(ap_config));
+                    xSemaphoreGive(s_net_mutex);
+                    break;
+                }
+
                 case ARGUS_NET_EVT_STA_STOPPED:
                     xSemaphoreTake(s_net_mutex, portMAX_DELAY);
                     argus_sta_event_action_t stop_action = argus_net_decide_sta_event(
@@ -2207,6 +2240,15 @@ esp_err_t argus_net_mgr_request_security_recovery(void)
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     argus_net_event_t event = {
         .type = ARGUS_NET_EVT_SECURITY_RECOVERY_REQUEST,
+    };
+    return argus_net_mgr_post_event(&event);
+}
+
+esp_err_t argus_net_mgr_request_active_ap_secret_apply(void)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    argus_net_event_t event = {
+        .type = ARGUS_NET_EVT_APPLY_ACTIVE_AP_SECRET,
     };
     return argus_net_mgr_post_event(&event);
 }

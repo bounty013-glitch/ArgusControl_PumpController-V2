@@ -91,6 +91,13 @@ function response(code, body) {
 
 async function fakeFetch(url, options = {}) {
   fetchCalls.push({ url, options });
+  if (url === "/api/auth/session") {
+    return response(200, {
+      ok: true,
+      csrf: "test-csrf-token",
+      capabilities: ["view_status", "motion", "software_estop", "reset_software_estop"],
+    });
+  }
   if (url === "/api/status") return response(200, status);
   if (url === "/api/identity") {
     return response(200, { device_name: "Argus", firmware_version: "v2-phase4b.5-dev", hardware_uid: "test" });
@@ -108,6 +115,7 @@ async function fakeFetch(url, options = {}) {
 
 const context = {
   AbortController,
+  Headers,
   console,
   fetch: fakeFetch,
   document: {
@@ -116,6 +124,8 @@ const context = {
     addEventListener: (name, callback) => documentListeners.set(name, callback),
   },
   window: {
+    fetch: fakeFetch,
+    location: { replace: () => {} },
     addEventListener: (name, callback) => windowListeners.set(name, callback),
   },
   setTimeout: (callback, delay) => {
@@ -133,6 +143,7 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(scriptMatch[1], context, { filename: "argus_controls.html" });
+context.fetch = context.window.fetch;
 
 await new Promise((resolve) => setImmediate(resolve));
 await new Promise((resolve) => setImmediate(resolve));
@@ -147,6 +158,9 @@ for (const invalid of ["", "-1", "200.001", "8.0001", "1e1", "NaN"]) {
 const statusCall = fetchCalls.find((call) => call.url === "/api/status");
 assert.equal(statusCall.options.credentials, "same-origin");
 assert.equal(statusCall.options.cache, "no-store");
+const sessionCall = fetchCalls.find((call) => call.url === "/api/auth/session");
+assert.equal(sessionCall.options.credentials, "same-origin");
+assert.equal(sessionCall.options.cache, "no-store");
 assert.equal(elements.get("cmd-start").disabled, false);
 
 elements.get("cmd-start").click();
@@ -155,6 +169,7 @@ await new Promise((resolve) => setImmediate(resolve));
 let commandCalls = fetchCalls.filter((call) => call.url === "/api/command");
 assert.equal(commandCalls.length, 1, "duplicate ordinary click dispatches once");
 assert.equal(commandCalls[0].options.credentials, "same-origin");
+assert.equal(commandCalls[0].options.headers.get("X-Argus-CSRF"), "test-csrf-token");
 assert.deepEqual(JSON.parse(commandCalls[0].options.body), { command: "start" });
 assert.equal(elements.get("machine-state").textContent, "UNLOCKED", "no optimistic state mutation");
 assert.equal(elements.get("cmd-estop").disabled, false, "ordinary request does not block E-stop");

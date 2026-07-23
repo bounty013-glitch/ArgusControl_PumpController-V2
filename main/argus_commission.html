@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Argus Administration</title>
+  <style>
+    :root{color-scheme:dark;--bg:#111214;--panel:#1b1d20;--line:#34373d;
+      --text:#f4f4f5;--muted:#a1a1aa;--green:#4ade80;--blue:#60a5fa;
+      --red:#f87171;--amber:#fbbf24}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
+      font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+    header{position:sticky;top:0;z-index:4;display:flex;align-items:center;
+      justify-content:space-between;gap:12px;padding:12px 18px;background:#161719;
+      border-bottom:1px solid var(--line)}
+    h1{font-size:18px;margin:0}h2{font-size:15px;margin:0 0 12px}
+    h3{font-size:13px;margin:18px 0 8px;color:var(--muted)}
+    main{max-width:1120px;margin:auto;padding:16px}
+    nav{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--line);
+      margin-bottom:16px}
+    nav button{background:transparent;border:0;border-bottom:2px solid transparent;
+      color:var(--muted);padding:10px 12px;white-space:nowrap}
+    nav button.active{color:var(--text);border-color:var(--green)}
+    section{display:none}section.active{display:block}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+      gap:12px}.panel{background:var(--panel);border:1px solid var(--line);
+      border-radius:6px;padding:14px}.wide{grid-column:1/-1}
+    label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px}
+    input,select,textarea{width:100%;border:1px solid #444850;background:#121315;
+      color:var(--text);padding:9px;border-radius:4px}
+    textarea{min-height:74px;resize:vertical}
+    button,.button{border:1px solid #4a4e55;background:#292c31;color:var(--text);
+      padding:8px 11px;border-radius:4px;cursor:pointer;text-decoration:none}
+    button.primary{background:#166534;border-color:#22c55e}
+    button.danger{background:#7f1d1d;border-color:#ef4444}
+    button:disabled{opacity:.45;cursor:not-allowed}.actions{display:flex;gap:7px;
+      flex-wrap:wrap;margin-top:12px}.status{color:var(--muted);min-height:20px}
+    .ok{color:var(--green)}.error{color:var(--red)}.warn{color:var(--amber)}
+    .identity{font-size:12px;color:var(--muted)}.table{overflow:auto}
+    table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;
+      border-bottom:1px solid var(--line);white-space:nowrap}
+    th{color:var(--muted);font-weight:500}.tag{display:inline-block;padding:2px 6px;
+      border:1px solid var(--line);border-radius:3px;font-size:11px}
+    dialog{width:min(440px,calc(100% - 24px));background:var(--panel);color:var(--text);
+      border:1px solid var(--line);border-radius:6px;padding:18px}
+    dialog::backdrop{background:#000a}.hidden{display:none!important}
+    .banner{padding:10px 12px;border:1px solid #92400e;background:#2a1b08;
+      color:#fde68a;border-radius:4px;margin-bottom:12px}
+    @media(max-width:620px){header{align-items:flex-start;flex-direction:column}
+      main{padding:10px}.panel{padding:12px}th,td{padding:7px 5px}}
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>Argus Administration</h1><div id="who" class="identity">Loading session</div></div>
+  <div class="actions"><a class="button" href="/operate">Operations</a>
+    <button id="logout">Log out</button></div>
+</header>
+<main>
+  <div class="banner">Local HTTP session. The cookie is not protected from a capable local packet observer.</div>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="accounts" data-cap="manage_users">Accounts</button>
+    <button data-tab="roles" data-cap="manage_roles">Roles</button>
+    <button data-tab="configuration">Configuration</button>
+    <button data-tab="security">Security</button>
+    <button data-tab="audit" data-cap="view_audit">Audit</button>
+  </nav>
+
+  <section id="overview" class="active">
+    <div class="grid">
+      <div class="panel"><h2>Controller</h2><div id="controller">Loading</div></div>
+      <div class="panel"><h2>Session</h2><div id="session">Loading</div></div>
+      <div class="panel wide"><h2>Effective capabilities</h2><div id="caps"></div></div>
+    </div>
+  </section>
+
+  <section id="accounts" data-cap="manage_users">
+    <div class="grid">
+      <form id="account-create" class="panel">
+        <h2>Create account</h2>
+        <label for="account-id">Immutable ID</label><input id="account-id" maxlength="36" required>
+        <label for="account-login">Username</label><input id="account-login" maxlength="32" required>
+        <label for="account-display">Display name</label><input id="account-display" maxlength="64" required>
+        <label for="account-scope">Scope</label><input id="account-scope" maxlength="32" value="paladin" required>
+        <label for="account-level">Built-in level</label>
+        <select id="account-level"><option value="viewer">Viewer</option>
+          <option value="operator">Operator</option><option value="supervisor">Supervisor</option>
+          <option value="client_admin">Client Administrator</option></select>
+        <label for="account-permissions">Additional capability IDs</label>
+        <textarea id="account-permissions"></textarea>
+        <label for="account-password">Password</label>
+        <input id="account-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+        <div class="actions"><button class="primary" type="submit">Create</button></div>
+        <div class="status"></div>
+      </form>
+      <div class="panel wide"><h2>Human accounts</h2><div id="accounts-table" class="table"></div></div>
+    </div>
+  </section>
+
+  <section id="roles" data-cap="manage_roles">
+    <div class="grid">
+      <form id="role-create" class="panel">
+        <h2>Create custom role</h2>
+        <label for="role-id">Immutable ID</label><input id="role-id" maxlength="36" required>
+        <label for="role-level">Ceiling</label>
+        <select id="role-level"><option value="viewer">Viewer</option>
+          <option value="operator">Operator</option><option value="supervisor">Supervisor</option>
+          <option value="client_admin">Client Administrator</option></select>
+        <label for="role-permissions">Capability IDs</label><textarea id="role-permissions" required></textarea>
+        <label for="role-delegable">Delegable capability IDs</label><textarea id="role-delegable"></textarea>
+        <div class="actions"><button class="primary" type="submit">Create</button></div>
+        <div class="status"></div>
+      </form>
+      <div class="panel wide"><h2>Custom roles</h2><div id="roles-table" class="table"></div></div>
+    </div>
+  </section>
+
+  <section id="configuration">
+    <div class="grid">
+      <form id="identity-form" class="panel" data-any-cap="modify_identity,modify_protected_config">
+        <h2>Identity</h2>
+        <label for="client-id">Client ID</label><input id="client-id" maxlength="32">
+        <label for="unit-id">Unit ID</label><input id="unit-id" maxlength="32">
+        <label for="device-name">Device name</label><input id="device-name" maxlength="64">
+        <div class="actions"><button class="primary" type="submit">Save identity</button></div>
+        <div class="status"></div>
+      </form>
+      <form id="wifi-form" class="panel" data-any-cap="manage_client_network,modify_protected_config">
+        <h2>Client network</h2>
+        <label for="sta-ssid">STA SSID</label><input id="sta-ssid" maxlength="32">
+        <label for="sta-password">STA password</label>
+        <input id="sta-password" type="password" maxlength="63" autocomplete="new-password">
+        <label><input id="sta-clear" type="checkbox" style="width:auto"> Clear saved STA password</label>
+        <div class="actions"><button class="primary" type="submit">Save network</button></div>
+        <div class="status"></div>
+      </form>
+      <div class="panel" data-cap="manage_client_network"><h2>Network actions</h2>
+        <div class="actions"><button id="reconnect">Reconnect STA</button>
+          <button id="restart">Restart controller</button></div><div class="status"></div></div>
+      <div class="panel" data-cap="commission"><h2>Configuration reset</h2>
+        <div class="actions"><button id="factory-reset" class="danger">Factory reset</button></div>
+        <div class="status"></div></div>
+    </div>
+  </section>
+
+  <section id="security">
+    <div class="grid">
+      <form id="reauth-form" class="panel"><h2>Recent reauthentication</h2>
+        <label for="reauth-password">Current password</label>
+        <input id="reauth-password" type="password" maxlength="128" autocomplete="current-password" required>
+        <div class="actions"><button class="primary" type="submit">Reauthenticate</button></div>
+        <div class="status"></div>
+      </form>
+      <form id="self-password-form" class="panel"><h2>Change my password</h2>
+        <label for="self-current">Current password</label><input id="self-current" type="password" maxlength="128" autocomplete="current-password" required>
+        <label for="self-new">New password</label><input id="self-new" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+        <label for="self-confirm">Confirm new password</label><input id="self-confirm" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+        <div class="actions"><button class="primary" type="submit">Change password</button></div>
+        <div class="status"></div>
+      </form>
+      <form id="ap-password-form" class="panel" data-all-cap="manage_network,change_ap_secret"><h2>Active SoftAP password</h2>
+        <label for="ap-current">Current password</label><input id="ap-current" type="password" maxlength="63" autocomplete="current-password" required>
+        <label for="ap-new">New password</label><input id="ap-new" type="password" minlength="12" maxlength="63" autocomplete="new-password" required>
+        <label for="ap-confirm">Confirm new password</label><input id="ap-confirm" type="password" minlength="12" maxlength="63" autocomplete="new-password" required>
+        <div class="actions"><button class="primary" type="submit">Change active AP password</button></div>
+        <div class="status"></div>
+      </form>
+      <div class="panel" data-cap="invoke_recovery"><h2>Security recovery</h2>
+        <div id="recovery-state" class="status"></div>
+        <div class="actions"><button id="recovery-exit">Exit recovery and restart</button></div></div>
+    </div>
+  </section>
+
+  <section id="audit" data-cap="view_audit">
+    <div class="panel"><div class="actions"><button id="audit-refresh">Refresh</button></div>
+      <div id="audit-table" class="table"></div></div>
+  </section>
+</main>
+
+<dialog id="account-dialog">
+  <form method="dialog" id="account-action-form"><h2 id="account-dialog-title">Account action</h2>
+    <input id="account-action-id" type="hidden"><input id="account-action" type="hidden">
+    <div id="account-action-fields"></div><div class="status"></div>
+    <div class="actions"><button value="cancel">Cancel</button>
+      <button id="account-action-submit" class="primary" value="default">Apply</button></div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+  "use strict";
+  const nativeFetch = window.fetch.bind(window);
+  const runtime = {csrf:"", caps:new Set(), session:null, roles:[]};
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const setStatus = (form, message, ok=false) => {
+    const node = form.querySelector(".status");
+    if (node) { node.textContent = message; node.className = "status " + (ok ? "ok" : "error"); }
+  };
+  const permissionList = value => value.split(",").map(v => v.trim()).filter(Boolean);
+  async function request(url, options={}) {
+    const method = (options.method || "GET").toUpperCase();
+    options.credentials = "same-origin";
+    options.headers = new Headers(options.headers || {});
+    if (!["GET","HEAD"].includes(method)) {
+      options.headers.set("Content-Type","application/json");
+      options.headers.set("X-Argus-CSRF", runtime.csrf);
+    }
+    const response = await nativeFetch(url, options);
+    if (response.status === 401) { location.href="/login"; throw new Error("session expired"); }
+    const text = await response.text();
+    let data={}; try { data = text ? JSON.parse(text) : {}; } catch (_) { throw new Error("invalid controller response"); }
+    if (!response.ok) throw new Error(data.error || "request rejected");
+    return data;
+  }
+  const post = (url, body) => request(url,{method:"POST",body:JSON.stringify(body)});
+  function applyCapabilities() {
+    document.querySelectorAll("[data-cap]").forEach(node =>
+      node.classList.toggle("hidden", !runtime.caps.has(node.dataset.cap)));
+    document.querySelectorAll("[data-any-cap]").forEach(node => {
+      const required=node.dataset.anyCap.split(",");
+      node.classList.toggle("hidden", !required.some(v=>runtime.caps.has(v)));
+    });
+    document.querySelectorAll("[data-all-cap]").forEach(node => {
+      const required=node.dataset.allCap.split(",");
+      node.classList.toggle("hidden", !required.every(v=>runtime.caps.has(v)));
+    });
+  }
+  async function bootstrap() {
+    const session = await request("/api/auth/session");
+    runtime.csrf=session.csrf; runtime.session=session;
+    runtime.caps=new Set(session.capabilities || []);
+    $("who").textContent=`${session.principal.display_name} · ${session.principal.role}`;
+    $("session").innerHTML=`<div>Principal: ${esc(session.principal.id)}</div>
+      <div>Idle limit: ${esc(session.session.idle_timeout_s)} s</div>
+      <div>Absolute limit: ${esc(session.session.absolute_timeout_s)} s</div>`;
+    $("recovery-state").textContent=session.security_recovery ? "Recovery mode active" : "Recovery mode inactive";
+    $("recovery-exit").disabled=!session.security_recovery;
+    $("caps").innerHTML=(session.capabilities||[]).map(v=>`<span class="tag">${esc(v)}</span>`).join(" ");
+    applyCapabilities();
+    const canReadConfig=["modify_identity","manage_client_network","modify_protected_config"]
+      .some(cap=>runtime.caps.has(cap));
+    const [identity,status,config]=await Promise.all([
+      request("/api/identity"),request("/api/status"),
+      canReadConfig ? request("/api/config") : Promise.resolve({})]);
+    $("controller").innerHTML=`<div>${esc(identity.device_name)}</div>
+      <div>${esc(identity.firmware_version)}</div><div>${esc(status.network.mode)}</div>
+      <div>Authority: ${esc(status.authority.mode)} / ${esc(status.authority.owner)}</div>`;
+    $("client-id").value=config.client_id||"";$("unit-id").value=config.unit_id||"";
+    $("device-name").value=config.device_name||"";$("sta-ssid").value=config.sta_ssid||"";
+    if (runtime.caps.has("manage_users")) await loadAccounts();
+    if (runtime.caps.has("manage_roles")) await loadRoles();
+    if (runtime.caps.has("view_audit")) await loadAudit();
+  }
+  $("tabs").addEventListener("click", event => {
+    const button=event.target.closest("button[data-tab]"); if(!button||button.classList.contains("hidden"))return;
+    document.querySelectorAll("nav button").forEach(v=>v.classList.remove("active"));
+    document.querySelectorAll("main section").forEach(v=>v.classList.remove("active"));
+    button.classList.add("active");$(button.dataset.tab).classList.add("active");
+  });
+  async function loadAccounts() {
+    const data=await request("/api/security/accounts");
+    const rows=(data.accounts||[]).map(a=>`<tr><td>${esc(a.display_name)}<br><span class="identity">${esc(a.username)}</span></td>
+      <td>${esc(a.id)}</td><td>${esc(a.level)}</td><td>${a.enabled?"Enabled":"Disabled"}</td>
+      <td><div class="actions"><button data-account="${esc(a.id)}" data-action="${a.enabled?"disable":"enable"}">${a.enabled?"Disable":"Enable"}</button>
+      <button data-account="${esc(a.id)}" data-action="update_display">Rename</button>
+      <button data-account="${esc(a.id)}" data-action="assign_roles">Roles</button>
+      <button data-account="${esc(a.id)}" data-action="reset_password">Reset password</button>
+      <button data-account="${esc(a.id)}" data-action="revoke_sessions">Revoke sessions</button>
+      <button class="danger" data-account="${esc(a.id)}" data-action="delete">Delete</button></div></td></tr>`).join("");
+    $("accounts-table").innerHTML=`<table><thead><tr><th>Account</th><th>ID</th><th>Level</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  $("account-create").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/security/accounts",{id:$("account-id").value,username:$("account-login").value,
+      display_name:$("account-display").value,scope:$("account-scope").value,level:$("account-level").value,
+      permissions:permissionList($("account-permissions").value),password:$("account-password").value});
+      form.reset();$("account-password").value="";setStatus(form,"Account created",true);await loadAccounts();
+    }catch(error){setStatus(form,error.message);}finally{$("account-password").value="";}
+  });
+  $("accounts-table").addEventListener("click",event=>{
+    const button=event.target.closest("button[data-account]");if(!button)return;
+    const action=button.dataset.action,id=button.dataset.account;
+    if(["enable","disable","delete","revoke_sessions"].includes(action)){
+      if((action==="delete"||action==="disable")&&!confirm(`${action} ${id}?`))return;
+      post("/api/security/accounts/action",{action,id}).then(loadAccounts).catch(e=>alert(e.message));return;
+    }
+    $("account-action-id").value=id;$("account-action").value=action;
+    $("account-dialog-title").textContent=`${action.replace("_"," ")}: ${id}`;
+    $("account-action-fields").innerHTML=action==="reset_password"
+      ? `<label>New password</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>`
+      : action==="update_display"
+      ? `<label>Display name</label><input name="display_name" maxlength="64" required>`
+      : `<label>Custom role IDs</label><textarea name="roles" placeholder="${esc(runtime.roles.map(r=>r.id).join(", "))}"></textarea>`;
+    $("account-dialog").showModal();
+  });
+  $("account-action-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    const action=$("account-action").value,id=$("account-action-id").value;
+    const body={action,id};const password=form.elements.password;
+    if(password)body.password=password.value;
+    const display=form.elements.display_name;if(display)body.display_name=display.value;
+    const roles=form.elements.roles;if(roles)body.roles=permissionList(roles.value);
+    try{await post("/api/security/accounts/action",body);$("account-dialog").close();await loadAccounts();}
+    catch(error){setStatus(form,error.message);}finally{if(password)password.value="";}
+  });
+  async function loadRoles(){
+    const data=await request("/api/security/roles");runtime.roles=data.custom_roles||[];
+    $("roles-table").innerHTML=`<table><thead><tr><th>ID</th><th>Level</th><th>Actions</th></tr></thead><tbody>${
+      runtime.roles.map(r=>`<tr><td>${esc(r.id)}</td><td>${esc(r.level)}</td><td><button class="danger" data-role="${esc(r.id)}">Delete</button></td></tr>`).join("")
+    }</tbody></table>`;
+  }
+  $("role-create").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/security/roles",{id:$("role-id").value,level:$("role-level").value,
+      permissions:permissionList($("role-permissions").value),delegable_permissions:permissionList($("role-delegable").value)});
+      form.reset();setStatus(form,"Role created",true);await loadRoles();
+    }catch(error){setStatus(form,error.message);}
+  });
+  $("roles-table").addEventListener("click",event=>{
+    const button=event.target.closest("button[data-role]");if(!button)return;
+    if(confirm(`Delete role ${button.dataset.role}?`))post("/api/security/roles",{action:"delete",id:button.dataset.role}).then(loadRoles).catch(e=>alert(e.message));
+  });
+  $("identity-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/config/save",{scope:"identity",client_id:$("client-id").value,
+      unit_id:$("unit-id").value,device_name:$("device-name").value});setStatus(form,"Identity saved",true);}
+    catch(error){setStatus(form,error.message);}
+  });
+  $("wifi-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/config/save",{scope:"wifi",sta_ssid:$("sta-clear").checked ? "" : $("sta-ssid").value,
+      sta_pass:$("sta-clear").checked ? "" : $("sta-password").value});
+      $("sta-password").value="";setStatus(form,"Network configuration saved",true);}
+    catch(error){setStatus(form,error.message);}finally{$("sta-password").value="";}
+  });
+  $("reconnect").onclick=()=>post("/api/network/reconnect",{}).then(()=>alert("Reconnect accepted")).catch(e=>alert(e.message));
+  $("restart").onclick=()=>confirm("Restart controller?")&&post("/api/restart",{}).then(()=>alert("Restart accepted")).catch(e=>alert(e.message));
+  $("factory-reset").onclick=()=>confirm("Erase customer configuration and reboot? Security credentials are preserved.")&&
+    post("/api/factory-reset",{confirm:"FACTORY_RESET"}).then(()=>alert("Factory reset accepted")).catch(e=>alert(e.message));
+  $("reauth-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/auth/reauth",{current_password:$("reauth-password").value});setStatus(form,"Recent authentication established",true);}
+    catch(error){setStatus(form,error.message);}finally{$("reauth-password").value="";}
+  });
+  $("self-password-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/auth/change-password",{current_password:$("self-current").value,
+      new_password:$("self-new").value,confirm_password:$("self-confirm").value});
+      location.href="/login";
+    }catch(error){setStatus(form,error.message);}finally{form.reset();}
+  });
+  $("ap-password-form").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    try{await post("/api/security/ap-password",{current_password:$("ap-current").value,
+      new_password:$("ap-new").value,confirm_password:$("ap-confirm").value});
+      setStatus(form,"Accepted. Reconnect to the SoftAP with the new password.",true);
+    }catch(error){setStatus(form,error.message);}finally{form.reset();}
+  });
+  $("recovery-exit").onclick=()=>confirm("Exit security recovery and restart?")&&
+    post("/api/security/recovery/exit",{}).then(()=>alert("Recovery exit accepted")).catch(e=>alert(e.message));
+  async function loadAudit(){
+    const data=await request("/api/security/audit");
+    $("audit-table").innerHTML=`<div class="identity">Retained ${esc(data.count)} · overwritten ${esc(data.overwritten)}</div>
+      <table><thead><tr><th>Sequence</th><th>Event</th><th>Outcome</th><th>Actor</th><th>Target</th><th>Reason</th></tr></thead><tbody>${
+      (data.events||[]).map(e=>`<tr><td>${esc(e.sequence)}</td><td>${esc(e.event_type)}</td><td>${esc(e.outcome)}</td>
+      <td>${esc(e.actor)}</td><td>${esc(e.target)}</td><td>${esc(e.reason)}</td></tr>`).join("")
+    }</tbody></table>`;
+  }
+  $("audit-refresh").onclick=()=>loadAudit().catch(e=>alert(e.message));
+  $("logout").onclick=()=>post("/api/auth/logout",{}).then(()=>location.href="/login").catch(e=>alert(e.message));
+  bootstrap().catch(error=>{$("who").textContent=error.message;});
+})();
+</script>
+</body>
+</html>
