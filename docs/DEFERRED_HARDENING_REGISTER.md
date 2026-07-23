@@ -357,7 +357,7 @@ Direct privileged mutation of a locked identity remains intentionally unsupporte
 
 **Known residual risks:** Fleet-wide factory credential exposure; HTTP credential and session observation by an attacker already present on the AP; non-TLS MQTT credential and payload observation by an attacker on the trusted network; physical extraction because Phase 4D.2 software-stored NVS XTS keys are readable without eFuse/HMAC derivation or flash encryption; denial-of-service and resource-exhaustion limits; bounded local audit capacity; and the absence of trustworthy wall-clock time until a verified source is available.
 
-**Acceptance boundary:** Phase 4D.2 adds protected logical storage, verifier, migration, provisioning, and local recovery foundations but does not claim physical-extraction resistance or complete authentication/authorization. Later implementations must preserve truthful deployment limits and fail closed where protected security state is unavailable or corrupt.
+**Acceptance boundary:** Phase 4D.2 adds protected logical storage, verifier, migration, provisioning, and local recovery foundations but does not claim physical-extraction resistance. Phase 4D.3/4D.3a add accepted local human authentication, authorization, truthful bounded audit lifecycle/pagination, and response-before-transition behavior. Machine authentication, encrypted HTTP/MQTT transport, physical-extraction resistance, hostile-network operation, and broad penetration acceptance remain open. Later implementations must preserve truthful deployment limits and fail closed where protected security state is unavailable or corrupt.
 
 ## Register Maintenance
 
