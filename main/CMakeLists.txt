@@ -36,6 +36,7 @@ idf_component_register(
         "argus_tests_4b5.c"
         "argus_tests_4b6.c"
         "argus_tests_4c.c"
+        "argus_tests_4d2.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES
