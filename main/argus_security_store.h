@@ -266,6 +266,9 @@ esp_err_t argus_security_store_get_factory_ap_secret(
     uint8_t *out, size_t out_size, size_t *out_len);
 esp_err_t argus_security_store_get_active_ap_secret(
     uint8_t *out, size_t out_size, size_t *out_len);
+esp_err_t argus_security_store_replace_active_ap_secret(
+    const uint8_t *current, size_t current_len,
+    const uint8_t *replacement, size_t replacement_len);
 
 esp_err_t argus_security_store_set_console_verifier(
     const argus_password_verifier_t *record, bool allow_replace);

@@ -45,10 +45,8 @@
  *   - POST /api/factory-reset: Strictly confirmed, deferred configuration reset.
  *
  * Access control:
- *   The portal is reachable through all interfaces on which the HTTP server
- *   listens (AP and STA when in APSTA mode). Access is protected by HTTP
- *   Basic authentication with forced password change on first use. See
- *   docs/DEFERRED_HARDENING_REGISTER.md for accepted security limitations.
+ *   Human browser routes are SoftAP-only. Phase 4D.3 session, capability,
+ *   Origin, Content-Type, and CSRF middleware protects each classified route.
  *
  * Configuration write gates:
  *   Config writes (POST /api/config/save) are only allowed in:
@@ -57,9 +55,9 @@
  *   Restart is allowed in all HTTP-active modes (motion safety checked).
  *
  * Security:
- *   - HTTP Basic Auth on all endpoints (except /api/logout).
- *   - Bootstrap credential disabled after successful password replacement.
- *   - Credential-storage errors fail closed.
+ *   - HTTP Basic Auth is retired and has no compatibility fallback.
+ *   - Credentials use the encrypted Phase 4D security stores.
+ *   - Authentication and credential-storage errors fail closed.
  *   - No secrets returned (passwords, AP credentials, WiFi passwords).
  *   - sta_pass_set boolean replaces actual password in config responses.
  *   - No permissive CORS headers.
@@ -67,7 +65,7 @@
  *   - Method validation on all handlers.
  *   - Content-Type validation on POST endpoints.
  *   - HTML escaping on all device-supplied values in the portal DOM.
- *   - Password buffers zeroed after use.
+ *   - Password buffers are zeroed after use where technically meaningful.
  */
 
 #pragma once
@@ -76,6 +74,7 @@
 #include "argus_state_mgr.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -160,14 +159,20 @@ bool argus_http_test_command_registration(void);
 /** @brief Confirm the factory-reset production POST registration. */
 bool argus_http_test_factory_reset_registration(void);
 
-/** @brief Return the embedded service dashboard for pure contract tests. */
-const char *argus_http_test_portal_page(size_t *out_len);
-
 /** @brief Confirm the dedicated controls-page production registration. */
 bool argus_http_test_controls_registration(void);
 
 /** @brief Return the embedded controls page for pure contract tests. */
 const char *argus_http_test_controls_page(size_t *out_len);
+
+/** @brief Return the embedded commissioning page for contract tests. */
+const char *argus_http_test_commission_page(size_t *out_len);
+
+/** @brief Exercise the strict production login decoder. */
+bool argus_http_test_decode_login(const uint8_t *body, size_t body_len);
+
+/** @brief Return the production browser-command capability mapping. */
+uint64_t argus_http_test_command_capability(uint32_t command_type);
 #endif
 
 #ifdef __cplusplus

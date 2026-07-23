@@ -39,6 +39,11 @@
 #include "argus_password_verifier.h"
 #include "argus_security_migration.h"
 #include "argus_security_store.h"
+#include "argus_security_directory.h"
+#include "argus_session_manager.h"
+#include "argus_auth_service.h"
+#include "argus_security_audit.h"
+#include "argus_security_http.h"
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
 
@@ -771,7 +776,12 @@ void app_main(void)
 
     // 2a. Initialize encrypted security storage and bounded KDF worker.
     ESP_ERROR_CHECK(argus_security_store_init());
+    ESP_ERROR_CHECK(argus_security_directory_init());
+    ESP_ERROR_CHECK(argus_session_manager_init());
     ESP_ERROR_CHECK(argus_password_verifier_init());
+    ESP_ERROR_CHECK(argus_auth_service_init());
+    ESP_ERROR_CHECK(argus_security_audit_init());
+    ESP_ERROR_CHECK(argus_security_http_init());
 
     // 2b. One-time staged migration of the unchanged build-provisioned AP
     // credential into separate factory and active encrypted records.

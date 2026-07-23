@@ -30,6 +30,14 @@ idf_component_register(
         "argus_security_migration.c"
         "argus_security_provisioning.c"
         "argus_local_recovery.c"
+        "argus_authorization.c"
+        "argus_session_manager.c"
+        "argus_security_directory.c"
+        "argus_auth_service.c"
+        "argus_http_security.c"
+        "argus_security_audit.c"
+        "argus_security_admin.c"
+        "argus_security_http.c"
         "argus_tests_4a.c"
         "argus_tests_4b4.c"
         "argus_tests_4b4_step2.c"
@@ -37,10 +45,13 @@ idf_component_register(
         "argus_tests_4b6.c"
         "argus_tests_4c.c"
         "argus_tests_4d2.c"
+        "argus_tests_4d3.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES
         "argus_controls.html"
+        "argus_login.html"
+        "argus_commission.html"
     REQUIRES
         console
         esp_driver_usb_serial_jtag
@@ -57,4 +68,5 @@ idf_component_register(
         esp_timer
         esp_http_server
         mbedtls
+        json
 )
