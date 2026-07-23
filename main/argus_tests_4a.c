@@ -5111,7 +5111,7 @@ static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3 Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -5447,7 +5447,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3 Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -5490,7 +5490,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4D.3 PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4D.3a PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 
