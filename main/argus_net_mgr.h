@@ -24,6 +24,8 @@ typedef enum {
     ARGUS_NET_MODE_AP_DISCOVERABLE,
     ARGUS_NET_MODE_SERVICE_TRANSITION,
     ARGUS_NET_MODE_SERVICE_AP_ONLY,
+    ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION,
+    ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY,
     ARGUS_NET_MODE_NETWORK_FAULT
 } argus_network_mode_t;
 
@@ -81,7 +83,8 @@ typedef enum {
     ARGUS_NET_ERR_RESET_FAILED,
     ARGUS_NET_ERR_REBOOT_PREP_FAILED,
     ARGUS_NET_ERR_TIMER_COMMAND_FAILED,
-    ARGUS_NET_ERR_WIFI_TRANSACTION_FAILED
+    ARGUS_NET_ERR_WIFI_TRANSACTION_FAILED,
+    ARGUS_NET_ERR_SECURITY_RECOVERY_FAILED
 } argus_net_err_t;
 
 typedef enum {
@@ -97,7 +100,8 @@ typedef enum {
     ARGUS_NET_EVT_MANUAL_RECONNECT_REQUEST,/**< Operator requests manual Wi-Fi reconnect */
     ARGUS_NET_EVT_AUTO_RECONNECT_WAKEUP,   /**< Timer wakeup for auto-reconnect */
     ARGUS_NET_EVT_APPLY_WIFI_CONFIG,       /**< Apply new Wi-Fi credentials without restart */
-    ARGUS_NET_EVT_STA_STOPPED              /**< Wi-Fi driver confirms physical STA stop */
+    ARGUS_NET_EVT_STA_STOPPED,             /**< Wi-Fi driver confirms physical STA stop */
+    ARGUS_NET_EVT_SECURITY_RECOVERY_REQUEST /**< Physical KEY1 recovery request */
 } argus_net_event_type_t;
 
 typedef enum {
@@ -467,6 +471,14 @@ esp_err_t argus_net_mgr_request_restart(void);
  *         when policy rejects; ESP_ERR_NOT_SUPPORTED when already pending.
  */
 esp_err_t argus_net_mgr_request_factory_reset(void);
+
+/**
+ * @brief Queue physically local AP-only security recovery.
+ *
+ * This operation changes network lifecycle only. It does not dispatch a
+ * command or mutate machine state, target, E-stop/fault, or authority.
+ */
+esp_err_t argus_net_mgr_request_security_recovery(void);
 
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);

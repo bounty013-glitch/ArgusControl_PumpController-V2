@@ -69,6 +69,8 @@
 #include "argus_browser_command_endpoint.h"
 #include "argus_cmd_router.h"
 #include "argus_factory_reset.h"
+#include "argus_password_verifier.h"
+#include "argus_security_store.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -122,6 +124,19 @@ static void portal_get_credentials(char *out_pw, bool *out_is_default)
 {
     out_pw[0] = '\0';
     *out_is_default = true;
+
+    argus_password_verifier_t verifier = {0};
+    esp_err_t verifier_err = argus_security_store_get_console_verifier(
+        &verifier, NULL);
+    argus_password_zeroize(&verifier, sizeof(verifier));
+    if (verifier_err == ESP_OK) {
+        *out_is_default = false;
+        return;
+    }
+    if (verifier_err != ESP_ERR_NOT_FOUND) {
+        *out_is_default = false;
+        return;
+    }
 
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READONLY, &nvs);
@@ -180,17 +195,31 @@ static void portal_get_credentials(char *out_pw, bool *out_is_default)
  */
 static esp_err_t portal_set_password(const char *new_pw)
 {
-    nvs_handle_t nvs;
-    esp_err_t err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (new_pw == NULL) return ESP_ERR_INVALID_ARG;
+    argus_password_verifier_t verifier = {0};
+    esp_err_t err = argus_password_verifier_create(
+        (const uint8_t *)new_pw, strlen(new_pw),
+        ARGUS_PASSWORD_ITERATIONS_DEFAULT, &verifier);
+    if (err == ESP_OK) {
+        err = argus_security_store_set_console_verifier(&verifier, true);
+    }
+    argus_password_zeroize(&verifier, sizeof(verifier));
     if (err != ESP_OK) return err;
 
-    err = nvs_set_str(nvs, PORTAL_NVS_KEY_PW, new_pw);
-    if (err == ESP_OK) {
-        err = nvs_set_u8(nvs, PORTAL_NVS_KEY_PW_SET, 1);
+    /* Compatibility plaintext is removed only after the encrypted verifier
+     * commit and readback have succeeded. */
+    nvs_handle_t nvs;
+    err = nvs_open(PORTAL_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    if (err != ESP_OK) return err;
+    esp_err_t pw_err = nvs_erase_key(nvs, PORTAL_NVS_KEY_PW);
+    if (pw_err != ESP_OK && pw_err != ESP_ERR_NVS_NOT_FOUND) err = pw_err;
+    esp_err_t marker_err = nvs_erase_key(nvs, PORTAL_NVS_KEY_PW_SET);
+    if (err == ESP_OK && marker_err != ESP_OK &&
+        marker_err != ESP_ERR_NVS_NOT_FOUND) {
+        err = marker_err;
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
-    }
+    if (err == ESP_OK) err = nvs_commit(nvs);
     nvs_close(nvs);
     return err;
 }
@@ -241,6 +270,24 @@ static bool check_auth(httpd_req_t *req)
     const char *password = colon + 1;
 
     if (strcmp(username, PORTAL_DEFAULT_USER) != 0) {
+        goto unauthorized;
+    }
+
+    argus_password_verifier_t verifier = {0};
+    esp_err_t verifier_err = argus_security_store_get_console_verifier(
+        &verifier, NULL);
+    if (verifier_err == ESP_OK) {
+        bool match = false;
+        esp_err_t verify_err = argus_password_verifier_verify(
+            (const uint8_t *)password, strlen(password), &verifier, &match);
+        argus_password_zeroize(&verifier, sizeof(verifier));
+        memset(decoded, 0, sizeof(decoded));
+        if (verify_err != ESP_OK || !match) goto unauthorized;
+        return true;
+    }
+    argus_password_zeroize(&verifier, sizeof(verifier));
+    if (verifier_err != ESP_ERR_NOT_FOUND) {
+        memset(decoded, 0, sizeof(decoded));
         goto unauthorized;
     }
 

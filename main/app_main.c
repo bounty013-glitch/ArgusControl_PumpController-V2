@@ -35,6 +35,10 @@
 #include "argus_net_mgr.h"
 #include "argus_console_helpers.h"
 #include "argus_http_server.h"
+#include "argus_local_recovery.h"
+#include "argus_password_verifier.h"
+#include "argus_security_migration.h"
+#include "argus_security_store.h"
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
 
@@ -530,6 +534,8 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
             printf("[t] Run ALL PURE unit tests (Mock backends)\n");
+            printf("[k] Display sanitized security status and KDF benchmark\n");
+            printf("[K] Diagnostic-only recovery cleanup and reboot\n");
             printf("[N] Network & Authority Acceptance Submenu\n");
             printf("[H] Request LOCAL_SERVICE CLI Authority & Open HARDWARE ACCEPTANCE menu\n");
         print_menu = false;
@@ -671,6 +677,63 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 printf("Running PURE unit tests...\n");
                 argus_tests_4a_run_all();
                 break;
+            case 'k': {
+                argus_security_store_status_t security;
+                argus_local_recovery_status_t recovery;
+                printf("\n--- Phase 4D.2 Security Foundation ---\n");
+                if (argus_security_store_get_status(&security) == ESP_OK) {
+                    printf("Store State        : %u\n", (unsigned)security.state);
+                    printf("Schema/Generation  : %u / %lu\n",
+                           (unsigned)security.schema_version,
+                           (unsigned long)security.generation);
+                    printf("Security Epoch     : %lu\n",
+                           (unsigned long)security.security_epoch);
+                    printf("AP Domains         : factory=%s active=%s\n",
+                           security.factory_ap_provisioned ? "PROVISIONED" : "MISSING",
+                           security.active_ap_provisioned ? "PROVISIONED" : "MISSING");
+                    printf("Console Verifier   : %s\n",
+                           security.console_verifier_provisioned ? "PROVISIONED" : "DEFERRED");
+                    printf("Migration/Recovery : %u / %u\n",
+                           (unsigned)security.migration_state,
+                           (unsigned)security.recovery_state);
+                    printf("Encrypted NVS      : %s (key remains physically extractable)\n",
+                           security.encryption_enabled ? "ACTIVE" : "INACTIVE");
+                }
+                if (argus_local_recovery_get_status(&recovery) == ESP_OK) {
+                    printf("KEY1 Detector      : release=%s qualified=%s triggered=%s count=%lu\n",
+                           recovery.startup_release_seen ? "YES" : "NO",
+                           recovery.hold_qualified ? "YES" : "NO",
+                           recovery.triggered ? "YES" : "NO",
+                           (unsigned long)recovery.trigger_count);
+                }
+                static const uint32_t candidates[] = {
+                    10000U, 25000U, 50000U, 100000U,
+                };
+                for (size_t i = 0U;
+                     i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+                    argus_password_benchmark_t benchmark;
+                    esp_err_t benchmark_err = argus_password_verifier_benchmark(
+                        candidates[i], &benchmark);
+                    if (benchmark_err == ESP_OK) {
+                        printf("KDF %6lu iterations: %lums heap=%u->%u stack_hwm=%lu bytes\n",
+                               (unsigned long)benchmark.iterations,
+                               (unsigned long)benchmark.elapsed_ms,
+                               (unsigned)benchmark.free_heap_before,
+                               (unsigned)benchmark.free_heap_after,
+                               (unsigned long)benchmark.worker_stack_high_water_bytes);
+                    } else {
+                        printf("KDF %6lu iterations: ERROR %s\n",
+                               (unsigned long)candidates[i],
+                               esp_err_to_name(benchmark_err));
+                    }
+                }
+                break;
+            }
+            case 'K': {
+                esp_err_t cleanup_err = argus_local_recovery_clear_for_test();
+                printf("Recovery cleanup: %s\n", esp_err_to_name(cleanup_err));
+                break;
+            }
             case 'N':
                 argus_phase4a_acceptance_menu();
                 break;
@@ -705,6 +768,29 @@ void app_main(void)
 
     // 2. Initialize Power-Loss-Safe Dual-Slot NVS Configuration (production storage)
     ESP_ERROR_CHECK(argus_nvs_config_init(NULL));
+
+    // 2a. Initialize encrypted security storage and bounded KDF worker.
+    ESP_ERROR_CHECK(argus_security_store_init());
+    ESP_ERROR_CHECK(argus_password_verifier_init());
+
+    // 2b. One-time staged migration of the unchanged build-provisioned AP
+    // credential into separate factory and active encrypted records.
+    esp_err_t ap_bootstrap_err = argus_security_store_bootstrap_ap_secrets(
+        (const uint8_t *)CONFIG_ARGUS_SERVICE_AP_PASS,
+        strlen(CONFIG_ARGUS_SERVICE_AP_PASS));
+    if (ap_bootstrap_err != ESP_OK &&
+        ap_bootstrap_err != ESP_ERR_NOT_SUPPORTED) {
+        ESP_ERROR_CHECK(ap_bootstrap_err);
+    }
+
+    // 2c. Migrate a changed legacy portal credential transactionally. The
+    // compiled bootstrap case remains explicit and deferred.
+    argus_security_migration_status_t migration_status;
+    esp_err_t migration_err = argus_security_migration_run(&migration_status);
+    if (migration_err != ESP_OK) {
+        ESP_LOGE(TAG, "Security credential migration failed closed: %s",
+                 esp_err_to_name(migration_err));
+    }
 
     // 3. Initialize V2 Core Configuration
     ESP_ERROR_CHECK(argus_config_init());
@@ -745,6 +831,10 @@ void app_main(void)
     if (net_err != ESP_OK) {
         ESP_LOGE(TAG, "Network manager initialization failed: %s", esp_err_to_name(net_err));
     }
+
+    // 14. Arm post-boot KEY1/GPIO0 local recovery detection. GPIO0 must be
+    // observed released before a 10-second hold can qualify.
+    ESP_ERROR_CHECK(argus_local_recovery_init());
 
     // Launch background tasks
     xTaskCreate(status_task, "status_task", 6144, NULL, 5, NULL);

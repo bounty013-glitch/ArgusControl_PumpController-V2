@@ -4,6 +4,7 @@ managed_components/
 
 # Local SDK/config backups
 sdkconfig
+.local/provisioning/
 sdkconfig.old
 * backup.*
 
