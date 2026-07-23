@@ -1,6 +1,6 @@
 # Phase 4D.3 Implementation Plan
 
-**Status:** IN PROGRESS
+**Status:** COMPLETE AND ACCEPTED
 
 **Branch:** `phase4d3-browser-auth-and-administration`
 
@@ -98,7 +98,7 @@ Security modules may read bounded snapshots but may not call state-manager mutat
 
 ## 6. Login and Credential Contract
 
-`POST /api/auth/login` accepts one exact JSON object containing `username` and `password`. Unknown, duplicate, nested, trailing, malformed, oversized, or truncated input is rejected. Login names are canonical lowercase ASCII, 1 through 32 characters, using letters, digits, `.`, `_`, and `-`; existing provisioned identifiers remain valid under their accepted record policy. New human passwords are 12 through 64 bytes and must contain at least three of lowercase, uppercase, digits, and printable symbols. Passwords remain transient and are zeroized.
+`POST /api/auth/login` accepts one exact JSON object containing `username` and `password`. Unknown, duplicate, nested, trailing, malformed, oversized, or truncated input is rejected. Login names are 1 through 32 visible ASCII characters with no leading/trailing whitespace or control characters; canonical comparison is case-insensitive and preserves a separate display name. Existing provisioned identifiers remain valid under their accepted record policy. New human passwords are 12 through 128 bytes, accept spaces and printable characters, and have no arbitrary composition rule. Passwords remain transient and are zeroized.
 
 Successful login returns a bounded sanitized principal/session response and sets the cookie. Wrong password, unknown principal, disabled account, and revoked account share one externally indistinguishable `401` response. Store corruption or unavailability fails closed. Unknown principals use a fixed synthetic PBKDF2 verifier at the same accepted cost.
 
@@ -121,7 +121,7 @@ The KDF remains on the dedicated worker established in Phase 4D.2. Measurements 
 
 The RAM-only table holds eight sessions total and two per account. Each record contains a random opaque session-token digest, a random CSRF-token digest, stable principal ID/type, effective capability snapshot metadata, credential version, security epoch, creation time, last activity, recent-reauth time, and revocation state. Raw bearer tokens are returned only to the browser and never logged or persisted. Comparisons are constant time.
 
-Idle expiry is 15 minutes; absolute expiry is eight hours; recent reauthentication lasts five minutes. Expired and revoked entries are zeroized. Reboot revokes every session. At the per-account limit, the oldest session for that account is evicted; at the global limit, the oldest non-protected session is evicted. The implementation will report measured RAM cost.
+Idle expiry is 15 minutes; absolute expiry is eight hours; recent reauthentication lasts five minutes. Expired and revoked entries are zeroized. Reboot revokes every session. At either the per-account or global limit, new login fails explicitly; an active privileged session is never silently evicted to admit another login. The implementation will report measured RAM cost.
 
 Cookie contract:
 
@@ -189,6 +189,8 @@ All `Authorization: Basic` parsing, `WWW-Authenticate` challenges, hardcoded `ad
 Validation includes strict host/pure tests, browser JavaScript syntax and functional tests, static boundary audits, secret-pattern review, full-clean ESP-IDF v5.5.3 build, three controller pure-suite executions, SoftAP success/STA rejection proof, login/throttle/session/CSRF/authorization/admin/audit/AP-password/recovery tests, browser/MQTT regressions, and stationary resource observations.
 
 Hardware credential interactions are local and non-echoing. Real values never enter chat, command-line arguments, tracked files, logs, screenshots, or reports. The active AP credential is restored to its pre-test value before final disposition.
+
+Acceptance completed July 23, 2026. Three final controller invocations passed 2,133/2,133 executions with production isolation intact. SoftAP login, STA rejection, bounded throttling, logout, CSRF rejection, protected administration, active AP credential change/restoration, physical recovery entry, authenticated recovery exit, and clean normal-mode reboot passed on hardware. The accepted implementation remains a plain-HTTP trusted-local-network release and provides no physical-extraction resistance.
 
 ## 17. Phase 4D.4 Seams and Remaining Threats
 

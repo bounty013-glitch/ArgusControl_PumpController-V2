@@ -86,7 +86,7 @@ graph TD
     *   Requires strict QoS 1, non-retained command envelopes with current session, newer nonzero sequence, bounded command ID, and topic-specific value.
     *   Serializes accepted MQTT work through a bounded worker queue. The only normal motion path is broker to contract/runtime to command router to authority and state management.
     *   Publishes 25 authoritative retained metadata, state, status, and open-loop telemetry topics plus bounded non-retained command results.
-10. **Security Contract and Foundation (Phase 4D.1 and 4D.2)**:
+10. **Security Contract and Local Browser Access (Phase 4D.1 through 4D.3)**:
     *   Separates AP join secrets, Argus console verifiers, human accounts, browser sessions, machine credentials, MQTT connection identity, and Phase 4C freshness/session state.
     *   Defines deny-by-default roles, permission ceilings, delegation, and operation-boundary authorization without making login equivalent to operating authority.
     *   Restricts human browser traffic to the protected local AP for this plain-HTTP release and defines `/login`, `/operate`, and `/commission` as logical interface boundaries.
@@ -94,7 +94,10 @@ graph TD
     *   Stores versioned role, human, machine, AP-secret, console-verifier, migration, and recovery metadata in a dedicated encrypted NVS partition with atomic dual-slot selection and fail-closed corruption behavior.
     *   Uses PBKDF2-HMAC-SHA-256 verifiers with random salts, bounded cost, constant-time comparison, and a cooperative KDF worker; plaintext secrets are accepted only through bounded provisioning/migration seams.
     *   Uses GPIO0/KEY1 as a post-boot, debounced 10-second physically local trigger for persistent AP-only network recovery. Recovery is idempotent, does not dispatch commands, and preserves machine state and customer configuration.
-    *   Software-stored XTS keys protect against casual plaintext inspection but remain physically extractable. eFuse/HMAC key derivation, flash encryption, secure boot, browser sessions, MQTT machine authentication, HTTPS/TLS, certificates, and hostile-network operation remain deferred.
+    *   Enforces human browser access only through the controller SoftAP using strict local login, bounded RAM-only sessions, per-session CSRF, same-origin request checks, and deny-by-default route capabilities.
+    *   Provides bounded human-account and custom-role administration, target/delegation ceilings, explicit session revocation, a persistent redacted security-audit ring, protected active AP credential changes, and authenticated recovery exit.
+    *   Retires browser Basic Auth without changing the console-verifier domain or granting operating authority at login. Every browser motion request still reaches the existing command router exactly once or is rejected before dispatch.
+    *   Software-stored XTS keys protect against casual plaintext inspection but remain physically extractable. eFuse/HMAC key derivation, flash encryption, secure boot, MQTT machine authentication, HTTPS/TLS, certificates, and hostile-network operation remain deferred.
 
 ---
 
