@@ -73,6 +73,17 @@ gantt
 *   **Evidence**: ESP-IDF v5.5.3 full-clean build with zero warnings/errors and no Phase 4C binary-size or static-RAM change. See `PHASE_4D_SECURITY_CONTRACT.md` and `Phase 4D.1 Tests.md`.
 *   **Next gate**: Phase 4D.2 may begin only under a separately approved scope. No credential or recovery implementation was started here.
 
+#### Phase 4D.2: Security Storage, Credential Foundation, and Local Recovery
+*   **Status**: COMPLETE AND ACCEPTED on July 22, 2026.
+*   **Delivered**:
+    *   Versioned encrypted security records with bounded role, human, machine, AP-secret, verifier, migration, and recovery domains.
+    *   Dual-slot atomic commit/readback and fail-closed missing, corrupt, unsupported-version, and interrupted-write behavior.
+    *   PBKDF2-HMAC-SHA-256 with random salts, constant-time comparison, a dedicated cooperative worker, and local provisioning tooling that does not expose secrets.
+    *   GPIO0/KEY1 short-press rejection and 10-second post-boot hold/release recovery into persistent AP-only mode, including idempotent retrigger and stationary diagnostic cleanup.
+    *   No command-router dispatch, motion mutation, customer-configuration erase, eFuse burn, secure boot, or flash-encryption change.
+*   **Evidence**: Three 660/660 controller suites, physical GPIO0 recovery and cleanup, unchanged AP credential reachability, zero-warning/error ESP-IDF v5.5.3 build, and 64% OTA headroom. See `PHASE_4D_2_IMPLEMENTATION_PLAN.md` and `Phase 4D.2 Tests.md`.
+*   **Next gate**: Phase 4D.3 must separately implement browser sessions, authorization integration, user administration, machine/MQTT authentication, and approved credential lifecycle behavior.
+
 #### Phase 5: Field Integration and Calibration
 *   **Tasks**:
     *   Tune trajectory ramp acceleration.

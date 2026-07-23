@@ -1,6 +1,6 @@
 # Phase 4D.2 - Security Storage, Credential Foundation, and Local Recovery
 
-**Status:** IN PROGRESS
+**Status:** COMPLETE AND ACCEPTED - July 22, 2026
 
 **Branch:** `phase4d2-security-storage-and-recovery`
 
@@ -38,7 +38,7 @@ The stable capability identifier is `manage_client_admins` (`ARGUS_PERMISSION_MA
 | `argus_local_recovery` | GPIO0/KEY1 input policy, debounce/hold/release detector, persistent recovery request, network-manager handoff, and diagnostic-only safe cleanup seam |
 | `argus_net_mgr` | Application of the explicit AP-only security-recovery network state without command dispatch or machine-state mutation |
 
-No security module calls the command router, state manager, trajectory, step generator, or motion GPIOs.
+No production security path calls the command router, state manager mutation APIs, trajectory, step generator, or motion GPIOs. Diagnostic-only recovery cleanup reads a state snapshot to prove the controller is stationary before clearing the recovery marker.
 
 ## 5. Schemas and Limits
 
@@ -67,7 +67,7 @@ The accepted 16 MiB layout ends at `0x660000`. Phase 4D.2 appends aligned partit
 
 The new layout ends at `0x6e1000`, leaving `0x91f000` (9,564,160 bytes) unused. All additions are 4 KiB aligned. The 3 MiB OTA slots remain at `0x20000` and `0x320000`.
 
-The security partition reserves 256 KiB. The implemented dual-slot manifest is deliberately small; capacity calculations also reserve two generations for the maximum 16 human records, 16 role records, 16 machine records, credential metadata, NVS page overhead, wear, migration markers, and future schema growth. Exact compiled record sizes and worst-case consumption are recorded after implementation.
+The security partition reserves 256 KiB. Compiled role, human, machine, manifest, and slot records are 57, 238, 402, 562, and 582 bytes. The conservative dual-generation raw-record calculation is 22,744 bytes before NVS page, wear, and future-schema reserves.
 
 ## 7. NVS Encryption Decision
 
@@ -81,7 +81,7 @@ This arrangement is non-destructive and burns no eFuse, but the key partition is
 
 The verifier format uses PBKDF2-HMAC-SHA-256, a unique 16-byte random salt, a fixed 32-byte verifier, explicit format/algorithm identifiers, and an explicit uint32 iteration count. Accepted passwords are 1 through 64 bytes for the primitive; product-level password policy remains a later authorization/UI concern. Empty, oversized, malformed, unsupported-algorithm, and out-of-range-cost inputs fail closed.
 
-The accepted cost range is bounded in firmware. Candidate costs are benchmarked on the actual ESP32-S3 before the current default is finalized. Production derivation and verification execute only on a dedicated bounded worker task and use `mbedtls_ct_memcmp()` for result comparison. The worker holds no NVS, HTTP, MQTT, authority, state, or motion lock during KDF work.
+The accepted cost range is 10,000 through 500,000 iterations, with a provisional 25,000 default. Final ESP32-S3 measurements were 825 ms, 2,054 ms, 4,108 ms, and 8,215 ms at 10k, 25k, 50k, and 100k. Production derivation and verification execute only on a dedicated bounded worker task, yield one tick every 256 rounds to preserve watchdog health, and use `mbedtls_ct_memcmp()` for result comparison. The worker holds no NVS, HTTP, MQTT, authority, state, or motion lock during KDF work.
 
 ## 9. Provisioning Flow
 
@@ -112,7 +112,7 @@ The running application configures GPIO0 as input with pull-up after normal boot
 
 ## 12. Recovery State and Cleanup
 
-A qualifying release transactionally persists `REQUESTED`, then posts one security-recovery event to the network lifecycle owner. The network manager enters explicit `SECURITY_RECOVERY_AP_ONLY`, uses the separately stored factory AP secret, disables STA/retry activity, and preserves authority and every machine value. It performs no router dispatch and does not invoke factory reset.
+A qualifying release transactionally persists `REQUESTED`, then posts one security-recovery event to the network lifecycle owner. The network manager enters explicit `SECURITY_RECOVERY_AP_ONLY`, uses the separately stored factory AP secret, disables STA/retry activity, and preserves authority and every machine value. A repeated request while recovery is active is idempotent and does not repeat Wi-Fi teardown. Recovery performs no router dispatch and does not invoke factory reset.
 
 The marker survives reboot, so a boot in recovery starts directly in the same AP-only state. Later Phase 4D.3 authenticated Argus Personnel action will clear the marker. For Phase 4D.2 physical validation, a diagnostic-build-only cleanup requires a stationary, E-stop-clear, fault-clear controller, clears only the recovery marker, and performs a controlled reboot to reconstruct the prior network disposition from unchanged commissioned configuration.
 
@@ -132,3 +132,7 @@ Phase 4D.3 will consume verifier lookup, security epoch, user/role schemas, sess
 ## 15. Explicit Exclusions
 
 No complete browser authentication, browser sessions, user/role CRUD API, machine enrollment, MQTT CONNECT authentication, AP-password UI, HTTPS, TLS, certificate infrastructure, eFuse burn, secure boot, irreversible flash-encryption mode, UART/JTAG restriction, motion command, pump/process test, or Phase 4D.3 implementation is authorized or accepted here.
+
+## 16. Acceptance Evidence
+
+ESP-IDF v5.5.3 produced a zero-warning, zero-error full-clean no-ccache build. The final image is 1,132,240 bytes with 2,013,488 bytes (64%) OTA headroom and 182,071 bytes static D/IRAM. Three genuine ConPTY controller invocations passed 660/660 each with complete production isolation. GPIO0 short-press, long-hold, persistence, idempotence, AP reachability, and controlled cleanup were physically validated with the motor absent. See `Phase 4D.2 Tests.md`.

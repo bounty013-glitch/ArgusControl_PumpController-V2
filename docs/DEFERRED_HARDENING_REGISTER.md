@@ -54,14 +54,14 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Credential Storage |
-| **Current Implementation** | Portal password stored as plaintext string in NVS namespace `argus_portal`, key `pw`. |
-| **Known Limitation** | Anyone with physical access to the ESP32's flash can read the password via serial tools or flash dump. NVS encryption is not enabled in this configuration. |
+| **Current Implementation** | Phase 4D.2 introduced a PBKDF2-HMAC-SHA-256 console verifier in dedicated encrypted `sec_store` NVS. A changed legacy portal password migrates only after verifier commit/readback and is then deleted. The temporary Basic-Auth compatibility path uses the verifier when present. |
+| **Known Limitation** | The XTS key is stored in `sec_keys` without eFuse/HMAC derivation or flash encryption and remains physically extractable. Compiled-bootstrap handling and the complete Phase 4D.3 account/session transition remain open. |
 | **Operator Rationale** | Physical access to the ESP32 constitutes complete device compromise regardless of password storage format. Hashed storage (bcrypt/argon2) is preferred but adds complexity and is not justified for a development-phase portal. |
 | **Current Exposure Assumptions** | Controller is in a physically controlled environment. Physical access implies operator trust. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where physical access is not equivalent to operator trust. |
 | **Target Phase** | Phase 4D (Hashed Credential Storage) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | OPEN - PARTIALLY RESOLVED |
+| **Closure Evidence** | Partially resolved by Phase 4D.2 implementation and `Phase 4D.2 Tests.md`; physical extraction and final authentication migration remain open. |
 
 ---
 
@@ -141,14 +141,14 @@
 |-------|-------|
 | **Date Recorded** | 2026-07-18 |
 | **System Area** | HTTP Service Portal — Credential Lifecycle |
-| **Current Implementation** | Portal credentials are stored in NVS namespace `argus_portal`. Factory reset via the diagnostic menu erases the commissioning NVS namespace but may not erase the portal credential namespace. Full NVS erase (`idf.py erase-flash` or `nvs_flash_erase()`) resets both. `--erase-otadata` does NOT erase the portal credential namespace. |
-| **Known Limitation** | Operator may lose portal access if they forget the password and do not have serial console access. No in-product credential recovery mechanism exists. Factory reset and credential reset are not unified. |
-| **Operator Rationale** | Serial console access is always available during development. A formal credential recovery flow (e.g., button-hold reset) is deferred to product hardening. |
-| **Current Exposure Assumptions** | Operator always has serial console access. |
+| **Current Implementation** | Phase 4D.2 provides a physically local GPIO0/KEY1 10-second hold/release path into persistent factory-credential AP-only recovery. It preserves commissioned/customer configuration and remains intentionally distinct from factory reset. |
+| **Known Limitation** | Phase 4D.2 exposes the recovery network foundation only. Authenticated Argus Personnel recovery actions and complete credential-reset/rotation workflows remain Phase 4D.3 work. |
+| **Operator Rationale** | Field personnel will not have serial-console access. Physically local AP recovery is required without coupling credential recovery to destructive factory reset. |
+| **Current Exposure Assumptions** | The operator has physical access to KEY1/BOOT and the protected service AP. |
 | **Reconsideration Trigger** | Before production field release. Before any deployment where serial console access is not guaranteed. |
 | **Target Phase** | Phase 4D (Unified Reset) |
-| **Status | OPEN — WIP PRESERVED, NOT ACCEPTED |
-| **Closure Evidence** | Not yet applicable |
+| **Status** | OPEN - PARTIALLY RESOLVED |
+| **Closure Evidence** | Physical recovery entry, persistence, idempotence, and cleanup are accepted in `Phase 4D.2 Tests.md`; credential administration remains open. |
 
 
 **Update:** Field personnel will not have serial-console access.
@@ -355,9 +355,9 @@ Direct privileged mutation of a locked identity remains intentionally unsupporte
 | **Status** | OPEN |
 | **Target Phase** | Later Phase 4D subphases and next release, by risk class |
 
-**Known residual risks:** Fleet-wide factory credential exposure; HTTP credential and session observation by an attacker already present on the AP; non-TLS MQTT credential and payload observation by an attacker on the trusted network; physical extraction while secure boot, flash encryption, and NVS encryption remain inactive; denial-of-service and resource-exhaustion limits; bounded local audit capacity; and the absence of trustworthy wall-clock time until a verified source is available.
+**Known residual risks:** Fleet-wide factory credential exposure; HTTP credential and session observation by an attacker already present on the AP; non-TLS MQTT credential and payload observation by an attacker on the trusted network; physical extraction because Phase 4D.2 software-stored NVS XTS keys are readable without eFuse/HMAC derivation or flash encryption; denial-of-service and resource-exhaustion limits; bounded local audit capacity; and the absence of trustworthy wall-clock time until a verified source is available.
 
-**Acceptance boundary:** Phase 4D.1 documents these risks and does not describe them as solved. Later implementations must preserve truthful deployment limits and fail closed where protected security state is unavailable or corrupt.
+**Acceptance boundary:** Phase 4D.2 adds protected logical storage, verifier, migration, provisioning, and local recovery foundations but does not claim physical-extraction resistance or complete authentication/authorization. Later implementations must preserve truthful deployment limits and fail closed where protected security state is unavailable or corrupt.
 
 ## Register Maintenance
 
