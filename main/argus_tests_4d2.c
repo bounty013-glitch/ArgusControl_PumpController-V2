@@ -88,6 +88,12 @@ static void valid_verifier(argus_password_verifier_t *record, uint8_t seed)
     memset(record->verifier, (uint8_t)(seed + 1U), sizeof(record->verifier));
 }
 
+static void count_pbkdf2_cooperation(void *ctx)
+{
+    uint32_t *count = (uint32_t *)ctx;
+    ++(*count);
+}
+
 static void provision_ap(argus_security_ap_secret_record_t *record,
                          uint8_t seed)
 {
@@ -317,14 +323,30 @@ esp_err_t test_4d2_pbkdf2_known_answer(void)
     static const uint8_t expected[ARGUS_PASSWORD_VERIFIER_SIZE] = {
         0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c,
         0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4, 0xf8, 0x37,
-        0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xc3, 0x54, 0x80,
-        0x80, 0x59, 0x87, 0xcb, 0x70, 0xbe, 0x17, 0xb4,
+        0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48,
+        0x08, 0x05, 0x98, 0x7c, 0xb7, 0x0b, 0xe1, 0x7b,
     };
     uint8_t actual[ARGUS_PASSWORD_VERIFIER_SIZE] = {0};
     CHECK(argus_password_pbkdf2_for_test(
               (const uint8_t *)"password", 8U,
               (const uint8_t *)"salt", 4U, 1U, actual) == ESP_OK);
     CHECK(memcmp(actual, expected, sizeof(expected)) == 0);
+    argus_password_zeroize(actual, sizeof(actual));
+
+    static const uint8_t cooperative_expected[ARGUS_PASSWORD_VERIFIER_SIZE] = {
+        0x4d, 0x2e, 0x0f, 0x7c, 0x20, 0x26, 0xa0, 0xa6,
+        0x15, 0x9e, 0x4e, 0x09, 0x16, 0xb7, 0xbd, 0x32,
+        0x8b, 0x90, 0x43, 0x97, 0x46, 0x7a, 0x29, 0x0f,
+        0xfa, 0x6b, 0x41, 0x48, 0x34, 0xb1, 0x8a, 0x2f,
+    };
+    uint32_t cooperation_count = 0U;
+    CHECK(argus_password_pbkdf2_cooperative_for_test(
+              (const uint8_t *)"password", 8U,
+              (const uint8_t *)"salt", 4U, 513U, actual,
+              count_pbkdf2_cooperation, &cooperation_count) == ESP_OK);
+    CHECK(memcmp(actual, cooperative_expected,
+                 sizeof(cooperative_expected)) == 0);
+    CHECK(cooperation_count == 2U);
     argus_password_zeroize(actual, sizeof(actual));
     return ESP_OK;
 }
@@ -492,6 +514,12 @@ static esp_err_t recovery_post(void *ctx)
 
 esp_err_t test_4d2_recovery_commit_order_and_failures(void)
 {
+    CHECK(argus_net_security_recovery_request_is_idempotent(
+              ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY));
+    CHECK(!argus_net_security_recovery_request_is_idempotent(
+              ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION));
+    CHECK(!argus_net_security_recovery_request_is_idempotent(
+              ARGUS_NET_MODE_NETWORK_FAULT));
     CHECK(argus_net_decide_sta_event(
               ARGUS_NET_MODE_SECURITY_RECOVERY_TRANSITION,
               ARGUS_STA_EVENT_ASSOCIATED, 0U, 0U, true, true, false) ==

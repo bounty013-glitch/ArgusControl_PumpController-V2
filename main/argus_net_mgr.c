@@ -434,8 +434,23 @@ static void apply_sta_event_action_locked(argus_sta_lifecycle_event_t event,
     atomic_store(&s_sta_ip_acquired, ip_acquired);
 }
 
+bool argus_net_security_recovery_request_is_idempotent(
+    argus_network_mode_t mode)
+{
+    return mode == ARGUS_NET_MODE_SECURITY_RECOVERY_AP_ONLY;
+}
+
 static esp_err_t enter_security_recovery_network(void)
 {
+    xSemaphoreTake(s_net_mutex, portMAX_DELAY);
+    bool already_active =
+        argus_net_security_recovery_request_is_idempotent(s_net_mode);
+    xSemaphoreGive(s_net_mutex);
+    if (already_active) {
+        ESP_LOGW(TAG, "Physical security recovery already active");
+        return ESP_OK;
+    }
+
     argus_identity_t identity;
     argus_identity_get(&identity);
     wifi_config_t ap_config = {0};

@@ -480,6 +480,9 @@ esp_err_t argus_net_mgr_request_factory_reset(void);
  */
 esp_err_t argus_net_mgr_request_security_recovery(void);
 
+bool argus_net_security_recovery_request_is_idempotent(
+    argus_network_mode_t mode);
+
 typedef void (*argus_net_mgr_mqtt_broker_start_fn_t)(void);
 void argus_net_mgr_register_broker_start_cb(argus_net_mgr_mqtt_broker_start_fn_t cb);
 

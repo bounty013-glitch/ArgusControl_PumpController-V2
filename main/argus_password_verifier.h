@@ -38,6 +38,8 @@ typedef struct {
     uint32_t worker_stack_high_water_bytes;
 } argus_password_benchmark_t;
 
+typedef void (*argus_password_cooperate_fn)(void *ctx);
+
 bool argus_password_verifier_record_valid(
     const argus_password_verifier_t *record);
 
@@ -45,6 +47,12 @@ esp_err_t argus_password_pbkdf2_for_test(
     const uint8_t *password, size_t password_len,
     const uint8_t *salt, size_t salt_len,
     uint32_t iterations, uint8_t out[ARGUS_PASSWORD_VERIFIER_SIZE]);
+
+esp_err_t argus_password_pbkdf2_cooperative_for_test(
+    const uint8_t *password, size_t password_len,
+    const uint8_t *salt, size_t salt_len,
+    uint32_t iterations, uint8_t out[ARGUS_PASSWORD_VERIFIER_SIZE],
+    argus_password_cooperate_fn cooperate, void *cooperate_ctx);
 
 esp_err_t argus_password_verifier_init(void);
 

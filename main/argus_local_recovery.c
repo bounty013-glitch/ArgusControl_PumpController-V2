@@ -107,6 +107,10 @@ argus_local_recovery_commit_result_t argus_local_recovery_commit(
 static esp_err_t persist_request(void *ctx)
 {
     (void)ctx;
+    if (argus_security_store_get_recovery_state() ==
+        ARGUS_SECURITY_RECOVERY_REQUESTED) {
+        return ESP_OK;
+    }
     return argus_security_store_set_recovery_state(
         ARGUS_SECURITY_RECOVERY_REQUESTED);
 }

@@ -12,11 +12,12 @@
 #include "freertos/task.h"
 #include "mbedtls/constant_time.h"
 #include "mbedtls/md.h"
-#include "mbedtls/pkcs5.h"
+#include "mbedtls/platform_util.h"
 
 #define ARGUS_KDF_QUEUE_LENGTH 4U
 #define ARGUS_KDF_TASK_STACK 6144U
 #define ARGUS_KDF_TASK_PRIORITY 3U
+#define ARGUS_KDF_COOPERATE_INTERVAL 256U
 
 typedef enum {
     ARGUS_KDF_CREATE = 0,
@@ -68,19 +69,71 @@ bool argus_password_verifier_record_valid(
            record->iterations <= ARGUS_PASSWORD_ITERATIONS_MAX;
 }
 
-esp_err_t argus_password_pbkdf2_for_test(
+static void cooperative_delay(void *ctx)
+{
+    (void)ctx;
+    vTaskDelay(1U);
+}
+
+esp_err_t argus_password_pbkdf2_cooperative_for_test(
     const uint8_t *password, size_t password_len,
     const uint8_t *salt, size_t salt_len,
-    uint32_t iterations, uint8_t out[ARGUS_PASSWORD_VERIFIER_SIZE])
+    uint32_t iterations, uint8_t out[ARGUS_PASSWORD_VERIFIER_SIZE],
+    argus_password_cooperate_fn cooperate, void *cooperate_ctx)
 {
     if (password == NULL || password_len == 0U || salt == NULL ||
         salt_len == 0U || iterations == 0U || out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    int result = mbedtls_pkcs5_pbkdf2_hmac_ext(
-        MBEDTLS_MD_SHA256, password, password_len, salt, salt_len,
-        iterations, ARGUS_PASSWORD_VERIFIER_SIZE, out);
+
+    const mbedtls_md_info_t *md_info =
+        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (md_info == NULL) return ESP_FAIL;
+
+    mbedtls_md_context_t md;
+    uint8_t digest[ARGUS_PASSWORD_VERIFIER_SIZE] = {0};
+    uint8_t accumulator[ARGUS_PASSWORD_VERIFIER_SIZE] = {0};
+    static const uint8_t block_index[4] = {0U, 0U, 0U, 1U};
+    mbedtls_md_init(&md);
+    int result = mbedtls_md_setup(&md, md_info, 1);
+    if (result == 0) result = mbedtls_md_hmac_starts(
+        &md, password, password_len);
+    if (result == 0) result = mbedtls_md_hmac_update(&md, salt, salt_len);
+    if (result == 0) result = mbedtls_md_hmac_update(
+        &md, block_index, sizeof(block_index));
+    if (result == 0) result = mbedtls_md_hmac_finish(&md, digest);
+    if (result == 0) result = mbedtls_md_hmac_reset(&md);
+    if (result == 0) memcpy(accumulator, digest, sizeof(accumulator));
+
+    for (uint32_t round = 1U; result == 0 && round < iterations; ++round) {
+        result = mbedtls_md_hmac_update(&md, digest, sizeof(digest));
+        if (result == 0) result = mbedtls_md_hmac_finish(&md, digest);
+        if (result == 0) result = mbedtls_md_hmac_reset(&md);
+        if (result != 0) break;
+        for (size_t i = 0U; i < sizeof(accumulator); ++i) {
+            accumulator[i] ^= digest[i];
+        }
+        if (cooperate != NULL &&
+            (round % ARGUS_KDF_COOPERATE_INTERVAL) == 0U) {
+            cooperate(cooperate_ctx);
+        }
+    }
+
+    if (result == 0) memcpy(out, accumulator, sizeof(accumulator));
+    mbedtls_platform_zeroize(digest, sizeof(digest));
+    mbedtls_platform_zeroize(accumulator, sizeof(accumulator));
+    mbedtls_md_free(&md);
     return result == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t argus_password_pbkdf2_for_test(
+    const uint8_t *password, size_t password_len,
+    const uint8_t *salt, size_t salt_len,
+    uint32_t iterations, uint8_t out[ARGUS_PASSWORD_VERIFIER_SIZE])
+{
+    return argus_password_pbkdf2_cooperative_for_test(
+        password, password_len, salt, salt_len, iterations, out,
+        cooperative_delay, NULL);
 }
 
 static esp_err_t derive_record(const uint8_t *password, size_t password_len,
