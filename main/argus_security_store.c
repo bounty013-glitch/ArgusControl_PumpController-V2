@@ -45,6 +45,8 @@ _Static_assert(sizeof(argus_security_payload_t) == 562U,
                "Provisioning schema packing changed; update the offline tool");
 _Static_assert(sizeof(argus_security_slot_t) == 582U,
                "Provisioning slot packing changed; update the offline tool");
+_Static_assert(sizeof(argus_security_write_request_t *) == sizeof(void *),
+               "Security writer queue must carry request pointers");
 _Static_assert(ARGUS_SECURITY_MAX_ROLES <= 16U,
                "Role mask supports at most 16 roles");
 
@@ -595,7 +597,9 @@ static esp_err_t submit_payload(const argus_security_payload_t *payload,
         argus_password_zeroize(&request.payload, sizeof(request.payload));
         return ESP_ERR_NO_MEM;
     }
-    if (xQueueSend(s_write_queue, &request, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    argus_security_write_request_t *request_ptr = &request;
+    if (xQueueSend(s_write_queue, &request_ptr,
+                   pdMS_TO_TICKS(1000)) != pdTRUE) {
         argus_password_zeroize(&request.payload, sizeof(request.payload));
         return ESP_ERR_TIMEOUT;
     }
