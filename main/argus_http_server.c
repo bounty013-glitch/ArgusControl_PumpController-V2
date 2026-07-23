@@ -527,16 +527,7 @@ static esp_err_t change_password_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
-/* ── GET /api/logout handler ─────────────────────────────────────── */
-
-static esp_err_t logout_handler(httpd_req_t *req)
-{
-    set_api_headers(req);
-    httpd_resp_set_status(req, "405 Method Not Allowed");
-    httpd_resp_set_hdr(req, "Allow", "POST");
-    return httpd_resp_sendstr(
-        req, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
-}
+/* The retired GET /api/logout alias is intentionally not registered. */
 
 static esp_err_t portal_get_handler(httpd_req_t *req)
 {
@@ -2057,14 +2048,14 @@ static esp_err_t change_own_password_post_handler(httpd_req_t *req)
     argus_password_zeroize(body, sizeof(body));
     argus_password_zeroize(current, sizeof(current));
     esp_err_t err = ESP_ERR_INVALID_ARG;
-    if (valid && argus_security_audit_append(
+    argus_security_audit_mutation_t mutation = {0};
+    if (valid && argus_security_audit_mutation_begin(
             ARGUS_AUDIT_PASSWORD_CHANGED,
-            ARGUS_AUDIT_OUTCOME_SUCCESS,
             (uint8_t)security.principal.type,
             security.principal.identifier,
             security.principal.identifier, "SOFTAP",
-            "self_change_reserved",
-            security.principal.security_epoch, true) == ESP_OK) {
+            "self_password", security.principal.security_epoch,
+            &mutation) == ESP_OK) {
         if (security.principal.type == ARGUS_PRINCIPAL_CONSOLE) {
             argus_password_verifier_t verifier = {0};
             err = argus_auth_service_create_verifier(
@@ -2081,7 +2072,12 @@ static esp_err_t change_own_password_post_handler(httpd_req_t *req)
             err = argus_security_admin_replace_own_password(
                 &security.principal, replacement, replacement_len);
         }
+        if (argus_security_audit_mutation_finish(
+                &mutation, err == ESP_OK) != ESP_OK) {
+            err = ESP_ERR_INVALID_RESPONSE;
+        }
     }
+    memset(&mutation, 0, sizeof(mutation));
     argus_password_zeroize(replacement, sizeof(replacement));
     memset(&security, 0, sizeof(security));
     if (receive_err == ESP_ERR_TIMEOUT || receive_err == ESP_FAIL) {
@@ -2244,13 +2240,6 @@ static const httpd_uri_t uri_change_password = {
     .user_ctx  = NULL
 };
 
-static const httpd_uri_t uri_logout = {
-    .uri       = "/api/logout",
-    .method    = HTTP_GET,
-    .handler   = logout_handler,
-    .user_ctx  = NULL
-};
-
 /* Phase 4B.2 URI handler registrations */
 
 static const httpd_uri_t uri_config_get = {
@@ -2324,6 +2313,32 @@ static const httpd_uri_t uri_factory_reset = {
     .user_ctx  = NULL
 };
 
+static const httpd_uri_t *const MAIN_ROUTES[] = {
+    &uri_login_get,
+    &uri_login_post,
+    &uri_session_get,
+    &uri_logout_post,
+    &uri_reauth_post,
+    &uri_change_own_password_post,
+    &uri_operate,
+    &uri_commission,
+    &uri_status,
+    &uri_identity,
+    &uri_portal,
+    &uri_controls,
+    &uri_change_password,
+    &uri_config_get,
+    &uri_config_save,
+    &uri_identity_page,
+    &uri_wifi_page,
+    &uri_restart,
+    &uri_service_enter,
+    &uri_service_exit,
+    &uri_reconnect,
+    &uri_command,
+    &uri_factory_reset,
+};
+
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 bool argus_http_test_command_registration(void)
 {
@@ -2378,6 +2393,23 @@ bool argus_http_test_decode_login(const uint8_t *body, size_t body_len)
 uint64_t argus_http_test_command_capability(uint32_t command_type)
 {
     return command_capability((argus_cmd_type_t)command_type);
+}
+
+size_t argus_http_test_registered_route_count(void)
+{
+    return sizeof(MAIN_ROUTES) / sizeof(MAIN_ROUTES[0]);
+}
+
+bool argus_http_test_registered_route(
+    size_t index, const char **path, httpd_method_t *method)
+{
+    if (index >= argus_http_test_registered_route_count() ||
+        path == NULL || method == NULL) {
+        return false;
+    }
+    *path = MAIN_ROUTES[index]->uri;
+    *method = MAIN_ROUTES[index]->method;
+    return true;
 }
 #endif
 
@@ -2464,60 +2496,11 @@ esp_err_t argus_http_server_start(void)
 
     /* Register URI handlers — roll back on any failure */
     esp_err_t reg_err;
-    reg_err = httpd_register_uri_handler(s_server, &uri_login_get);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_login_post);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_session_get);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_logout_post);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_reauth_post);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(
-        s_server, &uri_change_own_password_post);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_operate);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_commission);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_status);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_identity);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_portal);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_controls);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_change_password);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_logout);
-    if (reg_err != ESP_OK) goto rollback;
-    /* Phase 4B.2 endpoints */
-    reg_err = httpd_register_uri_handler(s_server, &uri_config_get);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_config_save);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_identity_page);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_wifi_page);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_restart);
-    if (reg_err != ESP_OK) goto rollback;
-    /* Phase 4B.3 endpoints */
-    reg_err = httpd_register_uri_handler(s_server, &uri_service_enter);
-    if (reg_err != ESP_OK) goto rollback;
-    reg_err = httpd_register_uri_handler(s_server, &uri_service_exit);
+    for (size_t i = 0U;
+         i < sizeof(MAIN_ROUTES) / sizeof(MAIN_ROUTES[0]); ++i) {
+        reg_err = httpd_register_uri_handler(s_server, MAIN_ROUTES[i]);
         if (reg_err != ESP_OK) goto rollback;
-
-    reg_err = httpd_register_uri_handler(s_server, &uri_reconnect);
-    if (reg_err != ESP_OK) goto rollback;
-    /* Phase 4B.4 endpoint */
-    reg_err = httpd_register_uri_handler(s_server, &uri_command);
-    if (reg_err != ESP_OK) goto rollback;
-    /* Phase 4B.6 endpoint */
-    reg_err = httpd_register_uri_handler(s_server, &uri_factory_reset);
-    if (reg_err != ESP_OK) goto rollback;
+    }
     reg_err = argus_security_http_register(s_server);
     if (reg_err != ESP_OK) goto rollback;
 

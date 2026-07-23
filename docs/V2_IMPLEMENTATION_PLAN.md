@@ -93,6 +93,17 @@ gantt
     *   Legacy browser Basic-Auth retirement, protected active AP credential change/restoration, and authenticated exit from physical security recovery.
     *   No authentication-to-authority coupling, no new direct motion path, and unchanged Phase 4C MQTT command architecture.
 *   **Evidence**: Three 711/711 controller suites, SoftAP success and STA rejection, live throttle/logout/CSRF checks, active AP credential change and restoration, physical recovery entry and authenticated exit, zero-warning/error ESP-IDF v5.5.3 no-ccache build, and 62% OTA headroom. See `PHASE_4D_3_IMPLEMENTATION_PLAN.md` and `Phase 4D.3 Tests.md`.
+*   **Next gate completed**: Phase 4D.3a separately corrected the final audit-outcome, transition-ordering, retired-route, route-inventory, and audit-pagination acceptance findings.
+
+#### Phase 4D.3a: Browser Security Acceptance Corrections
+*   **Status**: COMPLETE AND ACCEPTED on July 23, 2026.
+*   **Delivered**:
+    *   Truthful non-success prepared audit records with correlated terminal success/failure and fail-closed indeterminate-finalization behavior.
+    *   Final HTTP response completion before AP restart or recovery reboot timer arming.
+    *   Retired `/api/logout` removal and complete bidirectional policy proof for 31 active human routes plus one retired classification.
+    *   Strict newest-first audit pagination with a maximum 16-record page and exclusive non-secret sequence cursor.
+    *   Measured 168-byte records, 255 retained events, eight-entry queue, bounded stack/RAM, corruption-gap reporting, and documented wear boundary.
+*   **Evidence**: Three 729/729 controller suites, SoftAP/STA route checks, canonical logout, Basic Auth rejection, two live AP-secret change/reconnect cycles with original credential restoration, live audit lifecycle proof, physical recovery entry and authenticated response-before-reboot exit, zero-warning/error ESP-IDF v5.5.3 no-ccache build, and 62% OTA headroom. See `PHASE_4D_3A_IMPLEMENTATION_PLAN.md` and `Phase 4D.3a Tests.md`.
 *   **Next gate**: Phase 4D.4 may implement machine-client enrollment and MQTT CONNECT authentication under a separately approved scope. HTTPS/TLS, certificates, hostile-network acceptance, and irreversible protections remain separately gated.
 
 #### Phase 5: Field Integration and Calibration

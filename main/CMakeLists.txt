@@ -35,8 +35,10 @@ idf_component_register(
         "argus_security_directory.c"
         "argus_auth_service.c"
         "argus_http_security.c"
+        "argus_http_route_inventory.c"
         "argus_security_audit.c"
         "argus_security_admin.c"
+        "argus_security_transition.c"
         "argus_security_http.c"
         "argus_tests_4a.c"
         "argus_tests_4b4.c"
@@ -46,6 +48,7 @@ idf_component_register(
         "argus_tests_4c.c"
         "argus_tests_4d2.c"
         "argus_tests_4d3.c"
+        "argus_tests_4d3a.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES

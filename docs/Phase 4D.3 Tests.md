@@ -111,3 +111,7 @@ The controller finished in normal commissioned operation: `AP_DISCOVERABLE`, STA
 ## 13. Deferred Phase 4D.4 Work
 
 Machine enrollment, MQTT CONNECT authentication, HTTPS, TLS, certificates, hostile-network acceptance, and irreversible device-security provisioning remain deferred.
+
+## 14. Subsequent Phase 4D.3a Correction
+
+This accepted Phase 4D.3 record is historical and remains unchanged in its conclusions. A later source review identified four narrow acceptance-contract discrepancies: prepared audit records used success semantics, AP/recovery transitions were armed before final response completion, retired `/api/logout` was still registered, and route inventory/audit pagination were incomplete. Phase 4D.3a corrected and independently validated those items without implying that an earlier failed candidate passed. See `PHASE_4D_3A_IMPLEMENTATION_PLAN.md` and `Phase 4D.3a Tests.md`.

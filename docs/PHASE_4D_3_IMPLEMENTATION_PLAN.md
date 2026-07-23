@@ -164,9 +164,11 @@ Recovery exit requires an authenticated Argus Personnel principal or an explicit
 
 ## 13. Audit Contract
 
-`sec_audit` stores a fixed-capacity ring with monotonic sequence, boot identifier, boot-relative monotonic time, optional truthful wall time, event type, outcome, actor ID/type/scope, target ID, interface, bounded reason code, and security/credential generations. Capacity and exact record size will be selected after static measurement and documented before acceptance.
+`sec_audit` stores a fixed-capacity ring with monotonic sequence, boot identifier, boot-relative monotonic time, optional truthful wall time, event type, outcome, actor ID/type/scope, target ID, interface, bounded reason code, and security/credential generations. Phase 4D.3a measured the accepted representation as 168 bytes per record, 255 logical retained records in 256 physical slots, and a 262,144-byte partition. The audit queue contains eight pointers, the worker stack is 5,120 bytes, and the maximum queued request payload is 2,112 bytes plus allocator overhead.
 
 Events never contain credentials, verifiers, salts, session/CSRF tokens, Authorization headers, raw bodies, pointers, or memory addresses. Unauthenticated failures are coalesced/rate-limited. Privileged security mutations reserve and persist their required audit event before commit; inability to reserve fails that mutation closed without affecting machine state. A bounded asynchronous queue handles noncritical events. Authorized pagination is redacted and bounded.
+
+**Phase 4D.3a correction:** the pre-mutation record is explicitly `PREPARED`, never success; a correlated terminal record reports success or failure after mutation. Audit pagination is implemented as strict newest-first pages with an exclusive non-secret sequence cursor and maximum limit 16. See `PHASE_4D_3A_IMPLEMENTATION_PLAN.md`.
 
 ## 14. Tasks, Queues, Locks, and Resources
 

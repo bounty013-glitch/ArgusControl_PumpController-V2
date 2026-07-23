@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_random.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -48,6 +49,11 @@ static StaticSemaphore_t s_mutex_storage;
 static QueueHandle_t s_queue;
 static TaskHandle_t s_task;
 static bool s_available;
+static bool s_finalization_degraded;
+static const char *TAG = "argus_security_audit";
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+static bool s_test_fail_next_required;
+#endif
 
 _Static_assert(sizeof(argus_security_audit_record_t) <= 192U,
                "Audit record exceeded bounded design");
@@ -124,6 +130,14 @@ static esp_err_t append_locked(argus_security_audit_record_t *record)
 {
     record->schema_version = AUDIT_SCHEMA;
     record->sequence = s_meta.next_sequence;
+    if (record->outcome == ARGUS_AUDIT_OUTCOME_PREPARED &&
+        record->lifecycle_id == 0U) {
+        uint64_t folded = record->sequence ^ (record->sequence >> 16U) ^
+                          (record->sequence >> 32U) ^
+                          (record->sequence >> 48U);
+        record->lifecycle_id = (uint16_t)folded;
+        if (record->lifecycle_id == 0U) record->lifecycle_id = 1U;
+    }
     record->boot_id = s_boot_id;
     record->uptime_us = (uint64_t)esp_timer_get_time();
     record->crc32 = record_crc(record);
@@ -167,6 +181,110 @@ static void audit_task(void *ctx)
             free(request);
         }
     }
+}
+
+static esp_err_t append_record(
+    argus_audit_event_type_t type,
+    argus_audit_outcome_t outcome,
+    uint8_t principal_type,
+    uint16_t lifecycle_id,
+    const char *actor,
+    const char *target,
+    const char *source,
+    const char *reason,
+    uint32_t security_epoch,
+    bool required,
+    argus_security_audit_record_t *written)
+{
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+    if (required && s_test_fail_next_required) {
+        s_test_fail_next_required = false;
+        return ESP_FAIL;
+    }
+#endif
+    if (!s_available || type < ARGUS_AUDIT_LOGIN_SUCCESS ||
+        type > ARGUS_AUDIT_STORAGE_FAILURE ||
+        outcome < ARGUS_AUDIT_OUTCOME_SUCCESS ||
+        outcome > ARGUS_AUDIT_OUTCOME_PREPARED ||
+        !safe_text(actor, ARGUS_AUDIT_TEXT_MAX + 1U) ||
+        !safe_text(target, ARGUS_AUDIT_TEXT_MAX + 1U) ||
+        !safe_text(source, 16U) ||
+        !safe_text(reason, ARGUS_AUDIT_TEXT_MAX + 1U)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    audit_request_t *request = calloc(1U, sizeof(*request));
+    if (request == NULL) return ESP_ERR_NO_MEM;
+    request->record.event_type = (uint16_t)type;
+    request->record.outcome = (uint8_t)outcome;
+    request->record.principal_type = principal_type;
+    request->record.lifecycle_id = lifecycle_id;
+    request->record.security_epoch = security_epoch;
+    strlcpy(request->record.actor, actor, sizeof(request->record.actor));
+    strlcpy(request->record.target, target, sizeof(request->record.target));
+    strlcpy(request->record.source, source, sizeof(request->record.source));
+    strlcpy(request->record.reason, reason, sizeof(request->record.reason));
+    request->required = required;
+    if (required) {
+        request->completion =
+            xSemaphoreCreateBinaryStatic(&request->completion_storage);
+        if (request->completion == NULL) {
+            free(request);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    audit_request_t *pointer = request;
+    if (xQueueSend(s_queue, &pointer, 0U) != pdTRUE) {
+        memset(request, 0, sizeof(*request));
+        free(request);
+        return ESP_ERR_NO_MEM;
+    }
+    if (!required) return ESP_OK;
+    (void)xSemaphoreTake(request->completion, portMAX_DELAY);
+    esp_err_t result = request->result;
+    if (result == ESP_OK && written != NULL) *written = request->record;
+    memset(request, 0, sizeof(*request));
+    free(request);
+    return result;
+}
+
+static bool audit_finalization_degraded(void)
+{
+    bool degraded;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    degraded = s_finalization_degraded;
+    xSemaphoreGive(s_mutex);
+    return degraded;
+}
+
+static void mark_finalization_degraded(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_finalization_degraded = true;
+    xSemaphoreGive(s_mutex);
+}
+
+static esp_err_t read_slot_locked(
+    uint32_t offset_from_oldest,
+    argus_security_audit_record_t *out)
+{
+    uint32_t slot =
+        (s_meta.oldest_slot + offset_from_oldest) % AUDIT_PHYSICAL_SLOTS;
+    nvs_handle_t handle;
+    esp_err_t err = open_audit(NVS_READONLY, &handle);
+    if (err != ESP_OK) return err;
+    char key[12];
+    record_key(slot, key);
+    size_t length = sizeof(*out);
+    err = nvs_get_blob(handle, key, out, &length);
+    nvs_close(handle);
+    if (err == ESP_OK && length != sizeof(*out)) {
+        err = ESP_ERR_INVALID_SIZE;
+    } else if (err == ESP_OK && out->schema_version != AUDIT_SCHEMA) {
+        err = ESP_ERR_INVALID_VERSION;
+    } else if (err == ESP_OK && out->crc32 != record_crc(out)) {
+        err = ESP_ERR_INVALID_CRC;
+    }
+    return err;
 }
 
 esp_err_t argus_security_audit_init(void)
@@ -228,47 +346,77 @@ esp_err_t argus_security_audit_append(
     uint32_t security_epoch,
     bool required)
 {
-    if (!s_available || type < ARGUS_AUDIT_LOGIN_SUCCESS ||
-        type > ARGUS_AUDIT_STORAGE_FAILURE ||
-        outcome < ARGUS_AUDIT_OUTCOME_SUCCESS ||
-        outcome > ARGUS_AUDIT_OUTCOME_FAILED ||
-        !safe_text(actor, ARGUS_AUDIT_TEXT_MAX + 1U) ||
-        !safe_text(target, ARGUS_AUDIT_TEXT_MAX + 1U) ||
-        !safe_text(source, 16U) ||
-        !safe_text(reason, ARGUS_AUDIT_TEXT_MAX + 1U)) {
+    return append_record(
+        type, outcome, principal_type, 0U, actor, target, source,
+        reason, security_epoch, required, NULL);
+}
+
+esp_err_t argus_security_audit_mutation_begin(
+    argus_audit_event_type_t type,
+    uint8_t principal_type,
+    const char *actor,
+    const char *target,
+    const char *source,
+    const char *action,
+    uint32_t security_epoch,
+    argus_security_audit_mutation_t *out)
+{
+    if (out == NULL || !safe_text(action, ARGUS_AUDIT_ACTION_MAX + 1U) ||
+        action[0] == '\0' || audit_finalization_degraded()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char reason[ARGUS_AUDIT_TEXT_MAX + 1U];
+    int length = snprintf(
+        reason, sizeof(reason), "%s_prepared", action);
+    if (length < 0 || (size_t)length >= sizeof(reason)) {
         return ESP_ERR_INVALID_ARG;
     }
-    audit_request_t *request = calloc(1U, sizeof(*request));
-    if (request == NULL) return ESP_ERR_NO_MEM;
-    request->record.event_type = (uint16_t)type;
-    request->record.outcome = (uint8_t)outcome;
-    request->record.principal_type = principal_type;
-    request->record.security_epoch = security_epoch;
-    strlcpy(request->record.actor, actor, sizeof(request->record.actor));
-    strlcpy(request->record.target, target, sizeof(request->record.target));
-    strlcpy(request->record.source, source, sizeof(request->record.source));
-    strlcpy(request->record.reason, reason, sizeof(request->record.reason));
-    request->required = required;
-    if (required) {
-        request->completion =
-            xSemaphoreCreateBinaryStatic(&request->completion_storage);
-        if (request->completion == NULL) {
-            free(request);
-            return ESP_ERR_NO_MEM;
-        }
+    argus_security_audit_record_t written = {0};
+    esp_err_t err = append_record(
+        type, ARGUS_AUDIT_OUTCOME_PREPARED, principal_type, 0U,
+        actor, target, source, reason, security_epoch, true, &written);
+    if (err != ESP_OK) return err;
+    memset(out, 0, sizeof(*out));
+    out->event_type = type;
+    out->principal_type = principal_type;
+    out->lifecycle_id = written.lifecycle_id;
+    out->security_epoch = security_epoch;
+    strlcpy(out->actor, actor, sizeof(out->actor));
+    strlcpy(out->target, target, sizeof(out->target));
+    strlcpy(out->source, source, sizeof(out->source));
+    strlcpy(out->action, action, sizeof(out->action));
+    memset(&written, 0, sizeof(written));
+    return ESP_OK;
+}
+
+esp_err_t argus_security_audit_mutation_finish(
+    const argus_security_audit_mutation_t *mutation,
+    bool succeeded)
+{
+    if (mutation == NULL || mutation->lifecycle_id == 0U) {
+        return ESP_ERR_INVALID_ARG;
     }
-    audit_request_t *pointer = request;
-    if (xQueueSend(s_queue, &pointer, 0U) != pdTRUE) {
-        memset(request, 0, sizeof(*request));
-        free(request);
-        return ESP_ERR_NO_MEM;
+    char reason[ARGUS_AUDIT_TEXT_MAX + 1U];
+    int length = snprintf(
+        reason, sizeof(reason), "%s_%s", mutation->action,
+        succeeded ? "succeeded" : "failed");
+    if (length < 0 || (size_t)length >= sizeof(reason)) {
+        return ESP_ERR_INVALID_ARG;
     }
-    if (!required) return ESP_OK;
-    (void)xSemaphoreTake(request->completion, portMAX_DELAY);
-    esp_err_t result = request->result;
-    memset(request, 0, sizeof(*request));
-    free(request);
-    return result;
+    esp_err_t err = append_record(
+        mutation->event_type,
+        succeeded ? ARGUS_AUDIT_OUTCOME_SUCCESS
+                  : ARGUS_AUDIT_OUTCOME_FAILED,
+        mutation->principal_type, mutation->lifecycle_id,
+        mutation->actor, mutation->target, mutation->source, reason,
+        mutation->security_epoch, true, NULL);
+    if (err != ESP_OK) {
+        mark_finalization_degraded();
+        ESP_LOGE(
+            TAG,
+            "Privileged audit finalization failed; later mutations blocked");
+    }
+    return err;
 }
 
 esp_err_t argus_security_audit_get_status(
@@ -281,6 +429,7 @@ esp_err_t argus_security_audit_get_status(
         .count = s_meta.count,
         .overwritten = s_meta.overwritten,
         .available = s_available,
+        .finalization_degraded = s_finalization_degraded,
     };
     xSemaphoreGive(s_mutex);
     return ESP_OK;
@@ -296,23 +445,68 @@ esp_err_t argus_security_audit_read(
         xSemaphoreGive(s_mutex);
         return ESP_ERR_NOT_FOUND;
     }
-    uint32_t slot =
-        (s_meta.oldest_slot + offset_from_oldest) % AUDIT_PHYSICAL_SLOTS;
-    nvs_handle_t handle;
-    esp_err_t err = open_audit(NVS_READONLY, &handle);
-    if (err == ESP_OK) {
-        char key[12];
-        record_key(slot, key);
-        size_t length = sizeof(*out);
-        err = nvs_get_blob(handle, key, out, &length);
-        nvs_close(handle);
-        if (err == ESP_OK &&
-            (length != sizeof(*out) ||
-             out->schema_version != AUDIT_SCHEMA ||
-             out->crc32 != record_crc(out))) {
-            err = ESP_ERR_INVALID_CRC;
-        }
-    }
+    esp_err_t err = read_slot_locked(offset_from_oldest, out);
     xSemaphoreGive(s_mutex);
     return err;
 }
+
+esp_err_t argus_security_audit_read_page(
+    uint64_t before_sequence,
+    uint32_t limit,
+    argus_security_audit_page_t *out)
+{
+    if (out == NULL || s_mutex == NULL || limit == 0U ||
+        limit > ARGUS_AUDIT_PAGE_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (!s_available ||
+        (before_sequence != 0U &&
+         before_sequence > s_meta.next_sequence)) {
+        xSemaphoreGive(s_mutex);
+        return before_sequence > s_meta.next_sequence
+                   ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE;
+    }
+    uint64_t boundary =
+        before_sequence == 0U ? s_meta.next_sequence : before_sequence;
+    bool found_after_page = false;
+    for (uint32_t reverse = 0U; reverse < s_meta.count; ++reverse) {
+        uint32_t offset = s_meta.count - 1U - reverse;
+        argus_security_audit_record_t record = {0};
+        esp_err_t err = read_slot_locked(offset, &record);
+        if (err != ESP_OK) {
+            out->corruption_gap = true;
+            continue;
+        }
+        if (record.sequence >= boundary) continue;
+        if (out->count < limit) {
+            out->records[out->count++] = record;
+            out->next_before = record.sequence;
+        } else {
+            found_after_page = true;
+            memset(&record, 0, sizeof(record));
+            break;
+        }
+        memset(&record, 0, sizeof(record));
+    }
+    out->has_more = found_after_page;
+    if (!out->has_more) out->next_before = 0U;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+void argus_security_audit_test_fail_next_required(void)
+{
+    s_test_fail_next_required = true;
+}
+
+void argus_security_audit_test_clear_finalization_degraded(void)
+{
+    if (s_mutex == NULL) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_finalization_degraded = false;
+    xSemaphoreGive(s_mutex);
+}
+#endif
