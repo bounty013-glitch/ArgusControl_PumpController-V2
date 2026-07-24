@@ -17,6 +17,8 @@
 static const argus_permission_set_t ADMIN_PAGE_CAPABILITIES =
     ARGUS_PERMISSION_MANAGE_USERS |
     ARGUS_PERMISSION_MANAGE_ROLES |
+    ARGUS_PERMISSION_ENROLL_MACHINES |
+    ARGUS_PERMISSION_REVOKE_MACHINES |
     ARGUS_PERMISSION_VIEW_AUDIT |
     ARGUS_PERMISSION_MANAGE_NETWORK |
     ARGUS_PERMISSION_CHANGE_AP_SECRET |
@@ -136,6 +138,21 @@ static const argus_http_route_inventory_entry_t ROUTES[] = {
           ARGUS_HTTP_ROUTE_ADMINISTRATIVE,
           ARGUS_PERMISSION_INVOKE_RECOVERY, false, true, true, true,
           true, true, false),
+    ROUTE("/api/security/machines", HTTP_GET,
+          ARGUS_HTTP_ROUTE_ADMINISTRATIVE,
+          ARGUS_PERMISSION_ENROLL_MACHINES |
+              ARGUS_PERMISSION_REVOKE_MACHINES,
+          true, true, true, false,
+          false, false, false),
+    ROUTE("/api/security/machines", HTTP_POST,
+          ARGUS_HTTP_ROUTE_ADMINISTRATIVE,
+          ARGUS_PERMISSION_ENROLL_MACHINES, false, true, true, true,
+          true, true, false),
+    ROUTE("/api/security/machines/action", HTTP_POST,
+          ARGUS_HTTP_ROUTE_ADMINISTRATIVE,
+          ARGUS_PERMISSION_ENROLL_MACHINES |
+              ARGUS_PERMISSION_REVOKE_MACHINES,
+          true, true, true, true, true, true, false),
     ROUTE("/api/logout", HTTP_GET, ARGUS_HTTP_ROUTE_RETIRED, 0U, false,
           false, false, false, false, false, false),
 };

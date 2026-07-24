@@ -26,6 +26,7 @@
 #include "argus_tests_4d2.h"
 #include "argus_tests_4d3.h"
 #include "argus_tests_4d3a.h"
+#include "argus_tests_4d4.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5414,6 +5415,27 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d3a_transition_response_order);
     RUN_TEST(test_4d3a_complete_route_inventory);
     RUN_TEST(test_4d3a_browser_pagination_contract);
+    /* Phase 4D.4 machine enrollment and MQTT authentication */
+    RUN_TEST(test_4d4_machine_record_contract);
+    RUN_TEST(test_4d4_machine_directory_capacity_and_duplicates);
+    RUN_TEST(test_4d4_machine_directory_empty_selection);
+    RUN_TEST(test_4d4_machine_directory_selector_recovery);
+    RUN_TEST(test_4d4_machine_directory_interrupted_write);
+    RUN_TEST(test_4d4_machine_directory_corruption_fail_closed);
+    RUN_TEST(test_4d4_machine_directory_unsupported_schema);
+    RUN_TEST(test_4d4_machine_directory_generation_conflict);
+    RUN_TEST(test_4d4_enrollment_policy_boundaries);
+    RUN_TEST(test_4d4_connect_valid_credentials);
+    RUN_TEST(test_4d4_connect_flag_policy);
+    RUN_TEST(test_4d4_connect_missing_and_oversized_credentials);
+    RUN_TEST(test_4d4_connect_truncation_and_trailing);
+    RUN_TEST(test_4d4_connect_embedded_nul);
+    RUN_TEST(test_4d4_subscription_capability_and_scope);
+    RUN_TEST(test_4d4_publish_capability_mapping);
+    RUN_TEST(test_4d4_machine_scope_policy);
+    RUN_TEST(test_4d4_machine_route_inventory);
+    RUN_TEST(test_4d4_secret_zeroization);
+    RUN_TEST(test_4d4_principal_excludes_verifier);
     }
 
     int total_executions = passed_executions + failed_executions;

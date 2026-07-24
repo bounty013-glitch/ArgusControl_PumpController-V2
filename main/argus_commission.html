@@ -62,6 +62,7 @@
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="accounts" data-cap="manage_users">Accounts</button>
     <button data-tab="roles" data-cap="manage_roles">Roles</button>
+    <button data-tab="machines" data-any-cap="enroll_machines,revoke_machines">Machines</button>
     <button data-tab="configuration">Configuration</button>
     <button data-tab="security">Security</button>
     <button data-tab="audit" data-cap="view_audit">Audit</button>
@@ -113,6 +114,40 @@
         <div class="status"></div>
       </form>
       <div class="panel wide"><h2>Custom roles</h2><div id="roles-table" class="table"></div></div>
+    </div>
+  </section>
+
+  <section id="machines" data-any-cap="enroll_machines,revoke_machines">
+    <div class="grid">
+      <form id="machine-enroll" class="panel" data-cap="enroll_machines">
+        <h2>Enroll machine client</h2>
+        <label for="machine-display">Display name</label>
+        <input id="machine-display" maxlength="48" required>
+        <label for="machine-type">Machine type</label>
+        <select id="machine-type">
+          <option value="PUMP_HMI">Pump HMI</option>
+          <option value="NODE_RED">Node-RED supervisor</option>
+          <option value="SERVICE_TOOL">Argus service tool</option>
+          <option value="BACKUP_INTERFACE">Backup interface</option>
+          <option value="ARGUS_COMMAND">Argus Command host</option>
+          <option value="AI_TOOL_GATEWAY">AI tool gateway</option>
+        </select>
+        <label>Receiving interfaces</label>
+        <label><input id="machine-softap" type="checkbox" style="width:auto"> SoftAP</label>
+        <label><input id="machine-sta" type="checkbox" style="width:auto" checked> STA</label>
+        <label for="machine-scope">Controller scope</label>
+        <input id="machine-scope" maxlength="36" required>
+        <label for="machine-topic-scope">MQTT topic scope</label>
+        <input id="machine-topic-scope" maxlength="96" required>
+        <label for="machine-api-scope">Future API scope</label>
+        <input id="machine-api-scope" maxlength="64">
+        <label for="machine-permissions">Capability IDs</label>
+        <textarea id="machine-permissions" required>view_status, request_authority</textarea>
+        <div class="actions"><button class="primary" type="submit">Enroll</button></div>
+        <div class="status"></div>
+      </form>
+      <div class="panel wide"><h2>Machine clients</h2>
+        <div id="machines-table" class="table"></div></div>
     </div>
   </section>
 
@@ -187,11 +222,27 @@
   </form>
 </dialog>
 
+<dialog id="machine-credential-dialog">
+  <form method="dialog" id="machine-credential-form">
+    <h2>Machine credential</h2>
+    <div class="banner">This secret is shown once. Store it in the intended client credential store before closing.</div>
+    <label for="machine-credential-id">Machine ID</label>
+    <input id="machine-credential-id" readonly>
+    <label for="machine-credential-secret">Machine secret</label>
+    <input id="machine-credential-secret" type="password" readonly>
+    <div class="actions">
+      <button id="machine-copy-secret" type="button">Copy secret</button>
+      <button value="close" class="primary">Close and clear</button>
+    </div>
+    <div class="status"></div>
+  </form>
+</dialog>
+
 <script>
 (() => {
   "use strict";
   const nativeFetch = window.fetch.bind(window);
-  const runtime = {csrf:"", caps:new Set(), session:null, roles:[]};
+  const runtime = {csrf:"", caps:new Set(), session:null, roles:[], identity:null};
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c =>
     ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -245,13 +296,17 @@
     const [identity,status,config]=await Promise.all([
       request("/api/identity"),request("/api/status"),
       canReadConfig ? request("/api/config") : Promise.resolve({})]);
+    runtime.identity=identity;
     $("controller").innerHTML=`<div>${esc(identity.device_name)}</div>
       <div>${esc(identity.firmware_version)}</div><div>${esc(status.network.mode)}</div>
       <div>Authority: ${esc(status.authority.mode)} / ${esc(status.authority.owner)}</div>`;
     $("client-id").value=config.client_id||"";$("unit-id").value=config.unit_id||"";
     $("device-name").value=config.device_name||"";$("sta-ssid").value=config.sta_ssid||"";
+    $("machine-scope").value=session.principal.scope||"";
+    $("machine-topic-scope").value=`argus/${identity.client_id}/${identity.unit_id}`;
     if (runtime.caps.has("manage_users")) await loadAccounts();
     if (runtime.caps.has("manage_roles")) await loadRoles();
+    if (runtime.caps.has("enroll_machines")||runtime.caps.has("revoke_machines")) await loadMachines();
     if (runtime.caps.has("view_audit")) await loadAudit();
   }
   $("tabs").addEventListener("click", event => {
@@ -322,6 +377,73 @@
   $("roles-table").addEventListener("click",event=>{
     const button=event.target.closest("button[data-role]");if(!button)return;
     if(confirm(`Delete role ${button.dataset.role}?`))post("/api/security/roles",{action:"delete",id:button.dataset.role}).then(loadRoles).catch(e=>alert(e.message));
+  });
+  function showMachineCredential(data) {
+    $("machine-credential-id").value=data.machine_id||"";
+    $("machine-credential-secret").value=data.machine_secret||"";
+    $("machine-credential-secret").type="password";
+    setStatus($("machine-credential-form"),"Credential has not been retained by this page.",true);
+    $("machine-credential-dialog").showModal();
+  }
+  async function loadMachines(){
+    const data=await request("/api/security/machines");
+    const canEnroll=runtime.caps.has("enroll_machines");
+    const canRevoke=runtime.caps.has("revoke_machines");
+    const rows=(data.machines||[]).map(machine=>`<tr>
+      <td>${esc(machine.display_name)}<br><span class="identity">${esc(machine.client_type)}</span></td>
+      <td>${esc(machine.id)}</td><td>${machine.enabled?"Enabled":"Disabled"}${machine.revoked?" / Revoked":""}</td>
+      <td>${esc(machine.permissions)}</td><td><div class="actions">
+      ${canEnroll&&!machine.revoked?`<button data-machine="${esc(machine.id)}" data-machine-action="rotate">Rotate</button>`:""}
+      ${canRevoke&&!machine.revoked?`<button data-machine="${esc(machine.id)}" data-machine-action="${machine.enabled?"disable":"enable"}">${machine.enabled?"Disable":"Enable"}</button>
+      <button class="danger" data-machine="${esc(machine.id)}" data-machine-action="revoke">Revoke</button>`:""}
+      ${canRevoke&&machine.revoked?`<button class="danger" data-machine="${esc(machine.id)}" data-machine-action="delete">Delete</button>`:""}
+      </div></td></tr>`).join("");
+    $("machines-table").innerHTML=`<table><thead><tr><th>Machine</th><th>ID</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  $("machine-enroll").addEventListener("submit",async event=>{
+    event.preventDefault();const form=event.currentTarget;
+    const interfaces=[];
+    if($("machine-softap").checked)interfaces.push("SOFTAP");
+    if($("machine-sta").checked)interfaces.push("STA");
+    try{
+      const data=await post("/api/security/machines",{
+        display_name:$("machine-display").value,
+        client_type:$("machine-type").value,
+        interfaces,
+        scope:$("machine-scope").value,
+        topic_scope:$("machine-topic-scope").value,
+        api_scope:$("machine-api-scope").value,
+        permissions:permissionList($("machine-permissions").value)
+      });
+      setStatus(form,"Machine enrolled. Save the one-time credential.",true);
+      showMachineCredential(data);await loadMachines();
+    }catch(error){setStatus(form,error.message);}
+  });
+  $("machines-table").addEventListener("click",async event=>{
+    const button=event.target.closest("button[data-machine]");if(!button)return;
+    const id=button.dataset.machine,action=button.dataset.machineAction;
+    if(["disable","revoke","delete"].includes(action)&&!confirm(`${action} ${id}?`))return;
+    try{
+      const data=await post("/api/security/machines/action",{id,action});
+      if(action==="rotate")showMachineCredential(data);
+      await loadMachines();
+    }catch(error){alert(error.message);}
+  });
+  $("machine-copy-secret").onclick=async()=>{
+    const secret=$("machine-credential-secret").value;
+    try{
+      await navigator.clipboard.writeText(secret);
+      setStatus($("machine-credential-form"),"Secret copied. Clear the clipboard after provisioning.",true);
+    }catch(_){
+      $("machine-credential-secret").type="text";
+      $("machine-credential-secret").select();
+      setStatus($("machine-credential-form"),"Clipboard unavailable. Secret selected for manual copy.");
+    }
+  };
+  $("machine-credential-dialog").addEventListener("close",()=>{
+    $("machine-credential-id").value="";
+    $("machine-credential-secret").value="";
+    $("machine-credential-secret").type="password";
   });
   $("identity-form").addEventListener("submit",async event=>{
     event.preventDefault();const form=event.currentTarget;

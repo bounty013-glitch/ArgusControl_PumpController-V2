@@ -128,7 +128,8 @@ typedef enum {
     ARGUS_MACHINE_CLIENT_SERVICE_TOOL,
     ARGUS_MACHINE_CLIENT_BACKUP_INTERFACE,
     ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
-    ARGUS_MACHINE_CLIENT_TYPE_MAX = ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+    ARGUS_MACHINE_CLIENT_AI_TOOL_GATEWAY,
+    ARGUS_MACHINE_CLIENT_TYPE_MAX = ARGUS_MACHINE_CLIENT_AI_TOOL_GATEWAY,
 } argus_machine_client_type_t;
 
 enum {
@@ -140,13 +141,20 @@ enum {
         ARGUS_MACHINE_TRANSPORT_LOCAL_SERVICE,
 };
 
+enum {
+    ARGUS_MACHINE_INTERFACE_SOFTAP = 1U << 0,
+    ARGUS_MACHINE_INTERFACE_STA = 1U << 1,
+    ARGUS_MACHINE_INTERFACE_DEFINED_MASK =
+        ARGUS_MACHINE_INTERFACE_SOFTAP | ARGUS_MACHINE_INTERFACE_STA,
+};
+
 typedef struct __attribute__((packed)) {
     uint8_t record_version;
     uint8_t enabled;
     uint8_t client_type;
     uint8_t allowed_transports;
     uint8_t revoked;
-    uint8_t reserved;
+    uint8_t allowed_interfaces;
     uint16_t role_mask;
     char identifier[ARGUS_SECURITY_ID_MAX + 1U];
     char display_name[ARGUS_SECURITY_DISPLAY_MAX + 1U];
@@ -157,6 +165,7 @@ typedef struct __attribute__((packed)) {
     argus_permission_set_t permissions;
     uint32_t credential_version;
     uint32_t record_security_epoch;
+    uint32_t principal_revision;
     argus_password_verifier_t verifier;
 } argus_security_machine_record_t;
 

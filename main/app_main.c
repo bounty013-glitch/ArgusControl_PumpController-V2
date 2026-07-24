@@ -40,6 +40,8 @@
 #include "argus_security_migration.h"
 #include "argus_security_store.h"
 #include "argus_security_directory.h"
+#include "argus_machine_directory.h"
+#include "argus_machine_service.h"
 #include "argus_session_manager.h"
 #include "argus_auth_service.h"
 #include "argus_security_audit.h"
@@ -684,6 +686,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 break;
             case 'k': {
                 argus_security_store_status_t security;
+                argus_machine_directory_status_t machines;
                 argus_local_recovery_status_t recovery;
                 printf("\n--- Phase 4D.4 Machine Enrollment and MQTT Authentication ---\n");
                 if (argus_security_store_get_status(&security) == ESP_OK) {
@@ -703,6 +706,15 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                            (unsigned)security.recovery_state);
                     printf("Encrypted NVS      : %s (key remains physically extractable)\n",
                            security.encryption_enabled ? "ACTIVE" : "INACTIVE");
+                }
+                if (argus_machine_directory_get_status(&machines) == ESP_OK) {
+                    printf("Machine Directory  : READY (gen=%lu count=%u%s)\n",
+                           (unsigned long)machines.generation,
+                           (unsigned)machines.machine_count,
+                           machines.redundancy_degraded
+                               ? ", redundancy degraded" : "");
+                } else {
+                    printf("Machine Directory  : UNAVAILABLE\n");
                 }
                 if (argus_local_recovery_get_status(&recovery) == ESP_OK) {
                     printf("KEY1 Detector      : release=%s qualified=%s triggered=%s count=%lu\n",
@@ -777,8 +789,10 @@ void app_main(void)
     // 2a. Initialize encrypted security storage and bounded KDF worker.
     ESP_ERROR_CHECK(argus_security_store_init());
     ESP_ERROR_CHECK(argus_security_directory_init());
+    ESP_ERROR_CHECK(argus_machine_directory_init());
     ESP_ERROR_CHECK(argus_session_manager_init());
     ESP_ERROR_CHECK(argus_password_verifier_init());
+    ESP_ERROR_CHECK(argus_machine_service_init());
     ESP_ERROR_CHECK(argus_auth_service_init());
     ESP_ERROR_CHECK(argus_security_audit_init());
     ESP_ERROR_CHECK(argus_security_http_init());

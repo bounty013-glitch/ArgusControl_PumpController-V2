@@ -203,7 +203,7 @@ static esp_err_t append_record(
     }
 #endif
     if (!s_available || type < ARGUS_AUDIT_LOGIN_SUCCESS ||
-        type > ARGUS_AUDIT_STORAGE_FAILURE ||
+        type > ARGUS_AUDIT_MQTT_POLICY_REJECTED ||
         outcome < ARGUS_AUDIT_OUTCOME_SUCCESS ||
         outcome > ARGUS_AUDIT_OUTCOME_PREPARED ||
         !safe_text(actor, ARGUS_AUDIT_TEXT_MAX + 1U) ||

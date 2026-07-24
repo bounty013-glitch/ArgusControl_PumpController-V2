@@ -154,9 +154,11 @@ esp_err_t test_4d2_record_schema_validation(void)
         .enabled = 1U,
         .client_type = ARGUS_MACHINE_CLIENT_HMI,
         .allowed_transports = ARGUS_MACHINE_TRANSPORT_MQTT,
+        .allowed_interfaces = ARGUS_MACHINE_INTERFACE_STA,
         .permissions = ARGUS_PERMISSION_VIEW_STATUS,
         .credential_version = 1U,
         .record_security_epoch = 1U,
+        .principal_revision = 1U,
         .verifier = verifier,
     };
     strlcpy(machine.identifier, "synthetic_hmi", sizeof(machine.identifier));

@@ -14,6 +14,7 @@ typedef enum {
     ARGUS_PRINCIPAL_NONE = 0,
     ARGUS_PRINCIPAL_CONSOLE,
     ARGUS_PRINCIPAL_HUMAN,
+    ARGUS_PRINCIPAL_MACHINE,
 } argus_principal_type_t;
 
 typedef struct {

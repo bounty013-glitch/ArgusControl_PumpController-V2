@@ -152,7 +152,9 @@ bool argus_security_machine_record_valid(
            record->allowed_transports != 0U &&
            (record->allowed_transports &
             ~ARGUS_MACHINE_TRANSPORT_DEFINED_MASK) == 0U &&
-           record->reserved == 0U &&
+           record->allowed_interfaces != 0U &&
+           (record->allowed_interfaces &
+            ~ARGUS_MACHINE_INTERFACE_DEFINED_MASK) == 0U &&
            bounded_string_valid(record->identifier,
                                 sizeof(record->identifier), false) &&
            bounded_printable_valid(record->display_name,
@@ -167,6 +169,7 @@ bool argus_security_machine_record_valid(
            (record->permissions & ~ARGUS_PERMISSION_DEFINED_MASK) == 0U &&
            record->credential_version != 0U &&
            record->record_security_epoch != 0U &&
+           record->principal_revision != 0U &&
            argus_password_verifier_record_valid(&record->verifier);
 }
 

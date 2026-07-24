@@ -1,0 +1,27 @@
+#ifndef ARGUS_TESTS_4D4_H
+#define ARGUS_TESTS_4D4_H
+
+#include "esp_err.h"
+
+esp_err_t test_4d4_machine_record_contract(void);
+esp_err_t test_4d4_machine_directory_capacity_and_duplicates(void);
+esp_err_t test_4d4_machine_directory_empty_selection(void);
+esp_err_t test_4d4_machine_directory_selector_recovery(void);
+esp_err_t test_4d4_machine_directory_interrupted_write(void);
+esp_err_t test_4d4_machine_directory_corruption_fail_closed(void);
+esp_err_t test_4d4_machine_directory_unsupported_schema(void);
+esp_err_t test_4d4_machine_directory_generation_conflict(void);
+esp_err_t test_4d4_enrollment_policy_boundaries(void);
+esp_err_t test_4d4_connect_valid_credentials(void);
+esp_err_t test_4d4_connect_flag_policy(void);
+esp_err_t test_4d4_connect_missing_and_oversized_credentials(void);
+esp_err_t test_4d4_connect_truncation_and_trailing(void);
+esp_err_t test_4d4_connect_embedded_nul(void);
+esp_err_t test_4d4_subscription_capability_and_scope(void);
+esp_err_t test_4d4_publish_capability_mapping(void);
+esp_err_t test_4d4_machine_scope_policy(void);
+esp_err_t test_4d4_machine_route_inventory(void);
+esp_err_t test_4d4_secret_zeroization(void);
+esp_err_t test_4d4_principal_excludes_verifier(void);
+
+#endif

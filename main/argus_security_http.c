@@ -6,6 +6,9 @@
 
 #include "argus_auth_service.h"
 #include "argus_http_security.h"
+#include "argus_machine_directory.h"
+#include "argus_machine_service.h"
+#include "argus_mqtt_broker.h"
 #include "argus_net_mgr.h"
 #include "argus_password_verifier.h"
 #include "argus_security_admin.h"
@@ -17,9 +20,10 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include <inttypes.h>
 
 #define SECURITY_BODY_MAX 1024U
-#define SECURITY_RESPONSE_MAX 4096U
+#define SECURITY_RESPONSE_MAX 8192U
 #define AUDIT_QUERY_MAX 96U
 
 static esp_timer_handle_t s_ap_apply_timer;
@@ -1158,6 +1162,413 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         &s_recovery_transition, &response, "recovery_exit");
 }
 
+static bool machine_type_field(
+    const cJSON *root, argus_machine_client_type_t *out)
+{
+    const char *value;
+    if (!string_field(root, "client_type", &value, 32U, false) ||
+        out == NULL) {
+        return false;
+    }
+    static const struct {
+        const char *name;
+        argus_machine_client_type_t type;
+    } MAP[] = {
+        {"PUMP_HMI", ARGUS_MACHINE_CLIENT_HMI},
+        {"NODE_RED", ARGUS_MACHINE_CLIENT_NODE_RED},
+        {"SERVICE_TOOL", ARGUS_MACHINE_CLIENT_SERVICE_TOOL},
+        {"BACKUP_INTERFACE", ARGUS_MACHINE_CLIENT_BACKUP_INTERFACE},
+        {"ARGUS_COMMAND", ARGUS_MACHINE_CLIENT_ARGUS_COMMAND},
+        {"AI_TOOL_GATEWAY", ARGUS_MACHINE_CLIENT_AI_TOOL_GATEWAY},
+    };
+    for (size_t i = 0U; i < sizeof(MAP) / sizeof(MAP[0]); ++i) {
+        if (strcmp(value, MAP[i].name) == 0) {
+            *out = MAP[i].type;
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *machine_type_name(uint8_t type)
+{
+    switch ((argus_machine_client_type_t)type) {
+        case ARGUS_MACHINE_CLIENT_HMI: return "PUMP_HMI";
+        case ARGUS_MACHINE_CLIENT_NODE_RED: return "NODE_RED";
+        case ARGUS_MACHINE_CLIENT_SERVICE_TOOL: return "SERVICE_TOOL";
+        case ARGUS_MACHINE_CLIENT_BACKUP_INTERFACE:
+            return "BACKUP_INTERFACE";
+        case ARGUS_MACHINE_CLIENT_ARGUS_COMMAND: return "ARGUS_COMMAND";
+        case ARGUS_MACHINE_CLIENT_AI_TOOL_GATEWAY:
+            return "AI_TOOL_GATEWAY";
+        default: return "UNKNOWN";
+    }
+}
+
+static bool interface_array(const cJSON *array, uint8_t *out)
+{
+    if (!cJSON_IsArray(array) || out == NULL ||
+        cJSON_GetArraySize(array) < 1 ||
+        cJSON_GetArraySize(array) > 2) {
+        return false;
+    }
+    uint8_t result = 0U;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, array) {
+        if (!cJSON_IsString(item) || item->valuestring == NULL) return false;
+        uint8_t value = strcmp(item->valuestring, "SOFTAP") == 0
+                            ? ARGUS_MACHINE_INTERFACE_SOFTAP
+                            : strcmp(item->valuestring, "STA") == 0
+                                  ? ARGUS_MACHINE_INTERFACE_STA
+                                  : 0U;
+        if (value == 0U || (result & value) != 0U) return false;
+        result |= value;
+    }
+    *out = result;
+    return true;
+}
+
+static esp_err_t machines_get(httpd_req_t *req)
+{
+    argus_http_security_context_t security;
+    if (!require_access(req, 0U, false, &security)) {
+        return ESP_OK;
+    }
+    if ((security.principal.permissions &
+         (ARGUS_PERMISSION_ENROLL_MACHINES |
+          ARGUS_PERMISSION_REVOKE_MACHINES)) == 0U) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "403 Forbidden",
+            "{\"ok\":false,\"error\":\"forbidden\"}");
+    }
+    argus_machine_directory_snapshot_t *snapshot =
+        calloc(1U, sizeof(*snapshot));
+    if (snapshot == NULL ||
+        argus_machine_directory_get_snapshot(snapshot) != ESP_OK) {
+        free(snapshot);
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"machine_directory_unavailable\"}");
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON *machines = cJSON_AddArrayToObject(root, "machines");
+    bool valid = root != NULL && machines != NULL;
+    for (size_t i = 0U; valid && i < snapshot->payload.machine_count; ++i) {
+        const argus_security_machine_record_t *record =
+            &snapshot->payload.machines[i];
+        if (!argus_machine_service_scope_contains(
+                security.principal.scope, record->scope)) {
+            continue;
+        }
+        cJSON *item = cJSON_CreateObject();
+        char permissions[19];
+        snprintf(permissions, sizeof(permissions), "0x%016" PRIx64,
+                 record->permissions);
+        valid = item != NULL &&
+            cJSON_AddStringToObject(
+                item, "id", record->identifier) != NULL &&
+            cJSON_AddStringToObject(
+                item, "display_name", record->display_name) != NULL &&
+            cJSON_AddStringToObject(
+                item, "client_type",
+                machine_type_name(record->client_type)) != NULL &&
+            cJSON_AddBoolToObject(
+                item, "enabled", record->enabled != 0U) != NULL &&
+            cJSON_AddBoolToObject(
+                item, "revoked", record->revoked != 0U) != NULL &&
+            cJSON_AddNumberToObject(
+                item, "allowed_interfaces",
+                record->allowed_interfaces) != NULL &&
+            cJSON_AddStringToObject(
+                item, "scope", record->scope) != NULL &&
+            cJSON_AddStringToObject(
+                item, "topic_scope", record->topic_scope) != NULL &&
+            cJSON_AddStringToObject(
+                item, "api_scope", record->api_scope) != NULL &&
+            cJSON_AddStringToObject(
+                item, "permissions", permissions) != NULL &&
+            cJSON_AddNumberToObject(
+                item, "credential_version",
+                record->credential_version) != NULL &&
+            cJSON_AddNumberToObject(
+                item, "principal_revision",
+                record->principal_revision) != NULL;
+        if (valid) cJSON_AddItemToArray(machines, item);
+        else cJSON_Delete(item);
+    }
+    char *response = valid ? malloc(SECURITY_RESPONSE_MAX) : NULL;
+    bool rendered = response != NULL &&
+        cJSON_PrintPreallocated(
+            root, response, SECURITY_RESPONSE_MAX, false);
+    cJSON_Delete(root);
+    argus_password_zeroize(snapshot, sizeof(*snapshot));
+    free(snapshot);
+    memset(&security, 0, sizeof(security));
+    if (!rendered) {
+        free(response);
+        return send_json(
+            req, "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"response_unavailable\"}");
+    }
+    esp_err_t err = send_json(req, "200 OK", response);
+    memset(response, 0, SECURITY_RESPONSE_MAX);
+    free(response);
+    return err;
+}
+
+static esp_err_t send_machine_credential_once(
+    httpd_req_t *req, const argus_principal_t *actor,
+    argus_machine_credential_once_t *credential,
+    const char *status)
+{
+    char response[256];
+    int written = snprintf(
+        response, sizeof(response),
+        "{\"ok\":true,\"machine_id\":\"%s\",\"machine_secret\":\"%s\","
+        "\"credential_version\":%" PRIu32
+        ",\"principal_revision\":%" PRIu32
+        ",\"secret_returned_once\":true}",
+        credential->identifier, credential->secret,
+        credential->credential_version, credential->principal_revision);
+    if (written < 0 || (size_t)written >= sizeof(response)) {
+        (void)argus_machine_service_quarantine_undisclosed(
+            credential->identifier);
+        (void)argus_mqtt_broker_disconnect_machine(
+            credential->identifier);
+        argus_machine_service_zero_credential(credential);
+        return send_json(
+            req, "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"credential_delivery_failed\"}");
+    }
+    esp_err_t err = send_json(req, status, response);
+    memset(response, 0, sizeof(response));
+    if (err != ESP_OK) {
+        (void)argus_machine_service_quarantine_undisclosed(
+            credential->identifier);
+        (void)argus_mqtt_broker_disconnect_machine(
+            credential->identifier);
+        (void)actor;
+    }
+    argus_machine_service_zero_credential(credential);
+    return err;
+}
+
+static esp_err_t machines_post(httpd_req_t *req)
+{
+    argus_http_security_context_t security;
+    if (!require_access(
+            req, ARGUS_PERMISSION_ENROLL_MACHINES, true, &security)) {
+        return ESP_OK;
+    }
+    if (!argus_session_manager_recently_reauthenticated(
+            security.session_index)) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "403 Forbidden",
+            "{\"ok\":false,\"error\":\"recent_reauthentication_required\"}");
+    }
+    cJSON *root = receive_object(req);
+    static const char *const KEYS[] = {
+        "display_name", "client_type", "interfaces", "scope",
+        "topic_scope", "api_scope", "permissions",
+    };
+    const char *display = NULL;
+    const char *scope = NULL;
+    const char *topic_scope = NULL;
+    const char *api_scope = NULL;
+    argus_machine_enrollment_request_t enrollment = {
+        .allowed_transports = ARGUS_MACHINE_TRANSPORT_MQTT,
+    };
+    bool valid = root != NULL && object_keys(root, KEYS, 7U) &&
+        string_field(
+            root, "display_name", &display,
+            ARGUS_SECURITY_DISPLAY_MAX, false) &&
+        machine_type_field(root, &enrollment.client_type) &&
+        interface_array(
+            cJSON_GetObjectItemCaseSensitive(root, "interfaces"),
+            &enrollment.allowed_interfaces) &&
+        string_field(
+            root, "scope", &scope, ARGUS_SECURITY_SCOPE_MAX, false) &&
+        string_field(
+            root, "topic_scope", &topic_scope,
+            ARGUS_SECURITY_TOPIC_SCOPE_MAX, false) &&
+        string_field(
+            root, "api_scope", &api_scope,
+            ARGUS_SECURITY_API_SCOPE_MAX, true) &&
+        permission_array(
+            cJSON_GetObjectItemCaseSensitive(root, "permissions"),
+            &enrollment.permissions);
+    if (valid) {
+        strlcpy(enrollment.display_name, display,
+                sizeof(enrollment.display_name));
+        strlcpy(enrollment.scope, scope, sizeof(enrollment.scope));
+        strlcpy(enrollment.topic_scope, topic_scope,
+                sizeof(enrollment.topic_scope));
+        strlcpy(enrollment.api_scope, api_scope,
+                sizeof(enrollment.api_scope));
+    }
+    cJSON_Delete(root);
+    if (!valid) {
+        memset(&security, 0, sizeof(security));
+        memset(&enrollment, 0, sizeof(enrollment));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_request\"}");
+    }
+
+    argus_security_audit_mutation_t mutation;
+    esp_err_t err = begin_admin_audit(
+        &security, ARGUS_AUDIT_MACHINE_ENROLLED,
+        "new_machine", "enroll", &mutation);
+    argus_machine_credential_once_t credential = {0};
+    if (err == ESP_OK) {
+        err = argus_machine_service_enroll(
+            &security.principal, &enrollment, &credential);
+        esp_err_t finalized = finish_admin_audit(&mutation, err);
+        if (finalized != ESP_OK && err == ESP_OK) {
+            (void)argus_machine_service_quarantine_undisclosed(
+                credential.identifier);
+            err = finalized;
+        } else {
+            err = finalized;
+        }
+    }
+    memset(&mutation, 0, sizeof(mutation));
+    memset(&enrollment, 0, sizeof(enrollment));
+    argus_principal_t actor = security.principal;
+    memset(&security, 0, sizeof(security));
+    if (err != ESP_OK) {
+        argus_machine_service_zero_credential(&credential);
+        memset(&actor, 0, sizeof(actor));
+        return send_json(
+            req, err == ESP_ERR_NOT_ALLOWED
+                     ? "403 Forbidden"
+                     : err == ESP_ERR_NO_MEM
+                           ? "409 Conflict"
+                           : "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"machine_enrollment_failed\"}");
+    }
+    esp_err_t response = send_machine_credential_once(
+        req, &actor, &credential, "201 Created");
+    memset(&actor, 0, sizeof(actor));
+    return response;
+}
+
+static esp_err_t machine_action_post(httpd_req_t *req)
+{
+    argus_http_security_context_t security;
+    if (!require_access(req, 0U, true, &security)) {
+        return ESP_OK;
+    }
+    cJSON *root = receive_object(req);
+    static const char *const KEYS[] = {"id", "action"};
+    const char *identifier = NULL;
+    const char *action = NULL;
+    bool valid = root != NULL && object_keys(root, KEYS, 2U) &&
+        string_field(
+            root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) &&
+        string_field(root, "action", &action, 16U, false);
+    bool rotation = valid && strcmp(action, "rotate") == 0;
+    if (rotation &&
+        !argus_session_manager_recently_reauthenticated(
+            security.session_index)) {
+        cJSON_Delete(root);
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "403 Forbidden",
+            "{\"ok\":false,\"error\":\"recent_reauthentication_required\"}");
+    }
+    argus_audit_event_type_t event = rotation
+        ? ARGUS_AUDIT_MACHINE_CREDENTIAL_ROTATED
+        : valid && strcmp(action, "revoke") == 0
+              ? ARGUS_AUDIT_MACHINE_REVOKED
+              : valid && strcmp(action, "delete") == 0
+                    ? ARGUS_AUDIT_MACHINE_DELETED
+                    : ARGUS_AUDIT_MACHINE_STATE_CHANGED;
+    char id_copy[ARGUS_SECURITY_ID_MAX + 1U] = {0};
+    char action_copy[17] = {0};
+    if (valid) {
+        strlcpy(id_copy, identifier, sizeof(id_copy));
+        strlcpy(action_copy, action, sizeof(action_copy));
+    }
+    cJSON_Delete(root);
+    if (!valid ||
+        (!rotation && strcmp(action_copy, "enable") != 0 &&
+         strcmp(action_copy, "disable") != 0 &&
+         strcmp(action_copy, "revoke") != 0 &&
+         strcmp(action_copy, "delete") != 0)) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_request\"}");
+    }
+    argus_permission_set_t required = rotation
+        ? ARGUS_PERMISSION_ENROLL_MACHINES
+        : ARGUS_PERMISSION_REVOKE_MACHINES;
+    if (argus_authorization_require(&security.principal, required) !=
+        ARGUS_AUTHZ_ALLOW) {
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "403 Forbidden",
+            "{\"ok\":false,\"error\":\"forbidden\"}");
+    }
+
+    argus_security_audit_mutation_t mutation;
+    esp_err_t err = begin_admin_audit(
+        &security, event, id_copy, action_copy, &mutation);
+    argus_machine_credential_once_t credential = {0};
+    if (err == ESP_OK) {
+        if (rotation) {
+            err = argus_machine_service_rotate(
+                &security.principal, id_copy, &credential);
+        } else if (strcmp(action_copy, "enable") == 0) {
+            err = argus_machine_service_set_enabled(
+                &security.principal, id_copy, true);
+        } else if (strcmp(action_copy, "disable") == 0) {
+            err = argus_machine_service_set_enabled(
+                &security.principal, id_copy, false);
+        } else if (strcmp(action_copy, "revoke") == 0) {
+            err = argus_machine_service_revoke(
+                &security.principal, id_copy);
+        } else {
+            err = argus_machine_service_delete(
+                &security.principal, id_copy);
+        }
+        esp_err_t finalized = finish_admin_audit(&mutation, err);
+        if (finalized != ESP_OK && err == ESP_OK && rotation) {
+            (void)argus_machine_service_quarantine_undisclosed(id_copy);
+        }
+        err = finalized;
+    }
+    memset(&mutation, 0, sizeof(mutation));
+    argus_principal_t actor = security.principal;
+    memset(&security, 0, sizeof(security));
+    if (err != ESP_OK) {
+        argus_machine_service_zero_credential(&credential);
+        memset(&actor, 0, sizeof(actor));
+        return send_json(
+            req, err == ESP_ERR_NOT_ALLOWED
+                     ? "403 Forbidden"
+                     : err == ESP_ERR_NOT_FOUND
+                           ? "404 Not Found"
+                           : err == ESP_ERR_INVALID_STATE
+                                 ? "409 Conflict"
+                                 : "503 Service Unavailable",
+            "{\"ok\":false,\"error\":\"machine_action_failed\"}");
+    }
+    (void)argus_mqtt_broker_disconnect_machine(id_copy);
+    if (rotation) {
+        esp_err_t response = send_machine_credential_once(
+            req, &actor, &credential, "200 OK");
+        memset(&actor, 0, sizeof(actor));
+        return response;
+    }
+    memset(&actor, 0, sizeof(actor));
+    return send_json(req, "200 OK", "{\"ok\":true}");
+}
+
 static const httpd_uri_t URI_ACCOUNTS_GET = {
     .uri = "/api/security/accounts", .method = HTTP_GET,
     .handler = accounts_get,
@@ -1190,6 +1601,18 @@ static const httpd_uri_t URI_RECOVERY_EXIT = {
     .uri = "/api/security/recovery/exit", .method = HTTP_POST,
     .handler = recovery_exit_post,
 };
+static const httpd_uri_t URI_MACHINES_GET = {
+    .uri = "/api/security/machines", .method = HTTP_GET,
+    .handler = machines_get,
+};
+static const httpd_uri_t URI_MACHINES_POST = {
+    .uri = "/api/security/machines", .method = HTTP_POST,
+    .handler = machines_post,
+};
+static const httpd_uri_t URI_MACHINE_ACTION = {
+    .uri = "/api/security/machines/action", .method = HTTP_POST,
+    .handler = machine_action_post,
+};
 
 static const httpd_uri_t *const SECURITY_ROUTES[] = {
     &URI_ACCOUNTS_GET,
@@ -1200,6 +1623,9 @@ static const httpd_uri_t *const SECURITY_ROUTES[] = {
     &URI_AUDIT_GET,
     &URI_AP_PASSWORD,
     &URI_RECOVERY_EXIT,
+    &URI_MACHINES_GET,
+    &URI_MACHINES_POST,
+    &URI_MACHINE_ACTION,
 };
 
 esp_err_t argus_security_http_init(void)
