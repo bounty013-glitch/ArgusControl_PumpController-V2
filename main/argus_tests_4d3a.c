@@ -266,7 +266,7 @@ esp_err_t test_4d3a_complete_route_inventory(void)
     size_t inventory_count = 0U;
     const argus_http_route_inventory_entry_t *inventory =
         argus_http_route_inventory(&inventory_count);
-    CHECK(inventory != NULL && inventory_count == 32U);
+    CHECK(inventory != NULL && inventory_count == 35U);
     CHECK(argus_http_route_inventory_validate());
     size_t active = 0U;
     for (size_t i = 0U; i < inventory_count; ++i) {

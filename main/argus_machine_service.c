@@ -77,7 +77,8 @@ static bool enrollment_request_valid(
            request->allowed_interfaces != 0U &&
            (request->allowed_interfaces &
             ~ARGUS_MACHINE_INTERFACE_DEFINED_MASK) == 0U &&
-           bounded_text(request->scope, sizeof(request->scope), false) &&
+           argus_security_machine_scope_valid(
+               request->scope, sizeof(request->scope)) &&
            bounded_text(request->topic_scope,
                         sizeof(request->topic_scope), false) &&
            strpbrk(request->topic_scope, "+#") == NULL &&

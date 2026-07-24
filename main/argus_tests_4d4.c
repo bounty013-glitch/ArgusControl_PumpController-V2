@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "argus_http_route_inventory.h"
+#include "argus_http_server.h"
 #include "argus_machine_directory.h"
 #include "argus_machine_service.h"
 #include "argus_mqtt_broker.h"
@@ -12,7 +13,12 @@
 #include "argus_password_verifier.h"
 #include "argus_security_http.h"
 
-#define CHECK(value) do { if (!(value)) return ESP_FAIL; } while (0)
+#define CHECK(value) do { \
+    if (!(value)) { \
+        printf("[FAIL] Phase 4D.4 assertion line %d\n", __LINE__); \
+        return ESP_FAIL; \
+    } \
+} while (0)
 
 static void valid_verifier(argus_password_verifier_t *verifier)
 {
@@ -91,7 +97,7 @@ static size_t connect_packet(uint8_t *packet, size_t capacity, uint8_t flags)
 {
     size_t offset = 0U;
     static const uint8_t protocol[] = "MQTT";
-    static const uint8_t id[] = "m-0123456789abcdef0123456789abcdef";
+    static const uint8_t id[] = "m-0123456789abcdef0123456789abcd";
     static const uint8_t secret[] =
         "0123456789abcdef0123456789abcdef01234567890";
     if (!append_field(
@@ -476,6 +482,9 @@ esp_err_t test_4d4_machine_scope_policy(void)
 esp_err_t test_4d4_machine_route_inventory(void)
 {
     CHECK(argus_http_route_inventory_validate());
+    CHECK(argus_http_test_registered_route_count() +
+              argus_security_http_test_route_count() <=
+          ARGUS_HTTP_MAX_URI_HANDLERS);
     bool list_get = false;
     bool enroll_post = false;
     bool action_post = false;

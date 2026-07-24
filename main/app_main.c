@@ -54,6 +54,7 @@
 #include <stdatomic.h>
 
 static const char *TAG = "argus_app_main";
+#define ARGUS_DIAGNOSTIC_TASK_STACK 12288U
 static _Atomic bool s_verbose_status = false;
 
 bool argus_app_main_get_console_verbosity(void)
@@ -679,10 +680,15 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 break;
             }
             case 't':
+                UBaseType_t stack_before =
+                    uxTaskGetStackHighWaterMark(NULL);
                 printf("Running legacy PURE unit tests...\n");
                 argus_tests_run_all();
                 printf("Running PURE unit tests...\n");
                 argus_tests_4a_run_all();
+                printf("Diagnostic task stack high-water: before=%u after=%u bytes\n",
+                       (unsigned)stack_before,
+                       (unsigned)uxTaskGetStackHighWaterMark(NULL));
                 break;
             case 'k': {
                 argus_security_store_status_t security;
@@ -865,7 +871,8 @@ void app_main(void)
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
     esp_err_t console_err = argus_console_transport_init();
     if (console_err == ESP_OK) {
-        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 8192, NULL, 5, NULL);
+        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task",
+                    ARGUS_DIAGNOSTIC_TASK_STACK, NULL, 5, NULL);
     } else {
         ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
     }

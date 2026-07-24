@@ -85,6 +85,30 @@ static bool bounded_string_valid(const char *value, size_t capacity,
     return true;
 }
 
+bool argus_security_machine_scope_valid(
+    const char *value, size_t capacity)
+{
+    if (value == NULL || capacity == 0U) return false;
+    size_t length = strnlen(value, capacity);
+    if (length == 0U || length >= capacity) return false;
+    if (length == 1U && value[0] == '*') return true;
+    bool segment_has_character = false;
+    for (size_t i = 0U; i < length; ++i) {
+        unsigned char c = (unsigned char)value[i];
+        if (isalnum(c) || c == '_' || c == '-' || c == '.') {
+            segment_has_character = true;
+        } else if (c == '/') {
+            if (!segment_has_character || i + 1U >= length) return false;
+            segment_has_character = false;
+        } else if (c == '*') {
+            return i + 1U == length && i > 0U && value[i - 1U] == '/';
+        } else {
+            return false;
+        }
+    }
+    return segment_has_character;
+}
+
 static bool bounded_printable_valid(const char *value, size_t capacity,
                                     bool allow_empty)
 {
@@ -159,7 +183,8 @@ bool argus_security_machine_record_valid(
                                 sizeof(record->identifier), false) &&
            bounded_printable_valid(record->display_name,
                                    sizeof(record->display_name), false) &&
-           bounded_string_valid(record->scope, sizeof(record->scope), false) &&
+           argus_security_machine_scope_valid(
+               record->scope, sizeof(record->scope)) &&
            bounded_printable_valid(record->topic_scope,
                                    sizeof(record->topic_scope), true) &&
            bounded_printable_valid(record->api_scope,

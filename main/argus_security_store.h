@@ -251,6 +251,8 @@ bool argus_security_human_record_valid(
     const argus_security_human_record_t *record);
 bool argus_security_machine_record_valid(
     const argus_security_machine_record_t *record);
+bool argus_security_machine_scope_valid(
+    const char *value, size_t capacity);
 uint32_t argus_security_payload_crc32(
     const argus_security_payload_t *payload);
 

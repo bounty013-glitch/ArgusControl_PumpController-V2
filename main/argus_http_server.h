@@ -81,6 +81,8 @@
 extern "C" {
 #endif
 
+#define ARGUS_HTTP_MAX_URI_HANDLERS 40U
+
 /**
  * @brief One-time initialization of HTTP server lifecycle objects.
  *
