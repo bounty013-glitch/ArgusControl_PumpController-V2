@@ -15,6 +15,9 @@
 #include "argus_cmd_router.h"
 #include "argus_config.h"
 #include "argus_identity.h"
+#include "argus_machine_service.h"
+#include "argus_mqtt_security.h"
+#include "argus_security_audit.h"
 #include "argus_net_mgr.h"
 #include "argus_state_mgr.h"
 
@@ -47,6 +50,8 @@ typedef struct {
 } runtime_state_t;
 
 static runtime_state_t s_runtime;
+static uint64_t s_last_mqtt_policy_audit_us;
+static uint64_t s_last_mqtt_auth_failure_audit_us;
 
 static uint64_t now_ms(void)
 {
@@ -341,6 +346,135 @@ static esp_err_t broker_policy_cb(const argus_mqtt_broker_message_t *message,
                ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
+static argus_machine_auth_outcome_t broker_auth_cb(
+    uint32_t peer_key, const argus_mqtt_connect_request_t *request,
+    uint8_t receiving_interface, void *user_ctx)
+{
+    (void)user_ctx;
+    if (request == NULL) {
+        return (argus_machine_auth_outcome_t) {
+            .result = ARGUS_MACHINE_AUTH_INVALID_REQUEST,
+        };
+    }
+    argus_machine_auth_outcome_t outcome =
+        argus_machine_service_authenticate(
+        peer_key, request->client_id,
+        request->username, request->username_len,
+        request->password, request->password_len,
+        receiving_interface);
+    argus_audit_event_type_t event =
+        outcome.result == ARGUS_MACHINE_AUTH_SUCCESS
+            ? ARGUS_AUDIT_MQTT_AUTH_SUCCESS
+            : outcome.result == ARGUS_MACHINE_AUTH_THROTTLED ||
+                      outcome.result == ARGUS_MACHINE_AUTH_BUSY
+                  ? ARGUS_AUDIT_MQTT_AUTH_THROTTLED
+                  : ARGUS_AUDIT_MQTT_AUTH_FAILURE;
+    const char *reason =
+        outcome.result == ARGUS_MACHINE_AUTH_SUCCESS
+            ? "authenticated"
+            : outcome.result == ARGUS_MACHINE_AUTH_TRANSPORT_REJECTED
+                  ? "transport_rejected"
+                  : outcome.result == ARGUS_MACHINE_AUTH_INTERFACE_REJECTED
+                        ? "interface_rejected"
+                        : outcome.result == ARGUS_MACHINE_AUTH_THROTTLED
+                              ? "throttled"
+                              : outcome.result == ARGUS_MACHINE_AUTH_BUSY
+                                    ? "kdf_busy"
+                                    : "invalid_credentials";
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    bool audit = outcome.result == ARGUS_MACHINE_AUTH_SUCCESS ||
+        s_last_mqtt_auth_failure_audit_us == 0U ||
+        now_us - s_last_mqtt_auth_failure_audit_us >= UINT64_C(60000000);
+    if (audit) {
+        (void)argus_security_audit_append(
+            event,
+            outcome.result == ARGUS_MACHINE_AUTH_SUCCESS
+                ? ARGUS_AUDIT_OUTCOME_SUCCESS
+                : ARGUS_AUDIT_OUTCOME_REJECTED,
+            outcome.result == ARGUS_MACHINE_AUTH_SUCCESS
+                ? ARGUS_PRINCIPAL_MACHINE
+                : ARGUS_PRINCIPAL_NONE,
+            outcome.result == ARGUS_MACHINE_AUTH_SUCCESS
+                ? outcome.principal.identifier
+                : "anonymous",
+            "mqtt_connect",
+            receiving_interface == ARGUS_MACHINE_INTERFACE_SOFTAP
+                ? "SOFTAP"
+                : receiving_interface == ARGUS_MACHINE_INTERFACE_STA
+                      ? "STA"
+                      : "UNKNOWN",
+            reason, outcome.principal.record_security_epoch, false);
+        if (outcome.result != ARGUS_MACHINE_AUTH_SUCCESS) {
+            s_last_mqtt_auth_failure_audit_us = now_us;
+        }
+    }
+    return outcome;
+}
+
+static esp_err_t broker_revalidate_cb(
+    const argus_mqtt_broker_client_info_t *client, void *user_ctx)
+{
+    (void)user_ctx;
+    return client == NULL
+               ? ESP_ERR_INVALID_ARG
+               : argus_machine_service_revalidate(
+                     &client->principal, client->receiving_interface);
+}
+
+static esp_err_t broker_subscribe_policy_cb(
+    const argus_mqtt_broker_client_info_t *client,
+    const char *filter, void *user_ctx)
+{
+    (void)user_ctx;
+    if (client == NULL || filter == NULL ||
+        (client->principal.permissions &
+         ARGUS_PERMISSION_VIEW_STATUS) == 0U ||
+        !argus_mqtt_security_subscription_allowed(
+            &s_runtime.topics, &client->principal, filter)) {
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        if (s_last_mqtt_policy_audit_us == 0U ||
+            now_us - s_last_mqtt_policy_audit_us >= UINT64_C(60000000)) {
+            (void)argus_security_audit_append(
+                ARGUS_AUDIT_MQTT_POLICY_REJECTED,
+                ARGUS_AUDIT_OUTCOME_REJECTED,
+                ARGUS_PRINCIPAL_MACHINE,
+                client->principal.identifier,
+                "mqtt_subscribe", "MQTT",
+                "subscription_denied",
+                client->principal.record_security_epoch, false);
+            s_last_mqtt_policy_audit_us = now_us;
+        }
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t broker_publish_authorize_cb(
+    const argus_mqtt_broker_message_t *message, void *user_ctx)
+{
+    (void)user_ctx;
+    if (message == NULL) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+    if (argus_mqtt_security_publish_allowed(
+            &s_runtime.topics, &message->principal, message->topic)) {
+        return ESP_OK;
+    }
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    if (s_last_mqtt_policy_audit_us == 0U ||
+        now_us - s_last_mqtt_policy_audit_us >= UINT64_C(60000000)) {
+        (void)argus_security_audit_append(
+            ARGUS_AUDIT_MQTT_POLICY_REJECTED,
+            ARGUS_AUDIT_OUTCOME_REJECTED,
+            ARGUS_PRINCIPAL_MACHINE,
+            message->principal.identifier,
+            "mqtt_publish", "MQTT", "capability_denied",
+            message->principal.record_security_epoch, false);
+        s_last_mqtt_policy_audit_us = now_us;
+    }
+    return ESP_ERR_NOT_ALLOWED;
+}
+
 static void broker_client_cb(argus_mqtt_broker_client_event_t broker_event,
                              const argus_mqtt_broker_client_info_t *client,
                              void *user_ctx)
@@ -417,7 +551,11 @@ void argus_mqtt_runtime_get_broker_config(uint16_t port,
     *out = (argus_mqtt_broker_config_t) {
         .port = port,
         .on_message = broker_message_cb,
+        .publish_authorize = broker_publish_authorize_cb,
         .policy_check = broker_policy_cb,
+        .authenticate = broker_auth_cb,
+        .revalidate = broker_revalidate_cb,
+        .subscribe_policy = broker_subscribe_policy_cb,
         .on_client_event = broker_client_cb,
         .user_ctx = NULL,
     };

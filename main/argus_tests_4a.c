@@ -26,6 +26,7 @@
 #include "argus_tests_4d2.h"
 #include "argus_tests_4d3.h"
 #include "argus_tests_4d3a.h"
+#include "argus_tests_4d4.h"
 #include "nvs.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -5112,7 +5113,7 @@ static esp_err_t test_4b3a_every_failure_stops_callback_chain(void)
 esp_err_t argus_tests_4a_run_all(void)
 {
     printf("\n===================================================\n");
-    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a Pure Non-Motion Unit Tests ===\n");
+    printf("=== Phase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a+4D.4 Pure Non-Motion Unit Tests ===\n");
     printf("===================================================\n");
 
     int passed_executions = 0;
@@ -5414,6 +5415,32 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d3a_transition_response_order);
     RUN_TEST(test_4d3a_complete_route_inventory);
     RUN_TEST(test_4d3a_browser_pagination_contract);
+    /* Phase 4D.4 machine enrollment and MQTT authentication */
+    RUN_TEST(test_4d4_machine_record_contract);
+    RUN_TEST(test_4d4_machine_directory_capacity_and_duplicates);
+    RUN_TEST(test_4d4_machine_directory_empty_selection);
+    RUN_TEST(test_4d4_machine_directory_selector_recovery);
+    RUN_TEST(test_4d4_machine_directory_interrupted_write);
+    RUN_TEST(test_4d4_machine_directory_corruption_fail_closed);
+    RUN_TEST(test_4d4_machine_directory_unsupported_schema);
+    RUN_TEST(test_4d4_machine_directory_generation_conflict);
+    RUN_TEST(test_4d4_enrollment_policy_boundaries);
+    RUN_TEST(test_4d4_connect_valid_credentials);
+    RUN_TEST(test_4d4_connect_flag_policy);
+    RUN_TEST(test_4d4_connect_missing_and_oversized_credentials);
+    RUN_TEST(test_4d4_connect_truncation_and_trailing);
+    RUN_TEST(test_4d4_connect_embedded_nul);
+    RUN_TEST(test_4d4_subscription_capability_and_scope);
+    RUN_TEST(test_4d4_publish_capability_mapping);
+    RUN_TEST(test_4d4_machine_scope_policy);
+    RUN_TEST(test_4d4_machine_route_inventory);
+    RUN_TEST(test_4d4_secret_zeroization);
+    RUN_TEST(test_4d4_principal_excludes_verifier);
+    RUN_TEST(test_4d4_disconnect_socket_ownership);
+    RUN_TEST(test_4d4_invalidation_before_bind);
+    RUN_TEST(test_4d4_bind_before_invalidation);
+    RUN_TEST(test_4d4_audit_failure_still_disconnects);
+    RUN_TEST(test_4d4_invalidated_connection_is_inert);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -5455,7 +5482,7 @@ esp_err_t argus_tests_4a_run_all(void)
     }
     bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
 
-    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a Pure Tests:\n");
+    printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a+4D.4 Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
     printf("  Repeat Passes       : %d\n", repeat_passes);
     printf("  Total Executions    : %d\n", passed_executions + failed_executions);
@@ -5498,7 +5525,7 @@ esp_err_t argus_tests_4a_run_all(void)
     bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
 
     printf("\n===================================================\n");
-    printf("PHASE 4D.3a PURE UNIT TEST SUITE: %s\n",
+    printf("PHASE 4D.4 PURE UNIT TEST SUITE: %s\n",
            overall_pass ? "PASSED" : "FAILED");
     printf("===================================================\n\n");
 

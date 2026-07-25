@@ -2,8 +2,10 @@ idf_component_register(
     SRCS
         "app_main.c"
         "argus_mqtt_broker.c"
+        "argus_mqtt_invalidation.c"
         "argus_mqtt_contract.c"
         "argus_mqtt_runtime.c"
+        "argus_mqtt_security.c"
         "argus_config.c"
         "argus_conversions.c"
         "argus_feedback.c"
@@ -33,6 +35,8 @@ idf_component_register(
         "argus_authorization.c"
         "argus_session_manager.c"
         "argus_security_directory.c"
+        "argus_machine_directory.c"
+        "argus_machine_service.c"
         "argus_auth_service.c"
         "argus_http_security.c"
         "argus_http_route_inventory.c"
@@ -49,6 +53,7 @@ idf_component_register(
         "argus_tests_4d2.c"
         "argus_tests_4d3.c"
         "argus_tests_4d3a.c"
+        "argus_tests_4d4.c"
         "argus_tests.c"
     INCLUDE_DIRS "."
     EMBED_TXTFILES
@@ -72,4 +77,10 @@ idf_component_register(
         esp_http_server
         mbedtls
         json
+)
+
+set_source_files_properties(
+    "argus_machine_directory.c"
+    PROPERTIES COMPILE_OPTIONS
+        "-Wframe-larger-than=2048;-Werror=frame-larger-than=2048"
 )

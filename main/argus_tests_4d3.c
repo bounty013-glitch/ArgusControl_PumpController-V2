@@ -567,7 +567,7 @@ esp_err_t test_4d3_browser_artifact_contract(void)
 esp_err_t test_4d3_security_route_inventory(void)
 {
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
-    CHECK(argus_security_http_test_route_count() == 8U);
+    CHECK(argus_security_http_test_route_count() == 11U);
     CHECK(argus_http_test_command_registration());
     CHECK(argus_http_test_factory_reset_registration());
     static const uint8_t ipv4[] = {192U, 168U, 4U, 1U};

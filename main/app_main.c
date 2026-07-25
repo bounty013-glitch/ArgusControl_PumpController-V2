@@ -40,6 +40,8 @@
 #include "argus_security_migration.h"
 #include "argus_security_store.h"
 #include "argus_security_directory.h"
+#include "argus_machine_directory.h"
+#include "argus_machine_service.h"
 #include "argus_session_manager.h"
 #include "argus_auth_service.h"
 #include "argus_security_audit.h"
@@ -52,6 +54,7 @@
 #include <stdatomic.h>
 
 static const char *TAG = "argus_app_main";
+#define ARGUS_DIAGNOSTIC_TASK_STACK 12288U
 static _Atomic bool s_verbose_status = false;
 
 bool argus_app_main_get_console_verbosity(void)
@@ -677,15 +680,21 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 break;
             }
             case 't':
+                UBaseType_t stack_before =
+                    uxTaskGetStackHighWaterMark(NULL);
                 printf("Running legacy PURE unit tests...\n");
                 argus_tests_run_all();
                 printf("Running PURE unit tests...\n");
                 argus_tests_4a_run_all();
+                printf("Diagnostic task stack high-water: before=%u after=%u bytes\n",
+                       (unsigned)stack_before,
+                       (unsigned)uxTaskGetStackHighWaterMark(NULL));
                 break;
             case 'k': {
                 argus_security_store_status_t security;
+                argus_machine_directory_status_t machines;
                 argus_local_recovery_status_t recovery;
-                printf("\n--- Phase 4D.3a Browser Security Corrections ---\n");
+                printf("\n--- Phase 4D.4 Machine Enrollment and MQTT Authentication ---\n");
                 if (argus_security_store_get_status(&security) == ESP_OK) {
                     printf("Store State        : %u\n", (unsigned)security.state);
                     printf("Schema/Generation  : %u / %lu\n",
@@ -703,6 +712,18 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                            (unsigned)security.recovery_state);
                     printf("Encrypted NVS      : %s (key remains physically extractable)\n",
                            security.encryption_enabled ? "ACTIVE" : "INACTIVE");
+                }
+                if (argus_machine_directory_get_status(&machines) == ESP_OK) {
+                    printf("Machine Directory  : READY (gen=%lu count=%u%s)\n",
+                           (unsigned long)machines.generation,
+                           (unsigned)machines.machine_count,
+                           machines.redundancy_degraded
+                               ? ", redundancy degraded" : "");
+                    printf("Machine Writer HWM : %lu bytes\n",
+                           (unsigned long)
+                               machines.writer_stack_high_water_bytes);
+                } else {
+                    printf("Machine Directory  : UNAVAILABLE\n");
                 }
                 if (argus_local_recovery_get_status(&recovery) == ESP_OK) {
                     printf("KEY1 Detector      : release=%s qualified=%s triggered=%s count=%lu\n",
@@ -766,7 +787,7 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.3a)...");
+    ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.4)...");
 
     // 1. Initialize Persistent Device Identity
     ESP_ERROR_CHECK(argus_identity_init());
@@ -777,8 +798,10 @@ void app_main(void)
     // 2a. Initialize encrypted security storage and bounded KDF worker.
     ESP_ERROR_CHECK(argus_security_store_init());
     ESP_ERROR_CHECK(argus_security_directory_init());
+    ESP_ERROR_CHECK(argus_machine_directory_init());
     ESP_ERROR_CHECK(argus_session_manager_init());
     ESP_ERROR_CHECK(argus_password_verifier_init());
+    ESP_ERROR_CHECK(argus_machine_service_init());
     ESP_ERROR_CHECK(argus_auth_service_init());
     ESP_ERROR_CHECK(argus_security_audit_init());
     ESP_ERROR_CHECK(argus_security_http_init());
@@ -851,11 +874,12 @@ void app_main(void)
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
     esp_err_t console_err = argus_console_transport_init();
     if (console_err == ESP_OK) {
-        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task", 8192, NULL, 5, NULL);
+        xTaskCreate(argus_diagnostic_menu_task, "diagnostic_task",
+                    ARGUS_DIAGNOSTIC_TASK_STACK, NULL, 5, NULL);
     } else {
         ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
     }
 #endif
 
-    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.3a startup completed successfully.");
+    ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.4 startup completed successfully.");
 }

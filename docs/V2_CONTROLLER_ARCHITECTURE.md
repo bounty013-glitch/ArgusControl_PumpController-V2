@@ -86,7 +86,7 @@ graph TD
     *   Requires strict QoS 1, non-retained command envelopes with current session, newer nonzero sequence, bounded command ID, and topic-specific value.
     *   Serializes accepted MQTT work through a bounded worker queue. The only normal motion path is broker to contract/runtime to command router to authority and state management.
     *   Publishes 25 authoritative retained metadata, state, status, and open-loop telemetry topics plus bounded non-retained command results.
-10. **Security Contract and Local Browser Access (Phase 4D.1 through 4D.3a)**:
+10. **Security Contract, Browser Access, and Machine Clients (Phase 4D.1 through 4D.4)**:
     *   Separates AP join secrets, Argus console verifiers, human accounts, browser sessions, machine credentials, MQTT connection identity, and Phase 4C freshness/session state.
     *   Defines deny-by-default roles, permission ceilings, delegation, and operation-boundary authorization without making login equivalent to operating authority.
     *   Restricts human browser traffic to the protected local AP for this plain-HTTP release and defines `/login`, `/operate`, and `/commission` as logical interface boundaries.
@@ -99,7 +99,10 @@ graph TD
     *   Records privileged mutations as non-success prepared evidence followed by correlated terminal outcomes, pages redacted audit history through strict bounded sequence cursors, and fails later privileged mutations closed if terminal audit finalization becomes indeterminate.
     *   Completes final HTTP responses before arming AP-credential or recovery-exit transitions, inventories all registered human routes against deny-by-default policy, and leaves retired `/api/logout` unregistered.
     *   Retires browser Basic Auth without changing the console-verifier domain or granting operating authority at login. Every browser motion request still reaches the existing command router exactly once or is rejected before dispatch.
-    *   Software-stored XTS keys protect against casual plaintext inspection but remain physically extractable. eFuse/HMAC key derivation, flash encryption, secure boot, MQTT machine authentication, HTTPS/TLS, certificates, and hostile-network operation remain deferred.
+    *   Maintains a separate bounded encrypted machine directory with controller-generated one-time credentials, verifier-only storage, stable principal identity, and SoftAP-only authenticated administration.
+    *   Authenticates MQTT CONNECT before admission, binds a sanitized principal to a non-reusable connection identity, and enforces interface, transport, capability, exact topic scope, and Phase 4C ownership policy on every packet.
+    *   Coordinates authentication-to-bind with machine invalidation epochs and closes or makes policy-inert the exact affected connection after rotation, disable, revocation, or deletion without disturbing unrelated clients or human sessions.
+    *   Software-stored XTS keys protect against casual plaintext inspection but remain physically extractable. eFuse/HMAC key derivation, flash encryption, secure boot, HTTPS/TLS, certificates, and hostile-network operation remain deferred.
 
 ---
 
