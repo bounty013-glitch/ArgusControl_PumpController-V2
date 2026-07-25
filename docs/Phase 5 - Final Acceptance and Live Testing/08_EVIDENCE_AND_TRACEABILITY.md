@@ -51,7 +51,8 @@ Examples:
 
 ```text
 P5-T05-abcdef1-20260725T143000-0500-pure-suite-run1.log
-P5-T09-abcdef1-20260725T151500-0500-calibration-raw.csv
+P5-T10-abcdef1-20260725T151500-0500-calibration-raw.csv
+P5-T20-abcdef1-20260725T190000-0500-final-pure-suite-run1.log
 ```
 
 Record the timezone explicitly. Do not fabricate synchronized time if the

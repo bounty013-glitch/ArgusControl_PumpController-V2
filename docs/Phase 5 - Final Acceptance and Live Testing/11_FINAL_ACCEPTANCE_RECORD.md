@@ -97,7 +97,6 @@ conditions]`
 | Network/supervisory interruptions | `[PENDING]` | `[PENDING]` |
 | Reboot and power-loss recovery | `[PENDING]` | `[PENDING]` |
 | Storage/reset/local recovery | `[PENDING]` | `[PENDING]` |
-| Final pure-suite/isolation proof | `[PENDING]` | `[PENDING]` |
 
 ## 7. Security and Deferred Risks
 
@@ -113,7 +112,15 @@ conditions]`
 | DHR-018 | `[PENDING]` |
 | Residual-risk approval | `[PENDING]` |
 
-## 8. Final State
+## 8. Final Proof
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Test 19 retained MQTT behavior | `[PENDING]` | `[PENDING]` |
+| Test 20 final pure-suite/isolation proof after Tests 1-19 | `[PENDING]` | `[PENDING]` |
+| Test 21 controlled final state/reboot performed last | `[PENDING]` | `[PENDING]` |
+
+## 9. Final State
 
 - Machine state: `[PENDING]`
 - Configured/applied/generated output: `[PENDING]`
@@ -125,7 +132,7 @@ conditions]`
 - COM/network resources released: `[PENDING]`
 - Repository/main/upstream status: `[PENDING]`
 
-## 9. Independent Gate Results
+## 10. Independent Gate Results
 
 **Gate A - Phase 5 engineering acceptance:**
 `[ACCEPTED / FAILED / INCOMPLETE]`
@@ -134,7 +141,7 @@ conditions]`
 
 Gate A acceptance while Gate B is open does not imply unrestricted production.
 
-## 10. Final Release Classification
+## 11. Final Release Classification
 
 Select exactly one:
 

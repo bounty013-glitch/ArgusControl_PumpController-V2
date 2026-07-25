@@ -102,7 +102,6 @@ requires written rationale and acceptance-authority approval.
 - [ ] Storage, reset, and local recovery behavior pass.
 - [ ] No unacceptable wear, drift, leak, thermal, current, pressure, or task/heap
       trend.
-- [ ] Final pure-suite/isolation proof passes.
 
 ## H. Security and Deployment
 
@@ -135,6 +134,10 @@ requires written rationale and acceptance-authority approval.
 
 ## J. Final State and Source Control
 
+- [ ] Test 19 retained MQTT discovery/configuration behavior passes.
+- [ ] Test 20 final pure-suite/isolation proof passes after every applicable
+      campaign in Tests 1-19.
+- [ ] Test 21 controlled final state and reboot runs last.
 - [ ] Pump stopped physically.
 - [ ] Generated/applied output zero.
 - [ ] Driver unlocked/disabled.

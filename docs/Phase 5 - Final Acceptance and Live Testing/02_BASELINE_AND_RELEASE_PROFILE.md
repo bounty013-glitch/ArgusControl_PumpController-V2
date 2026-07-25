@@ -111,7 +111,7 @@ dependent test.
 | Initial wetted test fluid | `REQUIRES SHAWN CONFIRMATION` | Start only with water or an approved benign nonhazardous surrogate. |
 | Actual gearbox ratio | `REQUIRES SHAWN CONFIRMATION` | Verify nameplate/configuration; do not assume nominal 10:1. |
 | Driver microstep/current/idle/missing-step settings | `REQUIRES SHAWN CONFIRMATION` | Verify physically and reconcile with firmware before power. |
-| Minimum test RPM | `REQUIRES SHAWN CONFIRMATION` | Conservative proposal: begin at the accepted nominal minimum, 500 mRPM, at minimum hydraulic load. |
+| Minimum test RPM | `REQUIRES SHAWN CONFIRMATION` | Conservative proposal for Tests 6 and 7: begin at the accepted nominal minimum, 500 mRPM, mechanically unloaded and dry. Test 8 is the first wet/hydraulic procedure and begins with open free discharge. |
 | Speed test points | `REQUIRES SHAWN CONFIRMATION` | Approve low/mid/high points within the physical assembly ratings. |
 | Provisional upper test RPM | `REQUIRES SHAWN CONFIRMATION` | Do not use the 200 RPM firmware bound as a physical rating; advance incrementally only after lower points pass. |
 | Permitted direction(s) | `REQUIRES SHAWN CONFIRMATION` | Test only directions allowed by pump, tube, and process hardware. |

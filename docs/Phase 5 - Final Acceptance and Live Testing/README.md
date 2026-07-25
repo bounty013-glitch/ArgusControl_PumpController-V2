@@ -35,6 +35,34 @@ locations must be completed and approved first.
 11. [10_FINAL_RELEASE_CHECKLIST.md](10_FINAL_RELEASE_CHECKLIST.md)
 12. [11_FINAL_ACCEPTANCE_RECORD.md](11_FINAL_ACCEPTANCE_RECORD.md)
 
+## Authoritative Live-Test Sequence
+
+1. Baseline Identity
+2. Source Review
+3. Clean Build
+4. Flash and Boot
+5. Preflight Suites
+6. Electrical Timing and Driver Configuration
+7. Unloaded Motion
+8. Pump Installation and Prime
+9. Loaded Trajectory Tuning
+10. Calibration
+11. Pressure and Load Characterization
+12. Browser Control
+13. MQTT Control
+14. Supervisory Loss
+15. Thermal and Endurance Soak
+16. Start/Stop and Permitted Direction Cycling
+17. Restart, Power-Loss, Storage, and Recovery
+18. Security Regression and Deferred-Hardening Disposition
+19. Retained MQTT Discovery and Configuration Behavior
+20. Final Pure Suite
+21. Controlled Final State and Reboot
+
+Tests 20 and 21 occur only after every other applicable live campaign has
+completed. The complete executable procedures are in
+`05_LIVE_ACCEPTANCE_PROCEDURES.md`.
+
 ## Authority of Documents
 
 - Existing doctrine remains controlling.

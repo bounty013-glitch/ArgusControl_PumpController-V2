@@ -92,7 +92,10 @@ not carry automatically into a higher speed, pressure, fluid, or duration.
 - Issue one command at a time.
 - Observe response, authoritative state, generated output, and physical result
   before continuing.
-- Begin at the lowest approved speed with zero or minimum hydraulic load.
+- Tests 6 and 7 begin at the lowest approved speed with the motor mechanically
+  safe, pump hydraulic load absent, and no wet operation.
+- Test 8 is the first wet/hydraulic procedure; begin it with water or another
+  expressly approved benign fluid and an open, free discharge.
 - Increase only through preapproved increments.
 - Never select the diagnostic 200 RPM option merely because it exists.
 - Do not use a timing race, test backdoor, direct lower-layer call, or stale

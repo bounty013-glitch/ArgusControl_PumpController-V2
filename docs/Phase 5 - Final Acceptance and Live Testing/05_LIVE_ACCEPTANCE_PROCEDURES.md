@@ -42,7 +42,7 @@ Every physical procedure below records the exact frozen-profile revision from
 `02_BASELINE_AND_RELEASE_PROFILE.md`. A `REQUIRES SHAWN CONFIRMATION` dependency
 makes the procedure `INCOMPLETE` and prohibits execution.
 
-## Test 1 - Baseline and Artifact Identity
+## Test 1 - Baseline Identity
 
 **Initial condition:** Clean repository and accepted Phase 4D.4 baseline.
 
@@ -66,7 +66,7 @@ makes the procedure `INCOMPLETE` and prohibits execution.
 
 **Result:** `[PENDING]`
 
-## Test 2 - Source Review and Production Boundaries
+## Test 2 - Source Review
 
 Audit:
 
@@ -86,7 +86,7 @@ Audit:
 
 **Result:** `[PENDING]`
 
-## Test 3 - Full-Clean Release Build
+## Test 3 - Clean Build
 
 Use ESP-IDF v5.5.3 only:
 
@@ -110,7 +110,7 @@ hashes, and no secret or artifact contamination.
 
 **Result:** `[PENDING]`
 
-## Test 4 - Flash, Boot, and Stationary Identity
+## Test 4 - Flash and Boot
 
 Verify COM5 or the recorded release port identifies the intended ESP32-S3.
 Flash the full-clean image and capture from reset.
@@ -134,7 +134,7 @@ Require:
 
 **Result:** `[PENDING]`
 
-## Test 5 - Pure-Suite Preflight and Isolation
+## Test 5 - Preflight Suites
 
 Run diagnostic option `t` three complete invocations through a genuine
 interactive terminal.
@@ -169,8 +169,12 @@ Require zero motor motion and zero production-state contamination.
 
 ## Test 6 - Electrical Timing and Driver Configuration
 
-With motion mechanically safe and the powered gate approved:
+After the existing pre-power inspection and bounded operator confirmation:
 
+- begin at the confirmed minimum test speed;
+- keep the motor mechanically safe and unloaded;
+- do not install or operate the pump as a hydraulic load;
+- do not introduce fluid or perform wet operation;
 - verify STEP idle high and 15 microsecond active-low pulse;
 - verify DIR polarity and setup/hold timing;
 - verify ENA inactive at boot and enable-before-STEP ordering;
@@ -188,7 +192,7 @@ Do not exceed the approved test envelope merely to exercise the firmware maximum
 
 **Result:** `[PENDING]`
 
-## Test 7 - Unloaded Mechanical Motion
+## Test 7 - Unloaded Motion
 
 Use the production command path where possible:
 
@@ -209,12 +213,14 @@ Use the production command path where possible:
 
 **Result:** `[PENDING]`
 
-## Test 8 - Pump Installation, Prime, and Zero-Pressure Delivery
+## Test 8 - Pump Installation and Prime
 
 After setup inspection and a new bounded powered confirmation:
 
+- treat this as the first wet/hydraulic Phase 5 procedure;
 - install the approved pump head and tubing;
-- prime with the approved safe fluid;
+- prime only with water or another expressly approved benign fluid;
+- keep the discharge open and free for the initial wet run;
 - inspect for leak, tube walk, trapped gas, cavitation, and siphon;
 - confirm setpoint-only isolation;
 - Start at the lowest approved speed and zero/minimum discharge pressure;
@@ -229,147 +235,7 @@ After setup inspection and a new bounded powered confirmation:
 
 **Result:** `[PENDING]`
 
-## Test 9 - Calibration and Characterization Matrix
-
-Execute the frozen matrix from `04_CALIBRATION_AND_PERFORMANCE_PLAN.md`.
-
-Require:
-
-- all repetitions and raw data preserved;
-- independent shaft and volume/flow measurement;
-- pressure and temperature recorded at every point;
-- no unapproved outlier removal;
-- all approved accuracy/repeatability/drift criteria met; and
-- release statements limited to the tested configuration and envelope.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 10 - Pressure and Load Envelope
-
-At approved incremental pressure points:
-
-- stabilize at the approved speed;
-- verify pressure remains below limit and relief remains functional;
-- record flow, shaft behavior, current, temperature, sound, vibration, and
-  controller state;
-- verify no tube/fitting movement, leak, stall, or driver lock;
-- perform normal Stop at each required load point;
-- perform the separately approved software E-stop point; and
-- inspect for residual pressure and safe restart behavior.
-
-No dead-head test is performed unless specifically engineered, relieved,
-reviewed, and approved.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 11 - Browser End-to-End Control
-
-Through the authenticated SoftAP and production browser controls:
-
-- verify status freshness and authority truthfulness;
-- enter Local Service through the supported path;
-- set target, Start, Stop, Unlock, E-stop, reset E-stop, and Recover only at
-  preapproved safe points;
-- verify each accepted command maps to exactly one production transition;
-- verify every rejected command maps to zero motion transition;
-- verify logout/session loss does not silently mutate motion; and
-- exit service cleanly with no stale command after reboot.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 12 - Authenticated MQTT End-to-End Control
-
-Using an enrolled, least-privilege machine on the approved interface:
-
-- prove CONNECT authentication and exact topic policy;
-- establish the current heartbeat lease;
-- issue current-session QoS 1 non-retained commands with newer sequences;
-- correlate each application `command_result`;
-- verify exact duplicate result replay with no second dispatch;
-- verify stale, conflicting, retained, malformed, unauthorized, wrong-interface,
-  and wrong-session traffic causes zero motion;
-- perform safe Start, normal Stop, software E-stop, reset, and Unlock;
-- verify authoritative retained state after reconnect; and
-- revoke the temporary machine and prove immediate invalidation.
-
-Do not store the one-time credential in evidence or shell history.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 13 - Fail-Operational Supervisory Loss
-
-While running at the specifically approved safe speed/load:
-
-- record stable state and physical delivery;
-- stop heartbeat and disconnect the supervisory client;
-- require link observability to become `STALE`/`OFFLINE`;
-- require no automatic Stop, target change, driver change, or synthetic command;
-- verify the physical process remains within the separately approved safe
-  fail-operational envelope;
-- reconnect and require truthful state republication without synthetic Start; and
-- issue a fresh explicit Stop and Unlock.
-
-If continued pumping during communications loss is not safe for the intended
-process, Phase 5 must not waive the contradiction. The deployment needs an
-independent interlock or a separately reviewed architecture change.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 14 - Final Pure Suite and Production Isolation
-
-After all physical tests, return to stationary `UNLOCKED`, zero output, driver
-disabled, pressure relieved, and safe fluid containment. Repeat the complete
-three-invocation pure-suite proof and compare all production snapshots and task
-counts.
-
-Require zero failures, contamination, panic/reset, watchdog, stack/heap failure,
-or task leak.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 15 - Controlled Final State and Reboot
-
-- Stop normally and confirm physical zero.
-- Unlock and confirm driver disabled.
-- Relieve pressure and isolate process energy.
-- Remove temporary machine clients and test accounts.
-- Restore approved production network/security configuration.
-- Reboot from the supported path.
-- Confirm no stale command, no automatic motion, truthful retained state, and
-  clean commissioned operation.
-- Release serial and network test resources.
-
-**Actual:** `[PENDING]`
-
-**Evidence:** `[PENDING]`
-
-**Result:** `[PENDING]`
-
-## Test 16 - Loaded Trajectory Tuning
+## Test 9 - Loaded Trajectory Tuning
 
 **Preconditions:** Tests 1-8 pass; the loaded mechanical/fluid configuration and
 frozen-profile revision are unchanged; independent RPM measurement is ready.
@@ -411,10 +277,121 @@ and evidence, identify root cause, and do not use Recover merely to continue.
 **Retest:** Approve a new profile revision for any ramp/limit change, then repeat
 the affected point and all dependent points. Result: `[PENDING]`
 
-## Test 17 - Thermal and Endurance Soak
+## Test 10 - Calibration
 
-**Preconditions:** Test 16 passes; duration, cadence, load, limits, tube-aging
-endpoint, and supervision plan are frozen.
+After Test 9 loaded trajectory behavior is accepted, execute the frozen matrix
+from `04_CALIBRATION_AND_PERFORMANCE_PLAN.md`.
+
+Require:
+
+- all repetitions and raw data preserved;
+- independent shaft and volume/flow measurement;
+- pressure and temperature recorded at every point;
+- no unapproved outlier removal;
+- all approved accuracy/repeatability/drift criteria met; and
+- release statements limited to the tested configuration and envelope.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 11 - Pressure and Load Characterization
+
+After Test 10 establishes the accepted baseline characterization, proceed at
+approved incremental pressure points:
+
+- stabilize at the approved speed;
+- verify pressure remains below limit and relief remains functional;
+- record flow, shaft behavior, current, temperature, sound, vibration, and
+  controller state;
+- verify no tube/fitting movement, leak, stall, or driver lock;
+- perform normal Stop at each required load point;
+- perform the separately approved software E-stop point; and
+- inspect for residual pressure and safe restart behavior.
+
+No dead-head test is performed unless specifically engineered, relieved,
+reviewed, and approved.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 12 - Browser Control
+
+Through the authenticated SoftAP and production browser controls:
+
+- verify status freshness and authority truthfulness;
+- enter Local Service through the supported path;
+- set target, Start, Stop, Unlock, E-stop, reset E-stop, and Recover only at
+  preapproved safe points;
+- verify each accepted command maps to exactly one production transition;
+- verify every rejected command maps to zero motion transition;
+- verify logout/session loss does not silently mutate motion; and
+- exit service cleanly with no stale command after reboot.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 13 - MQTT Control
+
+Using an enrolled, least-privilege machine on the approved interface:
+
+- prove CONNECT authentication and exact topic policy;
+- establish the current heartbeat lease;
+- issue current-session QoS 1 non-retained commands with newer sequences;
+- correlate each application `command_result`;
+- verify exact duplicate result replay with no second dispatch;
+- verify stale, conflicting, retained, malformed, unauthorized, wrong-interface,
+  and wrong-session traffic causes zero motion;
+- perform safe Start, normal Stop, software E-stop, reset, and Unlock;
+- verify authoritative retained state after reconnect; and
+- revoke the temporary machine and prove immediate invalidation.
+
+Do not store the one-time credential in evidence or shell history.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 14 - Supervisory Loss
+
+Begin only after Tests 12 and 13 have exercised browser and MQTT production
+control successfully.
+
+While running at the specifically approved safe speed/load:
+
+- record stable state and physical delivery;
+- stop heartbeat and disconnect the supervisory client;
+- require link observability to become `STALE`/`OFFLINE`;
+- require no automatic Stop, target change, driver change, or synthetic command;
+- verify the physical process remains within the separately approved safe
+  fail-operational envelope;
+- reconnect and require truthful state republication without synthetic Start; and
+- issue a fresh explicit Stop and Unlock.
+
+If continued pumping during communications loss is not safe for the intended
+process, Phase 5 must not waive the contradiction. The deployment needs an
+independent interlock or a separately reviewed architecture change.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 15 - Thermal and Endurance Soak
+
+**Preconditions:** Tests 9-14 pass where applicable; duration, cadence, load,
+limits, tube-aging endpoint, and supervision plan are frozen.
 
 **Required equipment:** Loaded fixture, physical disconnect, pressure/current/
 temperature instruments, leak containment, time-series logger, and tube
@@ -451,10 +428,10 @@ preserve state/data, and quarantine damaged tubing/components.
 **Retest:** Root-cause review determines the full soak and dependent calibration
 scope that must be repeated. Result: `[PENDING]`
 
-## Test 18 - Start/Stop and Permitted-Direction Cycling
+## Test 16 - Start/Stop and Permitted Direction Cycling
 
-**Preconditions:** Loaded trajectory passes; cycle count, directions, setpoints,
-ramps, dwell, and wear limits are frozen.
+**Preconditions:** Test 9 loaded trajectory and Test 15 endurance pass; cycle
+count, directions, setpoints, ramps, dwell, and wear limits are frozen.
 
 **Required equipment:** Guarded fixture, physical disconnect, independent RPM,
 pressure/current/temperature capture, and cycle counter.
@@ -491,11 +468,11 @@ or automatically resume the cycle index.
 **Retest:** Preserve failed count and repeat the acceptance campaign required by
 the approved root-cause disposition. Result: `[PENDING]`
 
-## Test 19 - Restart, Power Loss, Storage, and Recovery
+## Test 17 - Restart, Power-Loss, Storage, and Recovery
 
-**Preconditions:** Stationary restart tests pass before any running power-loss
-test; persistence inventory, backup/restore plan, cycle counts, and safe physical
-consequences are frozen.
+**Preconditions:** Tests 1-16 pass where applicable. Stationary restart tests
+pass before any running power-loss test; persistence inventory, backup/restore
+plan, cycle counts, and safe physical consequences are frozen.
 
 **Required equipment:** Physical disconnect, serial/network capture, approved
 backup/restore artifacts, loaded fixture and containment when running, and
@@ -534,10 +511,11 @@ preapproved reproducible plan.
 **Retest:** Repeat the affected destructive sequence from a restored known
 baseline plus every invalidated downstream test. Result: `[PENDING]`
 
-## Test 20 - Security Regression and DHR Disposition
+## Test 18 - Security Regression and Deferred-Hardening Disposition
 
-**Preconditions:** Candidate and interface inventory frozen; temporary accounts
-and machines planned; DHR owners and acceptance authority identified.
+**Preconditions:** Test 17 recovery evidence is complete; candidate and interface
+inventory frozen; temporary accounts and machines planned; DHR owners and
+acceptance authority identified.
 
 **Required equipment:** Isolated approved network, browser and MQTT clients,
 serial capture, audit export tooling, and credential-safe evidence workspace.
@@ -575,10 +553,11 @@ audit evidence, and restore the approved security/network state.
 **Retest:** Correct under normal history, independently review, and repeat all
 affected security and downstream release gates. Result: `[PENDING]`
 
-## Test 21 - Retained MQTT Discovery and Configuration Closure
+## Test 19 - Retained MQTT Discovery and Configuration Behavior
 
-**Preconditions:** Exact Phase 4C/4D.4 topic contract and retained-topic inventory
-reconciled from source; controller stationary; least-privilege machine enrolled.
+**Preconditions:** Test 18 security disposition is recorded; exact Phase 4C/4D.4
+topic contract and retained-topic inventory are reconciled from source;
+controller stationary; least-privilege machine enrolled.
 
 **Required equipment:** Approved MQTT client, packet/log capture, serial monitor,
 topic-inventory tool, and credential-safe evidence storage.
@@ -616,3 +595,38 @@ the broker inventory, and restore only the accepted configuration.
 
 **Retest:** Reconcile contract/source first; repeat the complete retained
 inventory and lifecycle sequence after any correction. Result: `[PENDING]`
+
+## Test 20 - Final Pure Suite
+
+After every applicable campaign in Tests 1-19 is complete, return to stationary
+`UNLOCKED`, zero output, driver disabled, pressure relieved, and safe fluid
+containment. Repeat the complete three-invocation pure-suite proof and compare
+all production snapshots and task counts.
+
+Require zero failures, contamination, panic/reset, watchdog, stack/heap failure,
+or task leak.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
+
+## Test 21 - Controlled Final State and Reboot
+
+- Begin only after Test 20 passes.
+- Stop normally and confirm physical zero.
+- Unlock and confirm driver disabled.
+- Relieve pressure and isolate process energy.
+- Remove temporary machine clients and test accounts.
+- Restore approved production network/security configuration.
+- Reboot from the supported path.
+- Confirm no stale command, no automatic motion, truthful retained state, and
+  clean commissioned operation.
+- Release serial and network test resources.
+
+**Actual:** `[PENDING]`
+
+**Evidence:** `[PENDING]`
+
+**Result:** `[PENDING]`
