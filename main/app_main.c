@@ -719,6 +719,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                            (unsigned)machines.machine_count,
                            machines.redundancy_degraded
                                ? ", redundancy degraded" : "");
+                    printf("Machine Writer HWM : %lu bytes\n",
+                           (unsigned long)
+                               machines.writer_stack_high_water_bytes);
                 } else {
                     printf("Machine Directory  : UNAVAILABLE\n");
                 }

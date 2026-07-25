@@ -52,6 +52,7 @@ typedef struct {
     uint8_t machine_count;
     uint32_t generation;
     bool redundancy_degraded;
+    uint32_t writer_stack_high_water_bytes;
 } argus_machine_directory_status_t;
 
 uint32_t argus_machine_directory_crc32(

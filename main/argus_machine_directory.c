@@ -248,15 +248,13 @@ static esp_err_t commit_locked(
         free(readback);
         return ESP_ERR_NO_MEM;
     }
-    *slot = (argus_machine_directory_slot_t) {
-        .magic = ARGUS_MACHINE_DIRECTORY_MAGIC,
-        .schema_version = ARGUS_MACHINE_DIRECTORY_SCHEMA_VERSION,
-        .payload_length = sizeof(*payload),
-        .generation = generation,
-        .crc32 = argus_machine_directory_crc32(payload),
-        .valid_marker = ARGUS_MACHINE_DIRECTORY_VALID,
-        .payload = *payload,
-    };
+    slot->magic = ARGUS_MACHINE_DIRECTORY_MAGIC;
+    slot->schema_version = ARGUS_MACHINE_DIRECTORY_SCHEMA_VERSION;
+    slot->payload_length = sizeof(*payload);
+    slot->generation = generation;
+    slot->crc32 = argus_machine_directory_crc32(payload);
+    slot->valid_marker = ARGUS_MACHINE_DIRECTORY_VALID;
+    memcpy(&slot->payload, payload, sizeof(slot->payload));
     esp_err_t err = write_slot(target, slot);
     if (err == ESP_OK) err = read_slot(target, readback);
     if (err == ESP_OK &&
@@ -387,6 +385,9 @@ esp_err_t argus_machine_directory_get_status(
     out->machine_count = s_snapshot.payload.machine_count;
     out->generation = s_snapshot.generation;
     out->redundancy_degraded = s_redundancy_degraded;
+    out->writer_stack_high_water_bytes =
+        (uint32_t)(uxTaskGetStackHighWaterMark(s_writer) *
+                   sizeof(StackType_t));
     xSemaphoreGive(s_mutex);
     return s_state == ARGUS_MACHINE_DIRECTORY_READY
                ? ESP_OK

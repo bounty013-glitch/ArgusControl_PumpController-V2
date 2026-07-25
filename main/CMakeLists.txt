@@ -78,3 +78,9 @@ idf_component_register(
         mbedtls
         json
 )
+
+set_source_files_properties(
+    "argus_machine_directory.c"
+    PROPERTIES COMPILE_OPTIONS
+        "-Wframe-larger-than=2048;-Werror=frame-larger-than=2048"
+)
