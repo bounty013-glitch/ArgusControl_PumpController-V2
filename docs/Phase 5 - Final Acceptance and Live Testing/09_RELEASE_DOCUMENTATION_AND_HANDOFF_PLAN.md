@@ -43,6 +43,10 @@ Must include:
 - final production configuration backup; and
 - commissioning acceptance/signature fields.
 
+The controller-to-HMI machine enrollment and stationary provisioning procedure
+is defined in `12_HMI_CONNECTION_AND_PROVISIONING_GUIDE.md`. It must remain
+source-consistent with the accepted HMI candidate before field use.
+
 ### Operator Guide
 
 Must explain in plain language:
