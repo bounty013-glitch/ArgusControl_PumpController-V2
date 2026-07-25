@@ -6,7 +6,8 @@
 
 | Item | Required value |
 |---|---|
-| Main commit | `31ea4254992f296001d367cece70998659a82783` |
+| Phase 5 planning-inclusive branch point | `6d907a11e294fde26a33fbb60b898839883e1490` |
+| Accepted firmware/source baseline | `31ea4254992f296001d367cece70998659a82783` |
 | Accepted tag | `v2-phase4d.4-machine-client-auth-accepted` |
 | Phase 4D.4 implementation | `cea28c2c8476f8f991f8337699e24cb16ea217e8` |
 | Baseline firmware identity | `v2-phase4d.4-dev` |
@@ -64,58 +65,75 @@ The final release version and tag are separate decisions:
 
 | Decision | Approved value |
 |---|---|
-| Final semantic firmware version | `[REQUIRED]` |
-| Release tag | `[REQUIRED]` |
-| Release artifact naming | `[REQUIRED]` |
-| Supported upgrade source versions | `[REQUIRED]` |
+| Final semantic firmware version | `REQUIRES SHAWN CONFIRMATION` |
+| Release tag | `REQUIRES SHAWN CONFIRMATION` |
+| Release artifact naming | `REQUIRES SHAWN CONFIRMATION` |
+| Supported upgrade source versions | `REQUIRES SHAWN CONFIRMATION` |
 
 ## 4. Product Hardware Profile
 
 | Field | Approved value / evidence |
 |---|---|
-| Controller PCB and hardware revision | `[REQUIRED]` |
-| ESP32 module/board and serial/MAC | `[REQUIRED]` |
-| Power supply model, voltage, current rating | `[REQUIRED]` |
-| Protection, fuse, disconnect, and grounding | `[REQUIRED]` |
-| Motor model and serial/lot | `[REQUIRED]` |
-| UIM344 model/firmware | `[REQUIRED]` |
-| UIM working current | `[REQUIRED]` |
-| UIM idle-current percentage | `[REQUIRED]` |
-| UIM microstep setting | `[REQUIRED; must agree with firmware]` |
-| UIM maximum-missing-steps setting | `[REQUIRED]` |
-| Gearbox model and actual ratio | `[REQUIRED]` |
-| Pump-head model and serial/lot | `[REQUIRED]` |
-| Coupling, guard, and mounting | `[REQUIRED]` |
-| Tubing manufacturer/material/size/lot | `[REQUIRED]` |
-| Tube occlusion/compression setting | `[REQUIRED]` |
-| Suction/discharge hose and fittings | `[REQUIRED]` |
-| Relief/bypass device and setpoint | `[REQUIRED]` |
+| Controller PCB and hardware revision | `REQUIRES SHAWN CONFIRMATION` |
+| ESP32 module/board and serial/MAC | `REQUIRES SHAWN CONFIRMATION` |
+| Power supply model, voltage, current rating | `REQUIRES SHAWN CONFIRMATION` |
+| Protection, fuse, disconnect, and grounding | `REQUIRES SHAWN CONFIRMATION` |
+| Motor model and serial/lot | `REQUIRES SHAWN CONFIRMATION` |
+| UIM344 model/firmware | `REQUIRES SHAWN CONFIRMATION` |
+| UIM working current | `REQUIRES SHAWN CONFIRMATION` |
+| UIM idle-current percentage | `REQUIRES SHAWN CONFIRMATION` |
+| UIM microstep setting | `REQUIRES SHAWN CONFIRMATION; must agree with firmware` |
+| UIM maximum-missing-steps setting | `REQUIRES SHAWN CONFIRMATION` |
+| Gearbox model and actual ratio | `REQUIRES SHAWN CONFIRMATION` |
+| Pump-head model and serial/lot | `REQUIRES SHAWN CONFIRMATION` |
+| Coupling, guard, and mounting | `REQUIRES SHAWN CONFIRMATION` |
+| Tubing manufacturer/material/size/lot | `REQUIRES SHAWN CONFIRMATION` |
+| Tube occlusion/compression setting | `REQUIRES SHAWN CONFIRMATION` |
+| Suction/discharge hose and fittings | `REQUIRES SHAWN CONFIRMATION` |
+| Relief/bypass device and setpoint | `REQUIRES SHAWN CONFIRMATION` |
 
 Photographs must show labels, wiring, common-anode connection, guarding, fluid
 path, relief arrangement, and instrument placement without exposing credentials.
 
-## 5. Operating and Deployment Envelope
+## 5. Frozen Test Profile and Acceptance Values
 
-| Field | Approved value |
-|---|---|
-| Minimum/maximum commanded RPM | `[REQUIRED]` |
-| External command policy for 1-499 mRPM | `[SUPPORTED / REJECTED / NOT CLAIMED - REQUIRED]` |
-| Permitted direction(s) | `[REQUIRED]` |
-| Maximum continuous run duration | `[REQUIRED]` |
-| Duty cycle and restart interval | `[REQUIRED]` |
-| Ambient temperature range | `[REQUIRED]` |
-| Test/release fluid and density range | `[REQUIRED]` |
-| Fluid temperature range | `[REQUIRED]` |
-| Viscosity range | `[REQUIRED]` |
-| Suction lift/inlet condition | `[REQUIRED]` |
-| Discharge pressure range | `[REQUIRED]` |
-| Maximum permitted pressure | `[REQUIRED]` |
-| Expected flow range | `[REQUIRED]` |
-| Flow accuracy/repeatability claim | `[REQUIRED or explicitly NONE]` |
-| Tubing service-life limit | `[REQUIRED]` |
-| Approved network topology | `[REQUIRED]` |
+Every live test records the approved profile revision and uses only values from
+this table. A change invalidates affected evidence and requires a new revision
+approved before retest. `REQUIRES SHAWN CONFIRMATION` means do not execute the
+dependent test.
+
+**Profile revision:** `REQUIRES SHAWN CONFIRMATION`
+
+| Field | Approved value | Information needed / conservative starting recommendation |
+|---|---|---|
+| Mechanical configuration and mounting | `REQUIRES SHAWN CONFIRMATION` | Exact controller, driver, motor, gearbox, pump head, coupling, guard, and fixture. |
+| Hose/tube identity, lot, condition, occlusion | `REQUIRES SHAWN CONFIRMATION` | Record new/used condition and accumulated runtime/cycles. |
+| Initial wetted test fluid | `REQUIRES SHAWN CONFIRMATION` | Start only with water or an approved benign nonhazardous surrogate. |
+| Actual gearbox ratio | `REQUIRES SHAWN CONFIRMATION` | Verify nameplate/configuration; do not assume nominal 10:1. |
+| Driver microstep/current/idle/missing-step settings | `REQUIRES SHAWN CONFIRMATION` | Verify physically and reconcile with firmware before power. |
+| Minimum test RPM | `REQUIRES SHAWN CONFIRMATION` | Conservative proposal: begin at the accepted nominal minimum, 500 mRPM, at minimum hydraulic load. |
+| Speed test points | `REQUIRES SHAWN CONFIRMATION` | Approve low/mid/high points within the physical assembly ratings. |
+| Provisional upper test RPM | `REQUIRES SHAWN CONFIRMATION` | Do not use the 200 RPM firmware bound as a physical rating; advance incrementally only after lower points pass. |
+| Permitted direction(s) | `REQUIRES SHAWN CONFIRMATION` | Test only directions allowed by pump, tube, and process hardware. |
+| Acceleration/deceleration ramps | `REQUIRES SHAWN CONFIRMATION` | Begin with accepted firmware defaults only after confirming they are safe for the loaded assembly; tune from measured evidence. |
+| Run durations and cycle counts | `REQUIRES SHAWN CONFIRMATION` | Approve shakedown, steady-state soak, endurance, start/stop, direction, reboot, and power-cycle counts. |
+| Temperature limits | `REQUIRES SHAWN CONFIRMATION` | Use the lowest applicable manufacturer/component/fluid limit. |
+| Current limits | `REQUIRES SHAWN CONFIRMATION` | Use supply, driver, and motor ratings plus approved trip criteria. |
+| Pressure range and maximum | `REQUIRES SHAWN CONFIRMATION` | Initial wet run uses free discharge/minimum pressure; no dead-head or closed discharge. |
+| Repeatability criterion | `REQUIRES SHAWN CONFIRMATION` | Define per matrix point before data are seen. |
+| Allowed trajectory/RPM deviation | `REQUIRES SHAWN CONFIRMATION` | Define against independent shaft measurement. |
+| Displacement/flow uncertainty limit | `REQUIRES SHAWN CONFIRMATION` | Include external revolution, mass/volume, density, and timing uncertainty. |
+| Sampling cadence | `REQUIRES SHAWN CONFIRMATION` | Freeze synchronized measurement/log intervals before each campaign. |
+| Warm-up/conditioning/soak | `REQUIRES SHAWN CONFIRMATION` | Specify tube conditioning and stabilization criteria, not observation after the fact. |
+| Tube aging/service-life endpoint | `REQUIRES SHAWN CONFIRMATION` | Define runtime/cycle endpoint and inspection/replacement criteria. |
+| Immediate-stop thresholds | `REQUIRES SHAWN CONFIRMATION` | Combine Section 03 qualitative stops with approved current, temperature, and pressure thresholds. |
+| External command policy for 1-499 mRPM | `REQUIRES SHAWN CONFIRMATION` | Choose supported, rejected, or not claimed. |
+| Ambient and fluid temperature range | `REQUIRES SHAWN CONFIRMATION` | Bound to instrumentation and material ratings. |
+| Suction/inlet geometry and discharge arrangement | `REQUIRES SHAWN CONFIRMATION` | Record lift, hose geometry, relief, collection, and containment. |
+| Flow claim | `CHARACTERIZATION ONLY` | No commanded-flow or closed-loop-flow claim. |
+| Approved network topology | `REQUIRES SHAWN CONFIRMATION` | Must preserve accepted trusted-local security boundary. |
 | Internet/WAN exposure | `PROHIBITED unless a later accepted security phase changes this` |
-| Intended users and service access | `[REQUIRED]` |
+| Intended users and service access | `REQUIRES SHAWN CONFIRMATION` |
 
 ## 6. Chemical and Process Boundary
 
@@ -135,13 +153,20 @@ is authorized until all of the following exist:
 If chemical qualification is not completed, the release statement must exclude
 that chemical and process use explicitly.
 
-## 7. Release Claim Freeze
+## 7. Control Claim and Release Classification
 
-**Selected profile:** `[RPM-CONTROLLED / FLOW-DELIVERY / EVALUATION-ONLY]`
+**Control claim:** `RPM-CONTROLLED`
 
-**Exact supported claims:** `[REQUIRED]`
+**Initial release classification:** `CONTROLLED EVALUATION`
 
-**Exact prohibited claims:** `[REQUIRED]`
+**Possible final classification:** `PRODUCTION`, `CONTROLLED EVALUATION`, or
+`BLOCKED`
+
+**Exact supported claims:** `REQUIRES SHAWN CONFIRMATION`
+
+**Exact prohibited claims:** no commanded-flow, measured-flow-telemetry,
+closed-loop-flow, universal calibration, safety-rated E-stop, customer chemical,
+HAZLOC, or unrestricted production claim without separate acceptance evidence.
 
 **Approved by:** `[NAME / ROLE / DATE]`
 

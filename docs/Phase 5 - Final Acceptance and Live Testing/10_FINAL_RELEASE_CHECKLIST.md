@@ -8,9 +8,14 @@ requires written rationale and acceptance-authority approval.
 ## A. Baseline and Scope
 
 - [ ] Accepted Phase 4D.4 tag and commit verified locally and remotely.
-- [ ] Phase 5 branch and Step 0 identity established before functional edits.
+- [ ] Phase 5 branch starts from planning-inclusive commit
+      `6d907a11e294fde26a33fbb60b898839883e1490`.
+- [ ] Accepted firmware/source baseline
+      `31ea4254992f296001d367cece70998659a82783` separately verified.
+- [ ] Phase 5 Step 0 identity established before functional edits.
 - [ ] Exact release-candidate commit frozen.
-- [ ] Release profile selected: RPM-controlled, flow-delivery, or evaluation-only.
+- [ ] Control claim remains `RPM-CONTROLLED`.
+- [ ] Initial release classification is `CONTROLLED EVALUATION`.
 - [ ] Supported and prohibited claims written explicitly.
 - [ ] Hardware BOM and configuration complete.
 - [ ] Operating, process, network, and security envelopes complete.
@@ -146,14 +151,43 @@ requires written rationale and acceptance-authority approval.
 - [ ] Main and tag pushed; no branch deletion or release publication unless
       separately authorized.
 
+## K. Gate A - Phase 5 Engineering Acceptance
+
+- [ ] Loaded controller/driver/motor/gearbox/pump/tube configuration passes.
+- [ ] Loaded trajectory and independently measured RPM pass.
+- [ ] Displacement/flow characterization and uncertainty are accepted.
+- [ ] Approved pressure/load fixture behavior passes.
+- [ ] Stop, software E-stop, authority loss, and communications loss pass.
+- [ ] Restart, persistence, storage, and recovery pass.
+- [ ] Thermal/endurance/tube-aging campaigns pass.
+- [ ] Validated operating limits are frozen and traceable.
+
+**Gate A result:** `[ACCEPTED / FAILED / INCOMPLETE]`
+
+## L. Gate B - Production Readiness
+
+- [ ] Security audit and DHR dispositions support production.
+- [ ] Manufacturing and provisioning controls are complete.
+- [ ] Installation, operator, maintenance, and training packages are complete.
+- [ ] Support, incident, update, rollback, and vulnerability owners are assigned.
+- [ ] Customer-use, HAZLOC, and chemical restrictions are complete and truthful.
+
+**Gate B result:** `[READY / OPEN / BLOCKED]`
+
+Gate A may be accepted while Gate B remains open. That combination permits
+`CONTROLLED EVALUATION`, not `PRODUCTION`.
+
 ## Final Decision
 
 | Field | Value |
 |---|---|
 | Release candidate | `[PENDING]` |
 | Firmware version | `[PENDING]` |
-| Release profile | `[PENDING]` |
+| Control claim | `RPM-CONTROLLED` |
+| Initial release classification | `CONTROLLED EVALUATION` |
+| Gate A engineering result | `[PENDING]` |
+| Gate B production-readiness result | `[PENDING]` |
 | Checklist exceptions | `[PENDING]` |
-| Final disposition | `[PENDING]` |
+| Final release classification | `[PRODUCTION / CONTROLLED EVALUATION / BLOCKED]` |
 | Acceptance authority | `[PENDING]` |
 | Date | `[PENDING]` |

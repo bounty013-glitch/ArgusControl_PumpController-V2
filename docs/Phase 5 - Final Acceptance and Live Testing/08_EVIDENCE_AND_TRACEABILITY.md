@@ -92,7 +92,7 @@ Controller/UI/MQTT/serial state:
 Physical result:
 Artifacts:
 Anomalies:
-Result: PASS / FAIL / BLOCKED / NOT APPLICABLE
+Result: PASS / FAIL / INVALID / INCOMPLETE
 Operator/date:
 Independent reviewer/date:
 ```
@@ -120,12 +120,21 @@ Calibration/reliability CSV files use immutable columns and units. At minimum:
 ```text
 test_id,run,point,time,timezone_valid,candidate,controller_uid,
 motor_id,pump_id,tube_id,fluid_id,direction,command_mrpm,
-generated_mrpm,external_rpm,step_count,pressure_kpa,
-mass_g,density_g_ml,collection_s,flow_ml_min,voltage_v,current_a,
+generated_mrpm,generated_step_count,external_rpm,external_revolutions,
+external_revolution_measurement_method,external_revolution_uncertainty,
+volume_measurement_method,volume_measurement_uncertainty,
+tube_runtime_or_cycle_count,pressure_kpa,mass_g,density_g_ml,
+collection_s,flow_ml_min,voltage_v,current_a,
 ambient_c,controller_c,driver_c,motor_c,pump_c,result,notes
 ```
 
 Use blank/NA for unavailable measurements; never substitute zero.
+Generated RPM and generated step count are retained as controller-output
+evidence, not independent proof of shaft motion. If external revolution
+measurement is missing, inadequately resolved, or lacks an uncertainty
+statement, displacement results are `CHARACTERIZATION/PROVISIONAL` and cannot be
+accepted as displacement calibration. Report no more significant digits than
+the least precise contributing measurement supports.
 
 ## 8. Defect and Rerun Traceability
 

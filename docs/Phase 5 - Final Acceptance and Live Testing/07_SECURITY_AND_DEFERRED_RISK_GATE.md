@@ -4,6 +4,10 @@
 
 ## 1. Release Boundary
 
+This document is the principal Gate B security input. Gate A engineering
+acceptance may pass while this gate remains open, but the final release
+classification must remain `CONTROLLED EVALUATION` or `BLOCKED`.
+
 The accepted baseline provides local human authentication, CSRF-protected
 browser sessions, machine enrollment, MQTT CONNECT authentication, per-packet
 authorization, credential rotation/revocation, and bounded audit records.
@@ -92,11 +96,12 @@ Using temporary identities and no reusable secret in evidence:
 Before final release, record:
 
 - commissioned-device AP default: `[ON / OFF / CONFIGURABLE]`;
-- recovery path when AP is off: `[REQUIRED]`;
-- operational need for field discoverability: `[REQUIRED]`;
-- exposure/risk rationale: `[REQUIRED]`;
-- test evidence from representative field use: `[REQUIRED]`; and
-- acceptance authority approval: `[REQUIRED]`.
+- recovery path when AP is off: `REQUIRES SHAWN CONFIRMATION`;
+- operational need for field discoverability: `REQUIRES SHAWN CONFIRMATION`;
+- exposure/risk rationale: `REQUIRES SHAWN CONFIRMATION`;
+- test evidence from representative field use:
+  `REQUIRES SHAWN CONFIRMATION`; and
+- acceptance authority approval: `REQUIRES SHAWN CONFIRMATION`.
 
 If code is needed to implement the decision, it creates a new reviewed candidate.
 
@@ -108,21 +113,23 @@ If code is needed to implement the decision, it creates a new reviewed candidate
 | MQTT network | Approved trusted local network only |
 | Routed WAN/public Internet | Prohibited |
 | Untrusted peer on AP/LAN | Not accepted |
-| Physical access equivalence | `[REQUIRED trust statement]` |
-| Credential provisioning/custody | `[REQUIRED]` |
-| AP credential uniqueness/rotation | `[REQUIRED]` |
-| Machine credential rotation/revocation | `[REQUIRED]` |
-| Audit export/retention process | `[REQUIRED]` |
-| Firmware update provenance | `[REQUIRED]` |
-| Vulnerability response owner | `[REQUIRED]` |
+| Physical access equivalence | `REQUIRES SHAWN CONFIRMATION` |
+| Credential provisioning/custody | `REQUIRES SHAWN CONFIRMATION` |
+| AP credential uniqueness/rotation | `REQUIRES SHAWN CONFIRMATION` |
+| Machine credential rotation/revocation | `REQUIRES SHAWN CONFIRMATION` |
+| Audit export/retention process | `REQUIRES SHAWN CONFIRMATION` |
+| Firmware update provenance | `REQUIRES SHAWN CONFIRMATION` |
+| Vulnerability response owner | `REQUIRES SHAWN CONFIRMATION` |
 
 ## 7. Gate Result
 
-**Release classification:** `[PRODUCTION / CONTROLLED EVALUATION / BLOCKED]`
+**Initial release classification:** `CONTROLLED EVALUATION`
+
+**Final release classification:** `[PRODUCTION / CONTROLLED EVALUATION / BLOCKED]`
 
 **DHR dispositions complete:** `[YES/NO]`
 
-**Independent audit reference:** `[REQUIRED FOR PRODUCTION]`
+**Independent audit reference:** `REQUIRES SHAWN CONFIRMATION FOR PRODUCTION`
 
 **Residual-risk approval:** `[NAME / ROLE / DATE]`
 

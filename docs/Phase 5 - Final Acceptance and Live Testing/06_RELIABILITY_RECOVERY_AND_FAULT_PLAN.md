@@ -11,25 +11,15 @@ pressure, chemical exposure, or mechanical hazard.
 
 ## 2. Criteria to Freeze
 
-| Item | Approved value |
-|---|---|
-| Continuous endurance duration | `[REQUIRED]` |
-| Start/stop cycle count | `[REQUIRED]` |
-| Forward/reverse cycle count | `[REQUIRED or N/A]` |
-| Reboot count | `[REQUIRED]` |
-| Cold power-cycle count | `[REQUIRED]` |
-| Maximum current by test point | `[REQUIRED]` |
-| Maximum component/fluid temperatures | `[REQUIRED]` |
-| Maximum pressure and excursion duration | `[REQUIRED]` |
-| Permitted flow drift over endurance | `[REQUIRED]` |
-| Tubing inspection/replacement interval | `[REQUIRED]` |
-| Leak acceptance | `ZERO visible leak unless a stricter measurable criterion is defined` |
-| Panic/watchdog/heap/stack/task failures | `ZERO` |
-| Uncommanded motion or restart | `ZERO` |
+The single authoritative source for duration, cycle count, permitted directions,
+current, temperature, pressure, drift, sampling, tube aging, and immediate-stop
+criteria is the approved frozen test profile in
+`02_BASELINE_AND_RELEASE_PROFILE.md`. This document supplies no alternate numeric
+defaults. Any unresolved value remains `REQUIRES SHAWN CONFIRMATION`, and the
+dependent campaign must not execute.
 
-Suggested planning baseline, not an approved criterion: one 8-hour continuous
-run and 100 controlled start/stop cycles. The owner must approve or replace these
-values based on intended duty and risk before execution.
+Zero panic, watchdog, heap/stack/task failure, uncommanded motion/restart, or
+visible leak is mandatory and may not be relaxed by the profile.
 
 ## 3. Thermal and Electrical Soak
 
@@ -113,8 +103,8 @@ Without exposing credentials:
 - verify physically local security recovery entry and authenticated exit;
 - verify reset/recovery never starts motion, clears an E-stop improperly, or
   changes process state silently; and
-- verify calibration preservation/erasure behavior matches the approved
-  Profile A/B contract.
+- verify characterization/calibration preservation or erasure behavior matches
+  the fixed RPM-controlled claim and approved profile.
 
 Destructive tests use a backed-up, reproducible test configuration and cannot be
 performed on the sole evidence artifact without an approved restoration plan.

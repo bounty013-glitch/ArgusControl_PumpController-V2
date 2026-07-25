@@ -12,6 +12,7 @@ execution.
 | Field | Final value |
 |---|---|
 | Repository | `ArgusControl_PumpController-V2` |
+| Phase 5 planning-inclusive branch point | `6d907a11e294fde26a33fbb60b898839883e1490` |
 | Accepted Phase 4D.4 baseline | `31ea4254992f296001d367cece70998659a82783` |
 | Phase 5 branch | `[PENDING]` |
 | Accepted implementation commit | `[PENDING]` |
@@ -29,7 +30,9 @@ objects.
 
 ## 2. Accepted Release Profile
 
-**Classification:** `[RPM-CONTROLLED / FLOW-DELIVERY / CONTROLLED EVALUATION]`
+**Control claim:** `RPM-CONTROLLED`
+
+**Initial release classification:** `CONTROLLED EVALUATION`
 
 **Hardware/profile revision:** `[PENDING]`
 
@@ -122,13 +125,21 @@ conditions]`
 - COM/network resources released: `[PENDING]`
 - Repository/main/upstream status: `[PENDING]`
 
-## 9. Final Disposition
+## 9. Independent Gate Results
+
+**Gate A - Phase 5 engineering acceptance:**
+`[ACCEPTED / FAILED / INCOMPLETE]`
+
+**Gate B - production readiness:** `[READY / OPEN / BLOCKED]`
+
+Gate A acceptance while Gate B is open does not imply unrestricted production.
+
+## 10. Final Release Classification
 
 Select exactly one:
 
-- `[ ] ACCEPTED`
-- `[ ] CONDITIONALLY ACCEPTED`
-- `[ ] REJECTED`
+- `[ ] PRODUCTION`
+- `[ ] CONTROLLED EVALUATION`
 - `[ ] BLOCKED`
 
 **Decision rationale:** `[PENDING]`
@@ -141,5 +152,6 @@ Select exactly one:
 
 **Date:** `[PENDING]`
 
-Phase 5 may be marked `ACCEPTED` only when every required gate passes against the
-exact candidate and all supported claims stay within the tested release profile.
+`PRODUCTION` requires accepted Gate A and ready Gate B. Accepted Gate A with an
+open Gate B may be classified only as `CONTROLLED EVALUATION`. All supported
+claims remain bounded to the exact tested candidate and frozen profile.

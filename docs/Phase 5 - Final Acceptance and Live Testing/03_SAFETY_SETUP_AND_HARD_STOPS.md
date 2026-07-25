@@ -20,10 +20,10 @@ The Phase 5 test lead may stop any test without completing the current step.
 
 | Role | Responsibility | Assigned |
 |---|---|---|
-| Test lead | Runs procedure and owns stop decision | `[REQUIRED]` |
-| Safety observer | Watches hardware/fluid path and controls disconnect | `[REQUIRED for powered/fluid tests]` |
-| Evidence recorder | Captures synchronized observations and raw data | `[REQUIRED]` |
-| Acceptance authority | Approves criteria and final disposition | `[REQUIRED]` |
+| Test lead | Runs procedure and owns stop decision | `REQUIRES SHAWN CONFIRMATION` |
+| Safety observer | Watches hardware/fluid path and controls disconnect | `REQUIRES SHAWN CONFIRMATION for powered/fluid tests` |
+| Evidence recorder | Captures synchronized observations and raw data | `REQUIRES SHAWN CONFIRMATION` |
+| Acceptance authority | Approves criteria and final disposition | `REQUIRES SHAWN CONFIRMATION` |
 
 One person may not operate the UI, observe all physical hazards, and serve as the
 independent safety observer during loaded or pressurized testing.
@@ -101,7 +101,29 @@ not carry automatically into a higher speed, pressure, fluid, or duration.
   tests are supplemental lower-layer checks only.
 - Keep a physical stop method independent of Wi-Fi, MQTT, browser, and MCU.
 
-## 7. Immediate Stop Conditions
+## 7. Prohibited Test Conditions and Claims
+
+Phase 5 does not authorize:
+
+- hydrogen peroxide or customer chemicals without a separately approved chemical
+  procedure;
+- HAZLOC or Class I Division 1 operation or acceptance;
+- dead-head or closed-discharge testing;
+- operation beyond any component, tube, hose, fitting, instrument, or fixture
+  rating;
+- unattended initial powered, wet, loaded, pressure, or endurance testing;
+- a safety-rated E-stop claim for browser or MQTT software E-stop;
+- a measured-flow claim without physical volume or mass measurement;
+- commanded-flow or closed-loop-flow claims;
+- universal calibration across hose lots/types, fluids, temperatures, pressures,
+  wear states, pump heads, or pump revolutions; or
+- treating Stop or software E-stop as physical isolation.
+
+Initial wet tests use water or another explicitly approved benign,
+nonhazardous fluid. Setup changes require pressure relief and physical electrical
+isolation.
+
+## 8. Immediate Stop Conditions
 
 Remove motor power immediately for:
 
@@ -128,7 +150,7 @@ After an immediate stop:
 6. classify the event and identify root cause; and
 7. obtain review approval before any rerun.
 
-## 8. Software E-Stop Boundary
+## 9. Software E-Stop Boundary
 
 The browser and MQTT E-stop commands are software-level functions. They must be
 tested for application behavior, but must never be described as safety-rated or
@@ -138,7 +160,7 @@ The accepted active-low hold behavior can retain driver holding torque after a
 software E-stop. The procedure must account for stored mechanical force and must
 not assume E-stop means electrically de-energized or freely movable.
 
-## 9. Final Safe State
+## 10. Final Safe State
 
 Every test block ends with:
 

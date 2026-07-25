@@ -33,10 +33,13 @@ The campaign must answer:
 
 ## 3. Baseline
 
-Phase 5 begins from:
+Future Phase 5 execution branches begin from:
 
 - repository: `ArgusControl_PumpController-V2`;
-- commit: `31ea4254992f296001d367cece70998659a82783`;
+- planning-inclusive branch point:
+  `6d907a11e294fde26a33fbb60b898839883e1490`;
+- accepted firmware/source baseline:
+  `31ea4254992f296001d367cece70998659a82783`;
 - tag: `v2-phase4d.4-machine-client-auth-accepted`;
 - firmware identity: `v2-phase4d.4-dev`; and
 - accepted implementation candidate:
@@ -46,41 +49,27 @@ The baseline is software, automated-runtime, browser, security, stationary MQTT,
 and earlier bounded unloaded-motion accepted. It is not pump, tubing, fluid,
 pressure, flow-accuracy, loaded-torque, process, or endurance accepted.
 
-## 4. Release Claim Decision
+## 4. Control Claim and Release Classification
 
-Before implementation or physical testing, the owner must select exactly one:
+The control claim is fixed:
 
-### Profile A - RPM-Controlled Pump
+**Control claim:** `RPM-CONTROLLED`
 
-The controller accepts output-shaft RPM commands. Pump output is characterized
-for a named pump head, tubing, fluid, temperature, suction condition, discharge
-pressure, and tubing life. No direct flow command, measured flow telemetry, or
-closed-loop flow claim is made.
+The controller accepts output-shaft RPM commands. Pump output may be
+characterized for a named pump head, tubing, fluid, temperature, suction
+condition, discharge pressure, and tube life. No direct flow command, measured
+flow telemetry, commanded-flow behavior, or closed-loop flow claim is made.
 
-### Profile B - Calibrated Flow-Delivery Product
+**Initial release classification:** `CONTROLLED EVALUATION`
 
-The product accepts or displays calibrated flow as a production feature. This
-requires a reviewed production path for calibrated displacement storage,
-validation, command conversion, UI/MQTT/API representation, versioning, and
-truthful uncertainty. The current baseline does not provide that complete path.
-Any implementation starts a Phase 5 implementation microphase and invalidates
-downstream evidence until review and regression are repeated.
-
-### Profile C - Evaluation Build Only
-
-The system is released only for controlled field evaluation under trusted-local
-network and named operating restrictions. It is not represented as a production
-or hostile-network-ready product.
-
-**Selected profile:** `[REQUIRED]`
-
-**Approved release statement:** `[REQUIRED]`
+After both gates are evaluated, the final release classification is exactly one
+of `PRODUCTION`, `CONTROLLED EVALUATION`, or `BLOCKED`.
 
 ## 5. Phase 5 Gates
 
 | Gate | Purpose | Exit requirement |
 |---|---|---|
-| 5.0 | Identity and baseline | Clean branch from accepted tag; Phase 5 identity established before functional edits |
+| 5.0 | Identity and baseline | Clean branch from planning-inclusive commit; accepted firmware/source baseline separately verified; Phase 5 identity established before functional edits |
 | 5.1 | Requirements/profile freeze | Hardware BOM, operating envelope, release claim, numeric criteria, and reviewers approved |
 | 5.2 | Source and safety review | Three bounded independent reviews complete; blockers corrected and re-reviewed |
 | 5.3 | Release-candidate build | ESP-IDF v5.5.3 full-clean no-ccache build, zero warnings/errors, size and hashes recorded |
@@ -88,7 +77,9 @@ or hostile-network-ready product.
 | 5.5 | Pump assembly and calibration | Safe-fluid delivery, direction, repeatability, accuracy/characterization, pressure envelope, and stops pass |
 | 5.6 | Fault and reliability | Network loss, restart/power loss, fault response, thermal, cycle, and endurance campaign pass |
 | 5.7 | Deployment/security decision | Deferred register reviewed; audit and deployment restrictions resolved or release blocked |
-| 5.8 | Final release | Evidence reconciled, independent final review complete, release commit merged and annotated tag pushed |
+| 5.8A | Engineering acceptance | Gate A evidence reconciled and loaded-system limits accepted |
+| 5.8B | Production readiness | Gate B security, manufacturing, documentation, training, support, customer, HAZLOC, and chemical restrictions resolved |
+| 5.9 | Final classification | `PRODUCTION`, `CONTROLLED EVALUATION`, or `BLOCKED` recorded without conflating Gate A and Gate B |
 
 No gate may be skipped because a later gate appears to cover similar behavior.
 
@@ -143,15 +134,20 @@ Stop immediately for:
 Resume only after root cause, correction, review, and the required regression
 scope are documented.
 
-## 9. Final Outcomes
+## 9. Two Independent Gates
 
-Exactly one final outcome is permitted:
+**Gate A - Phase 5 engineering acceptance** covers the loaded
+controller/driver/motor/gearbox/pump/tube assembly, trajectory, independently
+measured RPM, displacement and flow characterization, pressure within the
+approved fixture, Stop/software E-stop, authority and communications loss,
+restart/persistence/recovery, thermal/endurance/tube aging, and validated limits.
 
-- `ACCEPTED` - every required gate passed for the exact declared profile;
-- `CONDITIONALLY ACCEPTED` - only when every condition is explicit, bounded,
-  approved, and does not hide a safety or doctrine violation;
-- `REJECTED` - a tested requirement failed; or
-- `BLOCKED` - required evidence, equipment, decision, or safe test condition is
-  unavailable.
+**Gate B - production readiness** covers security and DHR disposition,
+manufacturing/provisioning, installation, operator and maintenance instructions,
+training, support, customer-use restrictions, HAZLOC restrictions, and chemical
+restrictions.
 
-No merge or acceptance tag is created for `REJECTED` or `BLOCKED`.
+Gate A may be `ACCEPTED` while Gate B remains `OPEN`. This permits only the
+truthful final classification `CONTROLLED EVALUATION`, never unrestricted
+production. The final release classification is `PRODUCTION`, `CONTROLLED
+EVALUATION`, or `BLOCKED`.

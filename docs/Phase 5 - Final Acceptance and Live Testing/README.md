@@ -4,16 +4,17 @@
 
 **Execution status:** NOT STARTED
 
-**Accepted input baseline:** `31ea4254992f296001d367cece70998659a82783`
+**Phase 5 planning-inclusive branch point:** `6d907a11e294fde26a33fbb60b898839883e1490`
+
+**Accepted firmware/source baseline:** `31ea4254992f296001d367cece70998659a82783`
 
 **Accepted baseline tag:** `v2-phase4d.4-machine-client-auth-accepted`
 
 ## Purpose
 
-This folder is the authoritative execution package for Phase 5. It converts the
-accepted Phase 4D.4 controller into a controlled release candidate and closes,
-or truthfully carries forward, every physical, process, reliability, security,
-documentation, and release-management gate.
+This folder is the authoritative execution package for Phase 5. Future Phase 5
+branches start from the planning-inclusive commit above. The accepted firmware
+and source entering Phase 5 remain the separately identified Phase 4D.4 commit.
 
 Phase 5 is not permission to begin testing immediately. The release profile,
 numeric acceptance limits, equipment, safety controls, reviewers, and evidence
@@ -39,7 +40,11 @@ locations must be completed and approved first.
 - Existing doctrine remains controlling.
 - The accepted Phase 4D.4 source is the starting baseline, not Phase 5 evidence.
 - This folder defines future work and contains no claim that Phase 5 has passed.
-- Numeric limits marked `[REQUIRED]` must be approved before the related test.
+- Every physical criterion comes from one approved revision of the frozen test
+  profile in `02_BASELINE_AND_RELEASE_PROFILE.md`.
+- An unknown owner-supplied value is marked exactly
+  `REQUIRES SHAWN CONFIRMATION`; the related test must not execute until it is
+  confirmed.
 - A blank, assumed, inferred, or post-hoc criterion is not a passing criterion.
 - Where this package conflicts with a manufacturer limit, approved engineering
   specification, or physical safety requirement, the safer limit controls and
@@ -55,6 +60,23 @@ The controller is open-loop:
 - HTTP/MQTT acceptance is not proof of physical action; and
 - the software E-stop is not a safety-rated physical E-stop.
 
-Phase 5 may close only the release profile that is explicitly approved in
-`02_BASELINE_AND_RELEASE_PROFILE.md`. Anything outside that profile remains
-unaccepted.
+The control claim is fixed as `RPM-CONTROLLED`. Phase 5 characterizes physical
+delivery under named conditions; it does not create closed-loop or commanded
+flow control.
+
+## Two-Gate Acceptance Model
+
+- **Gate A - Phase 5 engineering acceptance:** loaded controller, driver, motor,
+  gearbox, pump, and tube performance; trajectory; independently measured RPM;
+  displacement/flow characterization; pressure within the approved fixture;
+  stop and software E-stop; authority/communications loss; restart, persistence,
+  recovery; thermal/endurance/tube aging; and validated limits.
+- **Gate B - production readiness:** security/DHR closure, manufacturing and
+  provisioning, installation, operator and maintenance documents, training,
+  support, customer-use restrictions, HAZLOC restrictions, and chemical-use
+  restrictions.
+
+Gate A may pass while Gate B remains open. Gate A acceptance never means
+unrestricted production readiness. The initial release classification is
+`CONTROLLED EVALUATION`; the final classification may be `PRODUCTION`,
+`CONTROLLED EVALUATION`, or `BLOCKED`.

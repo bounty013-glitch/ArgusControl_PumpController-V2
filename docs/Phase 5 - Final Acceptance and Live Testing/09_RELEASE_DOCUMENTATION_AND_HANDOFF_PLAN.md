@@ -6,6 +6,11 @@ Bench acceptance is not the end of a release. Before final Phase 5 approval, the
 following product-facing documents and artifacts must be completed for the exact
 release profile and reviewed against the accepted candidate.
 
+These deliverables are Gate B production-readiness evidence. Gate A engineering
+acceptance does not waive installation, manufacturing, provisioning, operator,
+maintenance, training, support, customer-use, HAZLOC, or chemical-use
+restrictions.
+
 ## 1. Required Product Documents
 
 ### Installation and Wiring Guide
@@ -52,6 +57,10 @@ Must explain in plain language:
 - alarms/faults and immediate operator actions;
 - release operating envelope and prohibited uses; and
 - software E-stop versus physical disconnect.
+
+The guide must state that the controller is `RPM-CONTROLLED`; characterized flow
+does not create a commanded-flow, measured-flow-telemetry, or closed-loop-flow
+feature.
 
 ### Service and Maintenance Guide
 

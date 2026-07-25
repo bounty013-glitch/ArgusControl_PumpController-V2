@@ -9,10 +9,38 @@ Every test has:
 - expected result frozen before execution;
 - actual result;
 - evidence references; and
-- `PASS`, `FAIL`, `BLOCKED`, or `NOT APPLICABLE` with justification.
+- `PASS`, `FAIL`, `INVALID`, or `INCOMPLETE`.
 
 Commands are issued one at a time. HTTP/MQTT success proves admission and
 dispatch only; the operator separately records physical behavior.
+
+## Human and Agent Execution Workflow
+
+For every numbered live procedure, Codex or another executor must:
+
+1. identify the test and its purpose;
+2. verify repository identity, exact candidate commit, firmware identity,
+   controller UID, and approved frozen-profile revision;
+3. verify prerequisites, equipment, safety observer, and immediate-stop controls;
+4. tell Shawn the precise physical action or observation required;
+5. pause before the physical action;
+6. continue only after Shawn reports the requested observation;
+7. capture controller, browser, MQTT, serial, instrument, and operator evidence;
+8. record the observation without embellishment;
+9. calculate derived results with the approved method;
+10. compare results only with criteria frozen before execution;
+11. declare `PASS`, `FAIL`, `INVALID`, or `INCOMPLETE`;
+12. preserve failed and invalid evidence;
+13. update the evidence manifest and trace matrix; and
+14. state the next safe test or stop condition.
+
+The executor must never infer physical motion, direction, flow, temperature,
+pressure, leakage, tube condition, or safety from firmware logs, responses, or
+generated telemetry.
+
+Every physical procedure below records the exact frozen-profile revision from
+`02_BASELINE_AND_RELEASE_PROFILE.md`. A `REQUIRES SHAWN CONFIRMATION` dependency
+makes the procedure `INCOMPLETE` and prohibits execution.
 
 ## Test 1 - Baseline and Artifact Identity
 
@@ -20,8 +48,11 @@ dispatch only; the operator separately records physical behavior.
 
 **Action:**
 
-- verify local/remote branch and exact starting tag;
-- verify Phase 5 candidate history descends from the baseline;
+- verify local/remote branch descends from planning-inclusive commit
+  `6d907a11e294fde26a33fbb60b898839883e1490`;
+- separately verify accepted firmware/source baseline
+  `31ea4254992f296001d367cece70998659a82783` and tag
+  `v2-phase4d.4-machine-client-auth-accepted`;
 - verify firmware identity, ELF, MAP, BIN, partition table, build metadata, and
   SHA-256 hashes;
 - verify no credentials or temporary artifacts are included; and
@@ -337,3 +368,251 @@ or task leak.
 **Evidence:** `[PENDING]`
 
 **Result:** `[PENDING]`
+
+## Test 16 - Loaded Trajectory Tuning
+
+**Preconditions:** Tests 1-8 pass; the loaded mechanical/fluid configuration and
+frozen-profile revision are unchanged; independent RPM measurement is ready.
+
+**Required equipment:** Guarded loaded assembly, physical disconnect,
+tachometer/revolution counter, current and temperature instruments, pressure
+instrument, containment, and synchronized evidence capture.
+
+**Safety gates:** Shawn confirms the exact loaded configuration, minimum-load
+fluid path, limits, observer, and disconnect. No dead-head, closed discharge, or
+unapproved fluid.
+
+**Operator actions:** Observe each commanded start, ramp, steady point, stop, and
+permitted reversal. Report actual shaft behavior before the next command.
+
+**Commands/firmware actions:** Through one production interface, apply only the
+approved profile points and ramps. Change one variable at a time. Stop and unlock
+between configurations.
+
+**Required measurements:** Commanded/generated RPM, external RPM versus time,
+rise/settle/stop behavior, pressure, current, component temperatures, sound,
+vibration, stall/step-loss evidence, and tube behavior.
+
+**Evidence:** Raw instrument data, serial/MQTT/browser logs, profile revision,
+configuration snapshot, video/photographs where useful, and calculation output.
+
+**Pass:** Every approved point remains within the frozen deviation and safety
+criteria with smooth, truthful behavior and no immediate-stop condition.
+
+**Fail:** Any frozen criterion is exceeded or behavior is unsafe/dishonest.
+
+**Immediate-stop:** Apply Section 03, including unexpected motion, wrong
+direction, no-stop, stall, leak, pressure/current/temperature excursion, abnormal
+sound, panic, or reset.
+
+**Recovery/reset:** Physically isolate, relieve pressure, preserve configuration
+and evidence, identify root cause, and do not use Recover merely to continue.
+
+**Retest:** Approve a new profile revision for any ramp/limit change, then repeat
+the affected point and all dependent points. Result: `[PENDING]`
+
+## Test 17 - Thermal and Endurance Soak
+
+**Preconditions:** Test 16 passes; duration, cadence, load, limits, tube-aging
+endpoint, and supervision plan are frozen.
+
+**Required equipment:** Loaded fixture, physical disconnect, pressure/current/
+temperature instruments, leak containment, time-series logger, and tube
+inspection tools.
+
+**Safety gates:** Initial soak is attended. Unattended operation is prohibited
+unless a later risk assessment and procedure explicitly approve it.
+
+**Operator actions:** Inspect the assembly at every approved interval and report
+temperature, leak, sound, vibration, tube, fitting, and flow observations.
+
+**Commands/firmware actions:** Run the approved production command sequence at
+the frozen representative load; perform only approved cycle interruptions.
+
+**Required measurements:** Runtime/cycles, external RPM, characterized delivery,
+pressure, voltage/current, all named temperatures, generated telemetry, heap/
+task/stack observations, tube runtime/cycle count, and post-run inspection.
+
+**Evidence:** Complete time series, event log, instrument identities, tube
+before/after images, profile revision, and raw controller logs.
+
+**Pass:** Duration/cycles complete within every frozen thermal, electrical,
+pressure, drift, reliability, and tube criterion with no leak or software fault.
+
+**Fail:** Any limit, reliability criterion, or safety condition fails.
+
+**Immediate-stop:** Section 03 plus rising/unbounded thermal trend, pressure or
+current excursion, leak/tube walk, abnormal wear, stall, reset, task leak, or
+memory corruption.
+
+**Recovery/reset:** Stop if safe, physically isolate, relieve pressure, cool,
+preserve state/data, and quarantine damaged tubing/components.
+
+**Retest:** Root-cause review determines the full soak and dependent calibration
+scope that must be repeated. Result: `[PENDING]`
+
+## Test 18 - Start/Stop and Permitted-Direction Cycling
+
+**Preconditions:** Loaded trajectory passes; cycle count, directions, setpoints,
+ramps, dwell, and wear limits are frozen.
+
+**Required equipment:** Guarded fixture, physical disconnect, independent RPM,
+pressure/current/temperature capture, and cycle counter.
+
+**Safety gates:** Only profile-approved directions; no automatic cycling without
+a present safety observer and an independently reachable disconnect.
+
+**Operator actions:** Observe the first cycle and every scheduled inspection;
+confirm physical zero after Stop and no motion after Unlock.
+
+**Commands/firmware actions:** Use production paths for approved Start, Stop,
+Unlock, setpoint-only, permitted reversal through zero, software E-stop/reset,
+and Recover cycles.
+
+**Required measurements:** Completed/failed cycles, external RPM, start/stop
+times, state transitions, direction, pressure/current/temperature, tube runtime,
+wear, and any command/result mismatch.
+
+**Evidence:** Command/result chronology, raw cycle log, synchronized physical
+observations, profile revision, and pre/post inspection.
+
+**Pass:** All required cycles complete with zero uncommanded motion, no failed
+stop, no state/physical disagreement, and all wear/drift criteria met.
+
+**Fail:** Any safety-critical transition fails or a frozen cycle/wear criterion
+is missed.
+
+**Immediate-stop:** Unexpected restart/direction, failure to stop, stall, leak,
+abnormal wear, limit excursion, or controller fault.
+
+**Recovery/reset:** Isolate and inspect before any reset; do not clear evidence
+or automatically resume the cycle index.
+
+**Retest:** Preserve failed count and repeat the acceptance campaign required by
+the approved root-cause disposition. Result: `[PENDING]`
+
+## Test 19 - Restart, Power Loss, Storage, and Recovery
+
+**Preconditions:** Stationary restart tests pass before any running power-loss
+test; persistence inventory, backup/restore plan, cycle counts, and safe physical
+consequences are frozen.
+
+**Required equipment:** Physical disconnect, serial/network capture, approved
+backup/restore artifacts, loaded fixture and containment when running, and
+independent motion observation.
+
+**Safety gates:** Running power removal requires separate approval, safe loss of
+delivery, no hazardous siphon/pressure consequence, and a human at the
+disconnect.
+
+**Operator actions:** Confirm physical state before removal and after restoration;
+report any motion, pressure, leak, or hardware anomaly.
+
+**Commands/firmware actions:** Execute controlled reboot, reset, cold power cycle,
+approved running power loss, supported security recovery, and approved
+configuration/storage recovery paths.
+
+**Required measurements:** Reset reason, boot identity, machine/output/driver
+state, persistence of identity/network/security/machine/calibration data,
+authority/session regeneration, physical zero, pressure, and restoration result.
+
+**Evidence:** Full boot logs, before/after storage/configuration hashes or
+sanitized inventories, operator observations, and profile revision.
+
+**Pass:** Every approved case boots stationary and truthful with no stale command,
+automatic motion, corrupt storage, silent privilege change, or unexplained loss.
+
+**Fail:** Any unsafe restart, replay, corruption, persistence mismatch, or
+unrecoverable supported path.
+
+**Immediate-stop:** Motion on boot, reset loop, brownout/watchdog, pressure/leak
+hazard, storage corruption, or dishonest state.
+
+**Recovery/reset:** Isolate power/process energy and restore only through the
+preapproved reproducible plan.
+
+**Retest:** Repeat the affected destructive sequence from a restored known
+baseline plus every invalidated downstream test. Result: `[PENDING]`
+
+## Test 20 - Security Regression and DHR Disposition
+
+**Preconditions:** Candidate and interface inventory frozen; temporary accounts
+and machines planned; DHR owners and acceptance authority identified.
+
+**Required equipment:** Isolated approved network, browser and MQTT clients,
+serial capture, audit export tooling, and credential-safe evidence workspace.
+
+**Safety gates:** Controller stationary, zero output, driver disabled, and motor
+power physically isolated. No reusable secret enters evidence or shell history.
+
+**Operator actions:** Perform only human-presence actions explicitly required by
+authentication/recovery and confirm no physical motion.
+
+**Commands/firmware actions:** Run browser and machine authentication,
+authorization, interface, CSRF, throttle, enrollment, rotation, revocation,
+disconnect, scope, audit, reset, and recovery regressions from Section 07.
+
+**Required measurements:** HTTP/MQTT results, connection lifecycle, zero
+dispatch/motion on rejection, audit prepared/terminal records, resource bounds,
+and final temporary-identity cleanup.
+
+**Evidence:** Sanitized logs, route/topic matrix, DHR disposition table,
+independent audit report where applicable, and candidate/profile identity.
+
+**Pass:** Accepted security contracts pass and every DHR has a truthful Gate B
+disposition. `PRODUCTION` additionally requires DHR-009 closure.
+
+**Fail:** Security regression, credential disclosure, unauthorized access,
+unbounded resource behavior, missing audit result, or unsupported production
+claim.
+
+**Immediate-stop:** Any motion, credential exposure, panic/reset, loss of
+administrative control, or unsafe network exposure.
+
+**Recovery/reset:** Revoke temporary credentials, isolate interfaces, preserve
+audit evidence, and restore the approved security/network state.
+
+**Retest:** Correct under normal history, independently review, and repeat all
+affected security and downstream release gates. Result: `[PENDING]`
+
+## Test 21 - Retained MQTT Discovery and Configuration Closure
+
+**Preconditions:** Exact Phase 4C/4D.4 topic contract and retained-topic inventory
+reconciled from source; controller stationary; least-privilege machine enrolled.
+
+**Required equipment:** Approved MQTT client, packet/log capture, serial monitor,
+topic-inventory tool, and credential-safe evidence storage.
+
+**Safety gates:** Motor power physically isolated. Retained command, heartbeat,
+command-result, secret, or credential publication is prohibited.
+
+**Operator actions:** Observe controller state across broker/client reconnect and
+controller reboot; confirm no physical motion or stale command effect.
+
+**Commands/firmware actions:** Subscribe to the canonical root, inventory retained
+metadata/state/status/open-loop telemetry, reconnect, restart while stationary,
+and verify obsolete or unauthorized retained records are absent. Do not invent a
+configuration topic or mutate accepted source merely to satisfy this procedure.
+
+**Required measurements:** Exact topic, retain/QoS/payload, ownership, value,
+republish timing, broker session change, last accepted sequence, duplicate/stale
+record behavior, retained capacity, and no-motion/no-dispatch proof.
+
+**Evidence:** Before/after topic inventories, packet/log capture, source-derived
+expected inventory, profile/candidate identity, and sanitized discrepancy report.
+
+**Pass:** Every source-authorized retained record is bounded, truthful,
+controller-owned, and republished correctly; prohibited/obsolete records are
+absent; reconnect/reboot causes no stale command or motion replay.
+
+**Fail:** Missing, stale, contradictory, unauthorized, secret-bearing, evicted,
+or replay-capable retained data, or any ownership/dispatch violation.
+
+**Immediate-stop:** Any motion, command replay, credential disclosure, broker
+instability, panic/reset loop, or retained-capacity corruption.
+
+**Recovery/reset:** Disconnect the test client, isolate the controller, preserve
+the broker inventory, and restore only the accepted configuration.
+
+**Retest:** Reconcile contract/source first; repeat the complete retained
+inventory and lifecycle sequence after any correction. Result: `[PENDING]`

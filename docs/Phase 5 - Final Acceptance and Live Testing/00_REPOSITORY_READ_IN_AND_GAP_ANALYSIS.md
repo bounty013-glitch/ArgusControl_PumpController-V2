@@ -94,9 +94,10 @@ The provisional displacement is not an accepted calibration, and no production
 flow command, browser/MQTT flow contract, measured-flow telemetry, or closed-loop
 flow behavior exists.
 
-**Phase 5 consequence:** freeze an RPM-controlled characterization claim or
-implement and independently accept a real flow-delivery contract before claiming
-flow control.
+**Phase 5 consequence:** the Phase 5 control claim is fixed as
+`RPM-CONTROLLED`. Delivery is characterization tied to named conditions. A real
+flow-command or closed-loop flow contract is outside this package and would
+require a separately planned and accepted implementation.
 
 ### 5.2 Physical Feedback
 
@@ -180,7 +181,8 @@ without resolving it.
 
 Before any new implementation or loaded test:
 
-1. Choose RPM-controlled, flow-delivery, or evaluation-only release.
+1. Preserve the fixed `RPM-CONTROLLED` control claim and begin with the
+   `CONTROLLED EVALUATION` release classification.
 2. Freeze the complete hardware/BOM and driver configuration.
 3. Freeze fluid, tubing, pressure, flow, temperature, duty, and service-life
    limits.
@@ -201,3 +203,8 @@ is the exact physical product claim and the evidence needed to support it.
 Phase 5 is therefore structured as a release qualification program with explicit
 decision gates, not as an assumption that connecting a pump and observing flow
 completes the project.
+
+Engineering acceptance of the loaded assembly is Gate A. Production readiness,
+including security/DHR, manufacturing, provisioning, documentation, training,
+support, HAZLOC, customer, and chemical restrictions, is the independent Gate B.
+Gate A can pass while Gate B remains open.
