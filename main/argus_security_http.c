@@ -1456,6 +1456,27 @@ static esp_err_t machines_post(httpd_req_t *req)
     return response;
 }
 
+void argus_security_http_machine_action_decide(
+    esp_err_t mutation_error, esp_err_t audit_finalization_error,
+    bool rotation,
+    argus_security_http_machine_action_decision_t *out)
+{
+    if (out == NULL) return;
+    *out = (argus_security_http_machine_action_decision_t) {
+        .mutation_committed = mutation_error == ESP_OK,
+        .disconnect_machine = mutation_error == ESP_OK,
+        .quarantine_rotation =
+            rotation && mutation_error == ESP_OK &&
+            audit_finalization_error != ESP_OK,
+        .disclose_rotation_secret =
+            rotation && mutation_error == ESP_OK &&
+            audit_finalization_error == ESP_OK,
+        .response_error = mutation_error != ESP_OK
+            ? mutation_error
+            : audit_finalization_error,
+    };
+}
+
 static esp_err_t machine_action_post(httpd_req_t *req)
 {
     argus_http_security_context_t security;
@@ -1519,28 +1540,40 @@ static esp_err_t machine_action_post(httpd_req_t *req)
     esp_err_t err = begin_admin_audit(
         &security, event, id_copy, action_copy, &mutation);
     argus_machine_credential_once_t credential = {0};
+    argus_security_http_machine_action_decision_t decision = {0};
     if (err == ESP_OK) {
-        if (rotation) {
-            err = argus_machine_service_rotate(
+        esp_err_t mutation_error =
+            argus_mqtt_broker_fence_machine_authentication(id_copy);
+        if (mutation_error == ESP_OK && rotation) {
+            mutation_error = argus_machine_service_rotate(
                 &security.principal, id_copy, &credential);
-        } else if (strcmp(action_copy, "enable") == 0) {
-            err = argus_machine_service_set_enabled(
+        } else if (mutation_error == ESP_OK &&
+                   strcmp(action_copy, "enable") == 0) {
+            mutation_error = argus_machine_service_set_enabled(
                 &security.principal, id_copy, true);
-        } else if (strcmp(action_copy, "disable") == 0) {
-            err = argus_machine_service_set_enabled(
+        } else if (mutation_error == ESP_OK &&
+                   strcmp(action_copy, "disable") == 0) {
+            mutation_error = argus_machine_service_set_enabled(
                 &security.principal, id_copy, false);
-        } else if (strcmp(action_copy, "revoke") == 0) {
-            err = argus_machine_service_revoke(
+        } else if (mutation_error == ESP_OK &&
+                   strcmp(action_copy, "revoke") == 0) {
+            mutation_error = argus_machine_service_revoke(
                 &security.principal, id_copy);
-        } else {
-            err = argus_machine_service_delete(
+        } else if (mutation_error == ESP_OK) {
+            mutation_error = argus_machine_service_delete(
                 &security.principal, id_copy);
         }
-        esp_err_t finalized = finish_admin_audit(&mutation, err);
-        if (finalized != ESP_OK && err == ESP_OK && rotation) {
+        if (mutation_error == ESP_OK) {
+            (void)argus_mqtt_broker_disconnect_machine(id_copy);
+        }
+        esp_err_t audit_error =
+            finish_admin_audit(&mutation, mutation_error);
+        argus_security_http_machine_action_decide(
+            mutation_error, audit_error, rotation, &decision);
+        if (decision.quarantine_rotation) {
             (void)argus_machine_service_quarantine_undisclosed(id_copy);
         }
-        err = finalized;
+        err = decision.response_error;
     }
     memset(&mutation, 0, sizeof(mutation));
     argus_principal_t actor = security.principal;
@@ -1558,8 +1591,7 @@ static esp_err_t machine_action_post(httpd_req_t *req)
                                  : "503 Service Unavailable",
             "{\"ok\":false,\"error\":\"machine_action_failed\"}");
     }
-    (void)argus_mqtt_broker_disconnect_machine(id_copy);
-    if (rotation) {
+    if (decision.disclose_rotation_secret) {
         esp_err_t response = send_machine_credential_once(
             req, &actor, &credential, "200 OK");
         memset(&actor, 0, sizeof(actor));

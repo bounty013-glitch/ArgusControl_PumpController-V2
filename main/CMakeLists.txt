@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "argus_mqtt_broker.c"
+        "argus_mqtt_invalidation.c"
         "argus_mqtt_contract.c"
         "argus_mqtt_runtime.c"
         "argus_mqtt_security.c"

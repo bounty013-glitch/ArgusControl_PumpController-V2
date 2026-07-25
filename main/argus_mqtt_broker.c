@@ -1,6 +1,7 @@
 #include "argus_mqtt_broker.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -15,6 +16,7 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "argus_mqtt_invalidation.h"
 
 static const char *TAG = "argus_mqtt_broker";
 
@@ -40,6 +42,8 @@ static const char *TAG = "argus_mqtt_broker";
 typedef struct {
     bool in_use;
     bool connected;
+    bool security_invalidated;
+    bool shutdown_claimed;
     int sock;
     uint64_t connection_id;
     uint32_t peer_key;
@@ -82,9 +86,16 @@ typedef struct {
     void *user_ctx;
     argus_mqtt_client_t clients[ARGUS_MQTT_MAX_CLIENTS];
     argus_mqtt_retained_t retained[ARGUS_MQTT_MAX_RETAINED];
+    argus_mqtt_invalidation_journal_t invalidations;
 } argus_mqtt_broker_t;
 
 static argus_mqtt_broker_t s_broker;
+
+typedef struct {
+    size_t slot;
+    uint64_t connection_id;
+    int socket_fd;
+} argus_mqtt_disconnect_target_t;
 
 /* ===========================================================================
  * MQTT wire helpers  (unchanged from original)
@@ -393,7 +404,7 @@ static bool argus_mqtt_duplicate_client_id_locked(
     return false;
 }
 
-static void argus_mqtt_client_info(
+static void argus_mqtt_client_info_locked(
     const argus_mqtt_client_t *client,
     argus_mqtt_broker_client_info_t *out)
 {
@@ -402,6 +413,90 @@ static void argus_mqtt_client_info(
     out->receiving_interface = client->receiving_interface;
     strlcpy(out->client_id, client->client_id, sizeof(out->client_id));
     out->principal = client->principal;
+}
+
+static bool argus_mqtt_client_admitted_locked(
+    const argus_mqtt_client_t *client, uint64_t expected_connection_id)
+{
+    return client != NULL && client->in_use && client->connected &&
+           !client->security_invalidated &&
+           client->connection_id == expected_connection_id;
+}
+
+static bool argus_mqtt_client_info_if_admitted(
+    const argus_mqtt_client_t *client,
+    argus_mqtt_broker_client_info_t *out)
+{
+    if (client == NULL || out == NULL) return false;
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    bool admitted = argus_mqtt_client_admitted_locked(
+        client, client->connection_id);
+    if (admitted) argus_mqtt_client_info_locked(client, out);
+    xSemaphoreGive(s_broker.client_lock);
+    if (!admitted) memset(out, 0, sizeof(*out));
+    return admitted;
+}
+
+static bool argus_mqtt_bind_allowed_locked(
+    const argus_mqtt_invalidation_journal_t *invalidations,
+    const argus_mqtt_client_t *client, uint64_t expected_connection_id,
+    const char *identifier, uint64_t captured_invalidation_generation,
+    bool duplicate_client_id)
+{
+    return client != NULL && client->in_use && !client->connected &&
+           !client->security_invalidated &&
+           client->connection_id == expected_connection_id &&
+           !duplicate_client_id &&
+           !argus_mqtt_invalidation_since(
+               invalidations, identifier,
+               captured_invalidation_generation);
+}
+
+static bool argus_mqtt_disconnect_matches_locked(
+    const argus_mqtt_client_t *client, const char *identifier)
+{
+    return client != NULL && client->in_use && client->connected &&
+           client->sock >= 0 &&
+           strcmp(client->principal.identifier, identifier) == 0;
+}
+
+static bool argus_mqtt_claim_disconnect_locked(
+    argus_mqtt_client_t *client, size_t slot, const char *identifier,
+    argus_mqtt_disconnect_target_t *target)
+{
+    if (!argus_mqtt_disconnect_matches_locked(client, identifier) ||
+        target == NULL) {
+        return false;
+    }
+    client->security_invalidated = true;
+    if (client->shutdown_claimed) return false;
+    client->shutdown_claimed = true;
+    *target = (argus_mqtt_disconnect_target_t) {
+        .slot = slot,
+        .connection_id = client->connection_id,
+        .socket_fd = client->sock,
+    };
+    return true;
+}
+
+static bool argus_mqtt_release_disconnect_claim_locked(
+    argus_mqtt_client_t *client,
+    const argus_mqtt_disconnect_target_t *target)
+{
+    if (client == NULL || target == NULL || !client->shutdown_claimed ||
+        !client->in_use ||
+        client->connection_id != target->connection_id ||
+        client->sock != target->socket_fd) {
+        return false;
+    }
+    client->shutdown_claimed = false;
+    return true;
+}
+
+static bool argus_mqtt_client_close_allowed_locked(
+    const argus_mqtt_client_t *client)
+{
+    return client != NULL && !client->shutdown_claimed;
 }
 
 static esp_err_t argus_mqtt_handle_connect(
@@ -422,6 +517,18 @@ static esp_err_t argus_mqtt_handle_connect(
         argus_password_zeroize(&request, sizeof(request));
         return ESP_ERR_INVALID_STATE;
     }
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    uint64_t expected_connection_id = client->connection_id;
+    uint64_t captured_invalidation_generation =
+        argus_mqtt_invalidation_capture(&s_broker.invalidations);
+    bool authentication_pending =
+        client->in_use && !client->connected &&
+        !client->security_invalidated;
+    xSemaphoreGive(s_broker.client_lock);
+    if (!authentication_pending) {
+        argus_password_zeroize(&request, sizeof(request));
+        return ESP_ERR_INVALID_STATE;
+    }
     argus_machine_auth_outcome_t auth = s_broker.authenticate(
         client->peer_key, &request, client->receiving_interface,
         s_broker.user_ctx);
@@ -436,8 +543,12 @@ static esp_err_t argus_mqtt_handle_connect(
     }
 
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-    bool bind_allowed = client->in_use && !client->connected &&
-        !argus_mqtt_duplicate_client_id_locked(client, request.client_id);
+    bool duplicate_client_id =
+        argus_mqtt_duplicate_client_id_locked(client, request.client_id);
+    bool bind_allowed = argus_mqtt_bind_allowed_locked(
+        &s_broker.invalidations, client, expected_connection_id,
+        auth.principal.identifier,
+        captured_invalidation_generation, duplicate_client_id);
     if (bind_allowed) {
         strlcpy(client->client_id, request.client_id,
                 sizeof(client->client_id));
@@ -460,6 +571,11 @@ static esp_err_t argus_mqtt_handle_connect(
         sizeof(connack_ok)) {
         return ESP_FAIL;
     }
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    bool admission_still_valid = argus_mqtt_client_admitted_locked(
+        client, expected_connection_id);
+    xSemaphoreGive(s_broker.client_lock);
+    if (!admission_still_valid) return ESP_ERR_NOT_ALLOWED;
     ESP_LOGI(TAG, "authenticated machine connected: %s",
              client->client_id);
     return ESP_OK;
@@ -504,7 +620,10 @@ static esp_err_t argus_mqtt_handle_subscribe(argus_mqtt_client_t *client, const 
         return ESP_ERR_INVALID_ARG;
     }
     argus_mqtt_broker_client_info_t info;
-    argus_mqtt_client_info(client, &info);
+    if (!argus_mqtt_client_info_if_admitted(client, &info)) {
+        free(request);
+        return ESP_ERR_NOT_ALLOWED;
+    }
     for (size_t i = 0U; i < request->count; ++i) {
         if (s_broker.subscribe_policy == NULL ||
             s_broker.subscribe_policy(
@@ -522,7 +641,10 @@ static esp_err_t argus_mqtt_handle_subscribe(argus_mqtt_client_t *client, const 
             return ESP_OK;
         }
     }
-    argus_mqtt_client_info(client, &info);
+    if (!argus_mqtt_client_info_if_admitted(client, &info)) {
+        free(request);
+        return ESP_ERR_NOT_ALLOWED;
+    }
     if (s_broker.revalidate == NULL ||
         s_broker.revalidate(&info, s_broker.user_ctx) != ESP_OK) {
         free(request);
@@ -530,7 +652,7 @@ static esp_err_t argus_mqtt_handle_subscribe(argus_mqtt_client_t *client, const 
     }
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     bool capacity =
-        client->connected &&
+        argus_mqtt_client_admitted_locked(client, info.connection_id) &&
         client->subscription_count + request->count <=
             ARGUS_MQTT_MAX_SUBS_PER_CLIENT;
     if (capacity) {
@@ -569,6 +691,13 @@ static esp_err_t argus_mqtt_handle_subscribe(argus_mqtt_client_t *client, const 
             }
             xSemaphoreGive(s_broker.client_lock);
             if (copy.in_use) {
+                argus_mqtt_broker_client_info_t current;
+                if (!argus_mqtt_client_info_if_admitted(
+                        client, &current) ||
+                    current.connection_id != info.connection_id) {
+                    free(request);
+                    return ESP_ERR_NOT_ALLOWED;
+                }
                 (void)argus_mqtt_send_publish(
                     client->sock, copy.topic, copy.payload, true);
             }
@@ -614,21 +743,31 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
     memcpy(payload, packet + offset, payload_len);
     payload[payload_len] = '\0';
 
+    argus_mqtt_broker_client_info_t info;
+    if (!argus_mqtt_client_info_if_admitted(client, &info)) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
     *callback_message = (argus_mqtt_broker_message_t) {
-        .connection_id = client->connection_id,
+        .connection_id = info.connection_id,
         .payload_len = payload_len,
         .qos = qos,
         .retain = retain,
         .dup = (fixed_header & 0x08U) != 0U,
         .policy_admitted = true,
-        .receiving_interface = client->receiving_interface,
-        .principal = client->principal,
+        .receiving_interface = info.receiving_interface,
+        .principal = info.principal,
     };
-    strlcpy(callback_message->client_id, client->client_id,
+    strlcpy(callback_message->client_id, info.client_id,
             sizeof(callback_message->client_id));
     strlcpy(callback_message->topic, topic, sizeof(callback_message->topic));
     memcpy(callback_message->payload, payload, payload_len + 1U);
 
+    if (s_broker.revalidate == NULL ||
+        s_broker.revalidate(&info, s_broker.user_ctx) != ESP_OK ||
+        !argus_mqtt_client_info_if_admitted(client, &info) ||
+        info.connection_id != callback_message->connection_id) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
     if (s_broker.publish_authorize == NULL ||
         s_broker.publish_authorize(
             callback_message, s_broker.user_ctx) != ESP_OK) {
@@ -642,6 +781,10 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
         }
         return ESP_OK;
     }
+    if (!argus_mqtt_client_info_if_admitted(client, &info) ||
+        info.connection_id != callback_message->connection_id) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
     if (s_broker.policy_check != NULL &&
         s_broker.policy_check(callback_message, s_broker.user_ctx) != ESP_OK) {
         callback_message->policy_admitted = false;
@@ -654,16 +797,21 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
         }
         return ESP_OK;
     }
-    argus_mqtt_broker_client_info_t info;
-    argus_mqtt_client_info(client, &info);
-    if (s_broker.revalidate == NULL ||
-        s_broker.revalidate(&info, s_broker.user_ctx) != ESP_OK) {
+    if (!argus_mqtt_client_info_if_admitted(client, &info) ||
+        info.connection_id != callback_message->connection_id ||
+        s_broker.revalidate == NULL ||
+        s_broker.revalidate(&info, s_broker.user_ctx) != ESP_OK ||
+        !argus_mqtt_client_info_if_admitted(client, &info) ||
+        info.connection_id != callback_message->connection_id) {
         return ESP_ERR_NOT_ALLOWED;
     }
 
     if (retain) {
         xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-        esp_err_t retain_err = argus_mqtt_store_retained_locked(topic, payload);
+        esp_err_t retain_err = argus_mqtt_client_admitted_locked(
+            client, callback_message->connection_id)
+            ? argus_mqtt_store_retained_locked(topic, payload)
+            : ESP_ERR_NOT_ALLOWED;
         xSemaphoreGive(s_broker.client_lock);
         if (retain_err != ESP_OK) {
             return retain_err;
@@ -671,9 +819,14 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
     }
     int sockets[ARGUS_MQTT_MAX_CLIENTS];
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-    size_t socket_count = argus_mqtt_collect_subscribers_locked(
-        topic, sockets, ARGUS_MQTT_MAX_CLIENTS);
+    bool publication_admitted = argus_mqtt_client_admitted_locked(
+        client, callback_message->connection_id);
+    size_t socket_count = publication_admitted
+        ? argus_mqtt_collect_subscribers_locked(
+              topic, sockets, ARGUS_MQTT_MAX_CLIENTS)
+        : 0U;
     xSemaphoreGive(s_broker.client_lock);
+    if (!publication_admitted) return ESP_ERR_NOT_ALLOWED;
     argus_mqtt_deliver_to_sockets(
         sockets, socket_count, topic, payload, retain);
 
@@ -698,18 +851,20 @@ static esp_err_t argus_mqtt_handle_publish(argus_mqtt_client_t *client,
 
 static void argus_mqtt_close_client(argus_mqtt_client_t *client)
 {
-    argus_mqtt_broker_client_info_t info = {
-        .connection_id = client->connection_id,
-        .receiving_interface = client->receiving_interface,
-        .principal = client->principal,
-    };
-    strlcpy(info.client_id, client->client_id, sizeof(info.client_id));
-
-    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    argus_mqtt_broker_client_info_t info = {0};
+    for (;;) {
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        if (argus_mqtt_client_close_allowed_locked(client)) break;
+        xSemaphoreGive(s_broker.client_lock);
+        vTaskDelay(1);
+    }
+    argus_mqtt_client_info_locked(client, &info);
     int sock = client->sock;
     bool notify_disconnect = client->connected;
     client->sock = -1;
     client->connected = false;
+    client->security_invalidated = false;
+    client->shutdown_claimed = false;
     client->in_use = false;
     client->subscription_count = 0;
     argus_password_zeroize(&client->principal, sizeof(client->principal));
@@ -770,15 +925,22 @@ static void argus_mqtt_client_task(void *arg)
         argus_mqtt_broker_message_t callback_message = {0};
 
         esp_err_t err = ESP_OK;
-        if (!client->connected && packet_type != 1U) {
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        bool client_connected = client->connected;
+        bool client_invalidated =
+            !client->in_use || client->security_invalidated;
+        xSemaphoreGive(s_broker.client_lock);
+        if (client_invalidated) {
+            err = ESP_ERR_NOT_ALLOWED;
+        } else if (!client_connected && packet_type != 1U) {
             err = ESP_ERR_INVALID_STATE;
-        } else if (client->connected && packet_type == 1U) {
+        } else if (client_connected && packet_type == 1U) {
             err = ESP_ERR_INVALID_STATE;
-        } else if (client->connected &&
+        } else if (client_connected &&
                    (packet_type == 3U || packet_type == 8U)) {
             argus_mqtt_broker_client_info_t info;
-            argus_mqtt_client_info(client, &info);
-            if (s_broker.revalidate == NULL ||
+            if (!argus_mqtt_client_info_if_admitted(client, &info) ||
+                s_broker.revalidate == NULL ||
                 s_broker.revalidate(&info, s_broker.user_ctx) != ESP_OK) {
                 err = ESP_ERR_NOT_ALLOWED;
             }
@@ -815,13 +977,19 @@ static void argus_mqtt_client_task(void *arg)
 
         if (notify_connect && s_broker.on_client_event != NULL) {
             argus_mqtt_broker_client_info_t info;
-            argus_mqtt_client_info(client, &info);
-            s_broker.on_client_event(ARGUS_MQTT_BROKER_CLIENT_CONNECTED,
-                                     &info, s_broker.user_ctx);
+            if (argus_mqtt_client_info_if_admitted(client, &info)) {
+                s_broker.on_client_event(
+                    ARGUS_MQTT_BROKER_CLIENT_CONNECTED,
+                    &info, s_broker.user_ctx);
+            }
         }
 
         if (has_callback && s_broker.on_message != NULL) {
-            s_broker.on_message(&callback_message, s_broker.user_ctx);
+            argus_mqtt_broker_client_info_t info;
+            if (argus_mqtt_client_info_if_admitted(client, &info) &&
+                info.connection_id == callback_message.connection_id) {
+                s_broker.on_message(&callback_message, s_broker.user_ctx);
+            }
         }
 
         if (err != ESP_OK) {
@@ -1069,6 +1237,7 @@ esp_err_t argus_mqtt_broker_init(void)
     atomic_store(&s_broker.next_connection_id, 0);
     s_broker.listen_sock = -1;
     s_broker.server_task_handle = NULL;
+    argus_mqtt_invalidation_init(&s_broker.invalidations);
 
     ESP_LOGI(TAG, "broker lifecycle objects initialised");
     return ESP_OK;
@@ -1118,6 +1287,7 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
     atomic_store(&s_broker.active_client_count, 0);
     memset(s_broker.clients, 0, sizeof(s_broker.clients));
     memset(s_broker.retained, 0, sizeof(s_broker.retained));
+    argus_mqtt_invalidation_init(&s_broker.invalidations);
 
     /* Clear event bits before launching the task. */
     xEventGroupClearBits(s_broker.lifecycle_event_group,
@@ -1221,22 +1391,165 @@ esp_err_t argus_mqtt_broker_disconnect_machine(const char *identifier)
         s_broker.client_lock == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    int sockets[ARGUS_MQTT_MAX_CLIENTS];
+    argus_mqtt_disconnect_target_t targets[ARGUS_MQTT_MAX_CLIENTS] = {0};
     size_t count = 0U;
+    bool matched = false;
+    bool shutdown_failed = false;
+    esp_err_t fence =
+        argus_mqtt_broker_fence_machine_authentication(identifier);
+    if (fence != ESP_OK) return fence;
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
     for (size_t i = 0U; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
         argus_mqtt_client_t *client = &s_broker.clients[i];
-        if (client->in_use && client->connected && client->sock >= 0 &&
-            strcmp(client->principal.identifier, identifier) == 0) {
-            sockets[count++] = client->sock;
+        if (!argus_mqtt_disconnect_matches_locked(client, identifier)) continue;
+        matched = true;
+        client->security_invalidated = true;
+        if (argus_mqtt_claim_disconnect_locked(
+                client, i, identifier, &targets[count])) {
+            count++;
         }
     }
     xSemaphoreGive(s_broker.client_lock);
     for (size_t i = 0U; i < count; ++i) {
-        (void)shutdown(sockets[i], SHUT_RDWR);
+        if (shutdown(targets[i].socket_fd, SHUT_RDWR) != 0) {
+            shutdown_failed = true;
+            ESP_LOGW(
+                TAG,
+                "machine disconnect shutdown failed: slot=%u connection=%" PRIu64,
+                (unsigned)targets[i].slot, targets[i].connection_id);
+        }
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        bool released = argus_mqtt_release_disconnect_claim_locked(
+            &s_broker.clients[targets[i].slot], &targets[i]);
+        xSemaphoreGive(s_broker.client_lock);
+        if (!released) {
+            shutdown_failed = true;
+            ESP_LOGE(
+                TAG,
+                "machine disconnect ownership lost: slot=%u connection=%" PRIu64,
+                (unsigned)targets[i].slot, targets[i].connection_id);
+        }
     }
-    return count > 0U ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (shutdown_failed) return ESP_FAIL;
+    return matched ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
+
+esp_err_t argus_mqtt_broker_fence_machine_authentication(
+    const char *identifier)
+{
+    if (identifier == NULL || identifier[0] == '\0' ||
+        s_broker.client_lock == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    bool recorded = argus_mqtt_invalidation_record(
+        &s_broker.invalidations, identifier);
+    if (recorded) {
+        for (size_t i = 0U; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+            argus_mqtt_client_t *client = &s_broker.clients[i];
+            if (argus_mqtt_disconnect_matches_locked(
+                    client, identifier)) {
+                client->security_invalidated = true;
+            }
+        }
+    }
+    xSemaphoreGive(s_broker.client_lock);
+    return recorded ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+esp_err_t argus_mqtt_broker_test_disconnect_claim(
+    int selected_socket,
+    const argus_mqtt_broker_test_socket_ops_t *ops)
+{
+    if (selected_socket < 0 || ops == NULL ||
+        ops->shutdown_socket == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    argus_mqtt_client_t client = {
+        .in_use = true,
+        .connected = true,
+        .sock = selected_socket,
+        .connection_id = 71U,
+    };
+    strlcpy(
+        client.principal.identifier, "m-claim-test",
+        sizeof(client.principal.identifier));
+    argus_mqtt_disconnect_target_t target;
+    if (!argus_mqtt_claim_disconnect_locked(
+            &client, 0U, "m-claim-test", &target)) {
+        return ESP_FAIL;
+    }
+    if (ops->after_claim != NULL) {
+        ops->after_claim(
+            selected_socket,
+            argus_mqtt_client_close_allowed_locked(&client),
+            ops->ctx);
+    }
+    int result =
+        ops->shutdown_socket(selected_socket, SHUT_RDWR, ops->ctx);
+    bool released =
+        argus_mqtt_release_disconnect_claim_locked(&client, &target);
+    if (ops->after_release != NULL) {
+        ops->after_release(
+            selected_socket,
+            argus_mqtt_client_close_allowed_locked(&client),
+            ops->ctx);
+    }
+    return result == 0 && released ? ESP_OK : ESP_FAIL;
+}
+
+bool argus_mqtt_broker_test_bind_allowed(
+    const argus_mqtt_invalidation_journal_t *invalidations,
+    uint64_t captured_generation, const char *identifier,
+    bool in_use, bool connected, bool security_invalidated,
+    uint64_t connection_id, uint64_t expected_connection_id,
+    bool duplicate_client_id)
+{
+    argus_mqtt_client_t client = {
+        .in_use = in_use,
+        .connected = connected,
+        .security_invalidated = security_invalidated,
+        .connection_id = connection_id,
+    };
+    return argus_mqtt_bind_allowed_locked(
+        invalidations, &client, expected_connection_id, identifier,
+        captured_generation, duplicate_client_id);
+}
+
+bool argus_mqtt_broker_test_packet_admitted(
+    bool in_use, bool connected, bool security_invalidated,
+    uint64_t connection_id, uint64_t expected_connection_id)
+{
+    argus_mqtt_client_t client = {
+        .in_use = in_use,
+        .connected = connected,
+        .security_invalidated = security_invalidated,
+        .connection_id = connection_id,
+    };
+    return argus_mqtt_client_admitted_locked(
+        &client, expected_connection_id);
+}
+
+bool argus_mqtt_broker_test_disconnect_matches(
+    bool in_use, bool connected, int socket_fd,
+    const char *principal_identifier, const char *target_identifier)
+{
+    argus_mqtt_client_t client = {
+        .in_use = in_use,
+        .connected = connected,
+        .sock = socket_fd,
+    };
+    if (principal_identifier != NULL) {
+        strlcpy(
+            client.principal.identifier, principal_identifier,
+            sizeof(client.principal.identifier));
+    }
+    return target_identifier != NULL &&
+           argus_mqtt_disconnect_matches_locked(
+               &client, target_identifier);
+}
+#endif
 
 bool argus_mqtt_broker_is_running(void)
 {
@@ -1278,17 +1591,38 @@ esp_err_t argus_mqtt_broker_stop(void)
         close(listener);
     }
 
-    /* Snapshot and retire sockets under the lock, then close them unlocked. */
+    /*
+     * A machine invalidation owns its selected descriptor through shutdown.
+     * Wait for that bounded operation before retiring sockets so stop cannot
+     * close and recycle a descriptor still claimed by the invalidator.
+     */
     int sockets[ARGUS_MQTT_MAX_CLIENTS];
     size_t socket_count = 0U;
-    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
-        if (s_broker.clients[i].in_use && s_broker.clients[i].sock >= 0) {
-            sockets[socket_count++] = s_broker.clients[i].sock;
-            s_broker.clients[i].sock = -1;
+    for (;;) {
+        bool claim_active = false;
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+            if (s_broker.clients[i].shutdown_claimed) {
+                claim_active = true;
+                break;
+            }
         }
+        if (!claim_active) {
+            for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+                if (s_broker.clients[i].in_use &&
+                    s_broker.clients[i].sock >= 0) {
+                    sockets[socket_count++] = s_broker.clients[i].sock;
+                    s_broker.clients[i].sock = -1;
+                }
+            }
+            xSemaphoreGive(s_broker.client_lock);
+            break;
+        }
+        xSemaphoreGive(s_broker.client_lock);
+        vTaskDelay(1);
     }
-    xSemaphoreGive(s_broker.client_lock);
+
+    /* Close the sockets after their slots have been retired. */
     for (size_t i = 0U; i < socket_count; ++i) {
         shutdown(sockets[i], SHUT_RDWR);
         close(sockets[i]);

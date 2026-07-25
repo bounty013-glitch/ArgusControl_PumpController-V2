@@ -5436,6 +5436,11 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d4_machine_route_inventory);
     RUN_TEST(test_4d4_secret_zeroization);
     RUN_TEST(test_4d4_principal_excludes_verifier);
+    RUN_TEST(test_4d4_disconnect_socket_ownership);
+    RUN_TEST(test_4d4_invalidation_before_bind);
+    RUN_TEST(test_4d4_bind_before_invalidation);
+    RUN_TEST(test_4d4_audit_failure_still_disconnects);
+    RUN_TEST(test_4d4_invalidated_connection_is_inert);
     }
 
     int total_executions = passed_executions + failed_executions;

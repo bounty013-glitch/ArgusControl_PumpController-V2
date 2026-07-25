@@ -15,6 +15,19 @@ extern "C" {
 esp_err_t argus_security_http_init(void);
 esp_err_t argus_security_http_register(httpd_handle_t server);
 
+typedef struct {
+    bool mutation_committed;
+    bool disconnect_machine;
+    bool quarantine_rotation;
+    bool disclose_rotation_secret;
+    esp_err_t response_error;
+} argus_security_http_machine_action_decision_t;
+
+void argus_security_http_machine_action_decide(
+    esp_err_t mutation_error, esp_err_t audit_finalization_error,
+    bool rotation,
+    argus_security_http_machine_action_decision_t *out);
+
 #ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 typedef struct {
     uint64_t before_sequence;

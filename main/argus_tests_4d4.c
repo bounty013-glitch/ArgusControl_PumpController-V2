@@ -304,8 +304,36 @@ esp_err_t test_4d4_enrollment_policy_boundaries(void)
             sizeof(request.topic_scope));
     CHECK(argus_machine_service_enrollment_allowed(&actor, &request));
 
-    request.permissions |= ARGUS_PERMISSION_MANAGE_USERS;
-    CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+    static const argus_permission_set_t administrative_permissions[] = {
+        ARGUS_PERMISSION_MANAGE_USERS,
+        ARGUS_PERMISSION_MANAGE_ROLES,
+        ARGUS_PERMISSION_MANAGE_CLIENT_ADMINS,
+        ARGUS_PERMISSION_ENROLL_MACHINES,
+        ARGUS_PERMISSION_REVOKE_MACHINES,
+        ARGUS_PERMISSION_VIEW_AUDIT,
+        ARGUS_PERMISSION_MANAGE_NETWORK,
+        ARGUS_PERMISSION_CHANGE_AP_SECRET,
+        ARGUS_PERMISSION_MANAGE_CLIENT_NETWORK,
+        ARGUS_PERMISSION_MANAGE_MQTT,
+        ARGUS_PERMISSION_MODIFY_IDENTITY,
+        ARGUS_PERMISSION_MODIFY_PROTECTED_CONFIG,
+        ARGUS_PERMISSION_COMMISSION,
+        ARGUS_PERMISSION_CALIBRATE,
+        ARGUS_PERMISSION_MANAGE_FIRMWARE,
+        ARGUS_PERMISSION_INVOKE_RECOVERY,
+        ARGUS_PERMISSION_FULL_SECURITY_RESET,
+    };
+    actor.delegable_permissions = ARGUS_PERMISSION_DEFINED_MASK;
+    for (size_t i = 0U;
+         i < sizeof(administrative_permissions) /
+                 sizeof(administrative_permissions[0]);
+         ++i) {
+        request.permissions = administrative_permissions[i];
+        CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+    }
+    actor.delegable_permissions = ARGUS_PERMISSION_VIEW_STATUS |
+                                  ARGUS_PERMISSION_REQUEST_AUTHORITY |
+                                  ARGUS_PERMISSION_MOTION;
     request.permissions = ARGUS_PERMISSION_SOFTWARE_ESTOP;
     CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
     request.permissions = ARGUS_PERMISSION_VIEW_STATUS;
@@ -524,5 +552,166 @@ esp_err_t test_4d4_principal_excludes_verifier(void)
           sizeof(argus_security_machine_record_t));
     CHECK(sizeof(((argus_mqtt_broker_client_info_t *)0)->principal) ==
           sizeof(argus_machine_principal_t));
+    return ESP_OK;
+}
+
+typedef struct {
+    int selected_socket;
+    int shutdown_socket;
+    bool close_allowed_during_claim;
+    bool close_allowed_after_release;
+    bool fail_shutdown;
+} socket_owner_test_t;
+
+static void test_after_socket_claim(
+    int socket_fd, bool close_allowed, void *ctx)
+{
+    socket_owner_test_t *test = ctx;
+    test->selected_socket = socket_fd;
+    test->close_allowed_during_claim = close_allowed;
+}
+
+static int test_shutdown_socket(int socket_fd, int how, void *ctx)
+{
+    (void)how;
+    socket_owner_test_t *test = ctx;
+    test->shutdown_socket = socket_fd;
+    return test->fail_shutdown ? -1 : 0;
+}
+
+static void test_after_socket_release(
+    int socket_fd, bool close_allowed, void *ctx)
+{
+    socket_owner_test_t *test = ctx;
+    test->selected_socket = socket_fd;
+    test->close_allowed_after_release = close_allowed;
+}
+
+static argus_mqtt_broker_test_socket_ops_t socket_test_ops(
+    socket_owner_test_t *test)
+{
+    return (argus_mqtt_broker_test_socket_ops_t) {
+        .shutdown_socket = test_shutdown_socket,
+        .after_claim = test_after_socket_claim,
+        .after_release = test_after_socket_release,
+        .ctx = test,
+    };
+}
+
+esp_err_t test_4d4_disconnect_socket_ownership(void)
+{
+    socket_owner_test_t test = {0};
+    argus_mqtt_broker_test_socket_ops_t ops = socket_test_ops(&test);
+    CHECK(argus_mqtt_broker_test_disconnect_claim(7, &ops) == ESP_OK);
+    CHECK(test.selected_socket == 7);
+    CHECK(!test.close_allowed_during_claim);
+    CHECK(test.shutdown_socket == 7);
+    CHECK(test.close_allowed_after_release);
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_invalidation_before_bind(void)
+{
+    argus_mqtt_invalidation_journal_t invalidations;
+    argus_mqtt_invalidation_init(&invalidations);
+    uint64_t captured =
+        argus_mqtt_invalidation_capture(&invalidations);
+    CHECK(argus_mqtt_invalidation_record(
+        &invalidations, "m-race-target"));
+    CHECK(!argus_mqtt_broker_test_bind_allowed(
+        &invalidations, captured, "m-race-target",
+        true, false, false, 41U, 41U, false));
+    CHECK(argus_mqtt_broker_test_bind_allowed(
+        &invalidations, captured, "m-unrelated",
+        true, false, false, 42U, 42U, false));
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_bind_before_invalidation(void)
+{
+    argus_mqtt_invalidation_journal_t invalidations;
+    argus_mqtt_invalidation_init(&invalidations);
+    uint64_t captured =
+        argus_mqtt_invalidation_capture(&invalidations);
+    CHECK(argus_mqtt_broker_test_bind_allowed(
+        &invalidations, captured, "m-bound-target",
+        true, false, false, 51U, 51U, false));
+    CHECK(argus_mqtt_invalidation_record(
+        &invalidations, "m-bound-target"));
+    CHECK(argus_mqtt_broker_test_disconnect_matches(
+        true, true, 9, "m-bound-target", "m-bound-target"));
+    CHECK(!argus_mqtt_broker_test_disconnect_matches(
+        true, true, 10, "m-unrelated", "m-bound-target"));
+    CHECK(argus_mqtt_invalidation_since(
+        &invalidations, "m-bound-target", captured));
+    CHECK(!argus_mqtt_invalidation_since(
+        &invalidations, "m-unrelated", captured));
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_audit_failure_still_disconnects(void)
+{
+    const bool rotations[] = {false, false, false, true};
+    for (size_t i = 0U;
+         i < sizeof(rotations) / sizeof(rotations[0]); ++i) {
+        argus_security_http_machine_action_decision_t decision;
+        argus_security_http_machine_action_decide(
+            ESP_OK, ESP_FAIL, rotations[i], &decision);
+        CHECK(decision.mutation_committed);
+        CHECK(decision.disconnect_machine);
+        CHECK(decision.response_error == ESP_FAIL);
+        CHECK(decision.quarantine_rotation == rotations[i]);
+        CHECK(!decision.disclose_rotation_secret);
+    }
+    argus_security_http_machine_action_decision_t success;
+    argus_security_http_machine_action_decide(
+        ESP_OK, ESP_OK, true, &success);
+    CHECK(success.disconnect_machine);
+    CHECK(success.disclose_rotation_secret);
+    CHECK(!success.quarantine_rotation);
+    argus_security_http_machine_action_decision_t failed;
+    argus_security_http_machine_action_decide(
+        ESP_ERR_NOT_ALLOWED, ESP_ERR_NOT_ALLOWED, true, &failed);
+    CHECK(!failed.mutation_committed);
+    CHECK(!failed.disconnect_machine);
+    CHECK(!failed.disclose_rotation_secret);
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_invalidated_connection_is_inert(void)
+{
+    CHECK(argus_mqtt_broker_test_packet_admitted(
+        true, true, false, 61U, 61U));
+    CHECK(!argus_mqtt_broker_test_packet_admitted(
+        true, true, true, 61U, 61U));
+    CHECK(!argus_mqtt_broker_test_packet_admitted(
+        true, true, false, 62U, 61U));
+
+    socket_owner_test_t test = {.fail_shutdown = true};
+    argus_mqtt_broker_test_socket_ops_t ops = socket_test_ops(&test);
+    CHECK(argus_mqtt_broker_test_disconnect_claim(11, &ops) == ESP_FAIL);
+    CHECK(!test.close_allowed_during_claim);
+    CHECK(test.shutdown_socket == 11);
+    CHECK(test.close_allowed_after_release);
+
+    size_t subscriptions = 0U;
+    size_t publishes = 0U;
+    size_t heartbeats = 0U;
+    size_t sequences = 0U;
+    size_t authority_lookups = 0U;
+    size_t dispatches = 0U;
+    bool admitted = argus_mqtt_broker_test_packet_admitted(
+        true, true, true, 63U, 63U);
+    if (admitted) {
+        subscriptions++;
+        publishes++;
+        heartbeats++;
+        sequences++;
+        authority_lookups++;
+        dispatches++;
+    }
+    CHECK(subscriptions == 0U && publishes == 0U);
+    CHECK(heartbeats == 0U && sequences == 0U);
+    CHECK(authority_lookups == 0U && dispatches == 0U);
     return ESP_OK;
 }

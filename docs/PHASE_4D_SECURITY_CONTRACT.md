@@ -116,6 +116,13 @@ Argus Personnel records are protected product identities. A Client Admin cannot 
 
 A machine record contains a stable machine ID, display name, client type, enabled flag, allowed transports/interfaces, roles/permissions, topic/API scope, verifier metadata, credential version, enrollment actor, and revocation state. It is not a human account and cannot use human browser pages.
 
+Phase 4D.4 defines the classifications HMI, Node-RED, service tool, backup
+interface, Argus Command, and AI tool gateway (`AI_TOOL_GATEWAY`). Client type is
+classification only. It grants no permission, scope, interface, transport,
+browser access, operating authority, or command path. Every effective privilege
+must come from the separately validated enrollment fields and the production
+authorization path.
+
 ### 6.3 Runtime Identities
 
 Human accounts, browser sessions, machine clients, MQTT sockets/connections, Phase 4C broker sessions, and heartbeat leases remain distinct records. Links between them are explicit IDs, never object or token substitution.
@@ -133,7 +140,7 @@ Human accounts, browser sessions, machine clients, MQTT sockets/connections, Pha
 
 The accepted matrix contains 23 stable capabilities. The `manage_client_admins` amendment is a distinct protected capability; it is not implied by `manage_users`.
 
-Legend: `Y` built-in; `G` may be explicitly granted within the role ceiling; `N` prohibited; `A` assigned per machine enrollment and bounded by the enrolling actor.
+Legend: `Y` built-in; `G` may be explicitly granted within the role ceiling; `N` prohibited; `A` assigned through the current ordinary machine-enrollment path and bounded by the enrolling actor.
 
 | Capability | Argus Personnel | Client Admin | Supervisor | Operator | Viewer | Machine Identity |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -143,25 +150,42 @@ Legend: `Y` built-in; `G` may be explicitly granted within the role ceiling; `N`
 | Issue software E-stop | Y | G | Y | Y | N | A |
 | Reset software E-stop | Y | G | Y | Y | N | A |
 | Acknowledge alarms | Y | G | Y | Y | N | A |
-| Manage users below caller ceiling | Y | Y | G, Operator/Viewer only | N | N | A, service-tool only |
+| Manage users below caller ceiling | Y | Y | G, Operator/Viewer only | N | N | N |
 | Manage Client Admins (`manage_client_admins`) | Y | G, only when explicitly assigned by Argus Personnel | N | N | N | N |
-| Manage custom roles below caller ceiling | Y | Y | N | N | N | A, service-tool only |
-| Enroll machine clients | Y | Y | N | N | N | A, service-tool only |
-| Revoke machine clients | Y | Y | N | N | N | A, service-tool only |
-| View audit history | Y | Y, client scope | G, operational scope | N | N | A, scoped |
-| Manage AP/network access | Y | G, explicit | N | N | N | A, Argus service-tool only |
-| Change AP password | Y | G only with Manage Network Access | N | N | N | A, Argus service-tool only |
-| Manage client-network configuration | Y | G, explicit | N | N | N | A, Argus service-tool only |
-| Manage MQTT client configuration | Y | G, explicit | N | N | N | A, Argus service-tool only |
-| Modify device/customer identity | Y | N | N | N | N | A, Argus service-tool only |
-| Modify protected controller configuration | Y | N | N | N | N | A, Argus service-tool only |
-| Commission the controller | Y | N | N | N | N | A, Argus service-tool only |
-| Calibrate the pump | Y | N | N | N | N | A, Argus service-tool only |
-| Manage firmware | Y | N | N | N | N | A, Argus service-tool only |
-| Invoke non-destructive network recovery | Y | G, explicit | N | N | N | A, Argus service-tool only |
-| Perform full security reset | Y | N | N | N | N | A, factory service-tool only |
+| Manage custom roles below caller ceiling | Y | Y | N | N | N | N |
+| Enroll machine clients | Y | Y | N | N | N | N |
+| Revoke machine clients | Y | Y | N | N | N | N |
+| View audit history | Y | Y, client scope | G, operational scope | N | N | N |
+| Manage AP/network access | Y | G, explicit | N | N | N | N |
+| Change AP password | Y | G only with Manage Network Access | N | N | N | N |
+| Manage client-network configuration | Y | G, explicit | N | N | N | N |
+| Manage MQTT client configuration | Y | G, explicit | N | N | N | N |
+| Modify device/customer identity | Y | N | N | N | N | N |
+| Modify protected controller configuration | Y | N | N | N | N | N |
+| Commission the controller | Y | N | N | N | N | N |
+| Calibrate the pump | Y | N | N | N | N | N |
+| Manage firmware | Y | N | N | N | N | N |
+| Invoke non-destructive network recovery | Y | G, explicit | N | N | N | N |
+| Perform full security reset | Y | N | N | N | N | N |
 
 Software E-stop remains a software command, not a safety-rated physical E-stop. Authentication and `ISSUE_SOFTWARE_ESTOP` authorization occur before the request reaches the existing safety-preemption route. Once authorized and decoded, audit or result-publication failure must not delay the E-stop.
+
+Phase 4D.4 ordinary enrollment supports only the implemented bounded MQTT
+operational surface: status visibility, authority requests, ordinary motion,
+software E-stop, software E-stop reset, and alarm acknowledgement where a
+production action mapping exists. Administrative capabilities are not grantable
+through ordinary machine enrollment. The phrases "service-tool only", "Argus
+service-tool only", and "factory service-tool only" identify reserved future
+policy classes, not powers conferred by a client-type label. Such powers remain
+prohibited until a separate phase defines and accepts their provisioning path,
+transport/API policy, authorization boundaries, and action mapping.
+
+Phase 4C exposes one controller-owned
+`event/pump1/command_result` topic beneath the commissioned topic root. Any
+Phase 4D.4 machine principal with `view_status` and a topic scope containing
+that exact topic may subscribe to the shared result stream. This visibility is
+inherited Phase 4C behavior; it does not grant command publication or operating
+authority and Phase 4D.4 does not redesign result correlation.
 
 ## 9. Permission Ceilings and Delegation
 

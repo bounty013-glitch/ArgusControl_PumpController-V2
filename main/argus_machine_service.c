@@ -101,8 +101,16 @@ static bool actor_can_manage(
                          ARGUS_PERMISSION_MANAGE_CLIENT_ADMINS |
                          ARGUS_PERMISSION_ENROLL_MACHINES |
                          ARGUS_PERMISSION_REVOKE_MACHINES |
+                         ARGUS_PERMISSION_VIEW_AUDIT |
+                         ARGUS_PERMISSION_MANAGE_NETWORK |
                          ARGUS_PERMISSION_CHANGE_AP_SECRET |
+                         ARGUS_PERMISSION_MANAGE_CLIENT_NETWORK |
+                         ARGUS_PERMISSION_MANAGE_MQTT |
+                         ARGUS_PERMISSION_MODIFY_IDENTITY |
+                         ARGUS_PERMISSION_MODIFY_PROTECTED_CONFIG |
                          ARGUS_PERMISSION_COMMISSION |
+                         ARGUS_PERMISSION_CALIBRATE |
+                         ARGUS_PERMISSION_MANAGE_FIRMWARE |
                          ARGUS_PERMISSION_INVOKE_RECOVERY |
                          ARGUS_PERMISSION_FULL_SECURITY_RESET)) == 0U;
 }

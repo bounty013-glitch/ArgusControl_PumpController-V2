@@ -6,6 +6,9 @@
 
 #include "esp_err.h"
 #include "argus_machine_service.h"
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+#include "argus_mqtt_invalidation.h"
+#endif
 
 #define ARGUS_MQTT_BROKER_CLIENT_ID_CAP 33U
 #define ARGUS_MQTT_BROKER_TOPIC_CAP 160U
@@ -96,8 +99,37 @@ esp_err_t argus_mqtt_broker_init(void);
 esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
 esp_err_t argus_mqtt_broker_stop(void);
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);
+esp_err_t argus_mqtt_broker_fence_machine_authentication(
+    const char *identifier);
 esp_err_t argus_mqtt_broker_disconnect_machine(const char *identifier);
 bool argus_mqtt_broker_is_running(void);
+
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+typedef struct {
+    int (*shutdown_socket)(int socket_fd, int how, void *ctx);
+    void (*after_claim)(
+        int selected_socket, bool close_allowed, void *ctx);
+    void (*after_release)(
+        int selected_socket, bool close_allowed, void *ctx);
+    void *ctx;
+} argus_mqtt_broker_test_socket_ops_t;
+
+esp_err_t argus_mqtt_broker_test_disconnect_claim(
+    int selected_socket,
+    const argus_mqtt_broker_test_socket_ops_t *ops);
+bool argus_mqtt_broker_test_bind_allowed(
+    const argus_mqtt_invalidation_journal_t *invalidations,
+    uint64_t captured_generation, const char *identifier,
+    bool in_use, bool connected, bool security_invalidated,
+    uint64_t connection_id, uint64_t expected_connection_id,
+    bool duplicate_client_id);
+bool argus_mqtt_broker_test_packet_admitted(
+    bool in_use, bool connected, bool security_invalidated,
+    uint64_t connection_id, uint64_t expected_connection_id);
+bool argus_mqtt_broker_test_disconnect_matches(
+    bool in_use, bool connected, int socket_fd,
+    const char *principal_identifier, const char *target_identifier);
+#endif
 
 typedef enum {
     BROKER_STATE_STOPPED = 0,

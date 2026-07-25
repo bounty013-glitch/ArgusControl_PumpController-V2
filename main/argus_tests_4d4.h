@@ -23,5 +23,10 @@ esp_err_t test_4d4_machine_scope_policy(void);
 esp_err_t test_4d4_machine_route_inventory(void);
 esp_err_t test_4d4_secret_zeroization(void);
 esp_err_t test_4d4_principal_excludes_verifier(void);
+esp_err_t test_4d4_disconnect_socket_ownership(void);
+esp_err_t test_4d4_invalidation_before_bind(void);
+esp_err_t test_4d4_bind_before_invalidation(void);
+esp_err_t test_4d4_audit_failure_still_disconnects(void);
+esp_err_t test_4d4_invalidated_connection_is_inert(void);
 
 #endif
