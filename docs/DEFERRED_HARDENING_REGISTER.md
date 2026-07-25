@@ -316,16 +316,18 @@ Direct privileged mutation of a locked identity remains intentionally unsupporte
 | **Date Recorded** | 2026-07-22 |
 | **System Area** | Embedded MQTT Broker / Supervisory Contract |
 | **Phase Introduced** | Phase 4C acceptance |
-| **Status** | CONTRACTED; IMPLEMENTATION DEFERRED |
-| **Target Phase** | Later Phase 4D implementation subphase |
+| **Status** | PARTIALLY CLOSED; TRANSPORT HARDENING DEFERRED |
+| **Target Phase** | Machine authentication closed in Phase 4D.4; remaining transport/adversarial work later |
 
 **Current scope:** Phase 4C assumes a trusted local network. Its broker-lifecycle session, command sequence, connection identity, client ID, heartbeat lease, and topic-ownership policy provide freshness, replay control, and deterministic local ownership. They do not authenticate a human or publisher cryptographically.
 
-**Deferred hardening:** Define MQTT authentication and credential lifecycle, transport encryption, cryptographic publisher identity where required, authorization policy, rate limits, connection and publish abuse handling, denial-of-service bounds, security event observability, and a general adversarial security audit. Coordinate this work with the Phase 4D HTTP, TLS, credential, CSRF, and deployment-security design.
+**Deferred hardening:** Transport encryption, certificate lifecycle, hostile-network operation, rate and connection-abuse hardening beyond current bounded behavior, denial-of-service analysis, physical key protection, and a general adversarial security audit remain open. Coordinate this work with the later HTTP, TLS, certificate, and deployment-security design.
 
 **Acceptance boundary:** Do not describe client IDs, command sessions, sequence counters, topic ACLs, or connection IDs as security credentials. Phase 4C acceptance proves protocol correctness on the trusted local network; it does not claim resistance to a hostile network participant.
 
 **Phase 4D.1 disposition:** The machine-identity, credential, per-client permission, revocation, and audit boundaries are now defined in `PHASE_4D_SECURITY_CONTRACT.md`. No MQTT authentication, credential, authorization, or transport-encryption behavior was implemented, so this item remains open.
+
+**Phase 4D.4 disposition:** CLOSED for bounded machine enrollment, controller-generated one-time credentials, verifier-only storage, strict MQTT CONNECT authentication, interface and topic authorization, connection-bound identity, immediate rotation/revocation invalidation, and stationary live protocol acceptance. MQTT remains plaintext and the remaining hostile-network, TLS/certificate, abuse-resistance, and physical-extraction risks above remain open.
 
 ---
 

@@ -104,7 +104,18 @@ gantt
     *   Strict newest-first audit pagination with a maximum 16-record page and exclusive non-secret sequence cursor.
     *   Measured 168-byte records, 255 retained events, eight-entry queue, bounded stack/RAM, corruption-gap reporting, and documented wear boundary.
 *   **Evidence**: Three 729/729 controller suites, SoftAP/STA route checks, canonical logout, Basic Auth rejection, two live AP-secret change/reconnect cycles with original credential restoration, live audit lifecycle proof, physical recovery entry and authenticated response-before-reboot exit, zero-warning/error ESP-IDF v5.5.3 no-ccache build, and 62% OTA headroom. See `PHASE_4D_3A_IMPLEMENTATION_PLAN.md` and `Phase 4D.3a Tests.md`.
-*   **Next gate**: Phase 4D.4 may implement machine-client enrollment and MQTT CONNECT authentication under a separately approved scope. HTTPS/TLS, certificates, hostile-network acceptance, and irreversible protections remain separately gated.
+*   **Next gate completed**: Phase 4D.4 separately implemented and accepted bounded machine-client enrollment and MQTT CONNECT authentication. HTTPS/TLS, certificates, hostile-network acceptance, and irreversible protections remain separately gated.
+
+#### Phase 4D.4: Machine-Client Enrollment and MQTT CONNECT Authentication
+*   **Status**: COMPLETE AND ACCEPTED on July 25, 2026.
+*   **Delivered**:
+    *   Dedicated 16-record encrypted machine directory with atomic dual-slot persistence, one-time controller-generated secrets, verifier-only storage, and bounded listing/enrollment/rotation/disable/revoke/delete administration.
+    *   Strict MQTT 3.1.1 CONNECT authentication with interface and transport policy, connection-bound sanitized principals, deterministic duplicate-client handling, and no authentication-to-authority coupling.
+    *   Per-packet authorization before subscription, publication, heartbeat, freshness, authority lookup, or dispatch, while preserving the Phase 4C command router as the sole normal motion path.
+    *   Connection-identity-safe rotation/revocation invalidation, authentication-to-bind epoch coordination, and policy-inert invalidated sockets even if physical socket closure fails.
+    *   Fail-closed ordinary enrollment capability ceilings; reserved service-tool classifications and `AI_TOOL_GATEWAY` grant no capability by label.
+*   **Evidence**: ESP-IDF v5.5.3 full-clean no-ccache build with zero warnings/errors and 61% OTA headroom; three 804/804 controller suites; live SoftAP/STA CONNECT matrix, subscription/publish policy, heartbeat lifecycle, duplicate client ID, rotation, revocation, cleanup, and browser regression. The motor was physically disconnected and no motion-capable command was issued. See `PHASE_4D_4_IMPLEMENTATION_PLAN.md` and `Phase 4D.4 Tests.md`.
+*   **Next gate**: A later separately approved security subphase may address plaintext transport, certificates, hostile-network operation, or other remaining register items. Phase 5 field calibration is not implied by this acceptance.
 
 #### Phase 5: Field Integration and Calibration
 *   **Tasks**:
