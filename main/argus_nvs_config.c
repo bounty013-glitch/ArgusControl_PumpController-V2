@@ -67,15 +67,43 @@ uint32_t argus_nvs_config_calc_crc32(const argus_config_payload_t *payload)
 }
 
 /**
- * @brief Validate a dual-slot record. Supports V1→V2 transparent migration.
+ * @brief Validate a dual-slot record. Supports V1→V3 and V2→V3 transparent
+ *        migration.
  *
- * V1 slots have schema_version=1, payload_length=228 (no provisioned_flags).
+ * V1 slots have schema_version=1, payload_length=228 (no provisioned_flags,
+ * no authority_profile).
+ * V2 slots have schema_version=2, payload_length=229 (provisioned_flags, no
+ * authority_profile).
+ * V3 slots have schema_version=3, payload_length=230 (both).
+ *
  * On valid V1 read, provisioned_flags is set to 0 (unprovisioned, eligible
  * for one portal provisioning). This is a documented development migration
  * rule, not an inferred universal production policy.
  *
- * V2 slots have schema_version=2, payload_length=229 (with provisioned_flags).
+ * On valid V1 or V2 read, authority_profile defaults to
+ * ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI. That default is deliberate and
+ * bounded in time: no ArgusCore services host exists at the date of this
+ * migration, so no deployed unit can be an integrated installation whose
+ * hierarchy this could invert. Choosing ARGUSCORE_PREFERRED instead would
+ * leave every existing unit waiting on a supervisor that cannot arrive.
+ *
+ * A migrated unit is therefore usable immediately and its profile is
+ * explicit rather than absent. Commissioning a unit into an integrated
+ * installation is a deliberate act that sets the profile to
+ * ARGUSCORE_PREFERRED; it is never inferred from a Core appearing on the
+ * network.
  */
+/* The migration branches below compare against hard-coded historical payload
+   sizes. If the struct layout ever drifts from those numbers, every migration
+   silently stops matching and a commissioned unit reads as unconfigured. Fail
+   the build instead. */
+_Static_assert(ARGUS_CONFIG_PAYLOAD_V1_SIZE == 228,
+               "V1 payload size is historical and must not change");
+_Static_assert(ARGUS_CONFIG_PAYLOAD_V2_SIZE == ARGUS_CONFIG_PAYLOAD_V1_SIZE + 1,
+               "V2 added exactly one byte (provisioned_flags) to V1");
+_Static_assert(sizeof(argus_config_payload_t) == ARGUS_CONFIG_PAYLOAD_V2_SIZE + 1,
+               "V3 adds exactly one byte (authority_profile) to V2");
+
 static bool is_slot_valid(argus_cfg_slot_t *slot)
 {
     if (!slot) return false;
@@ -100,8 +128,28 @@ static bool is_slot_valid(argus_cfg_slot_t *slot)
 
         /* Migrate in-place: set provisioned_flags to 0 (identity editable) */
         slot->payload.provisioned_flags = 0;
+        slot->payload.authority_profile = ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
 
-        /* Upgrade slot metadata so commit writes V2 */
+        /* Upgrade slot metadata so commit writes the current schema */
+        slot->schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
+        slot->payload_length = sizeof(argus_config_payload_t);
+        slot->crc32 = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                      sizeof(argus_config_payload_t));
+
+        return (argus_nvs_config_validate(&slot->payload) == ESP_OK);
+    }
+
+    if (slot->schema_version == ARGUS_CONFIG_SCHEMA_V2 &&
+        slot->payload_length == ARGUS_CONFIG_PAYLOAD_V2_SIZE) {
+        /* V2 migration: CRC was over the 229-byte payload (no authority_profile).
+           provisioned_flags is already meaningful and must be preserved - a
+           unit whose identity was locked stays locked across this migration. */
+        uint32_t computed = calc_crc32_raw((const uint8_t *)&slot->payload,
+                                           ARGUS_CONFIG_PAYLOAD_V2_SIZE);
+        if (computed != slot->crc32) return false;
+
+        slot->payload.authority_profile = ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
+
         slot->schema_version = ARGUS_CONFIG_SCHEMA_VERSION;
         slot->payload_length = sizeof(argus_config_payload_t);
         slot->crc32 = calc_crc32_raw((const uint8_t *)&slot->payload,
@@ -725,6 +773,11 @@ esp_err_t argus_nvs_config_validate(const argus_config_payload_t *cfg)
             return ESP_ERR_INVALID_ARG;
         }
     }
+
+    /* An out-of-range profile must never be treated as a usable
+       configuration. Silently coercing it to a default would let a corrupt
+       or downgraded record decide who commands the pump. */
+    if (cfg->authority_profile > ARGUS_AUTHORITY_PROFILE_MAX) return ESP_ERR_INVALID_ARG;
 
     return ESP_OK;
 }

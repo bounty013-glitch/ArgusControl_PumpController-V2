@@ -15,9 +15,11 @@
 extern "C" {
 #endif
 
-#define ARGUS_CONFIG_SCHEMA_VERSION     2
+#define ARGUS_CONFIG_SCHEMA_VERSION     3
 #define ARGUS_CONFIG_SCHEMA_V1          1
+#define ARGUS_CONFIG_SCHEMA_V2          2
 #define ARGUS_CONFIG_PAYLOAD_V1_SIZE    228  /* packed size without provisioned_flags */
+#define ARGUS_CONFIG_PAYLOAD_V2_SIZE    229  /* packed size without authority_profile */
 #define ARGUS_CONFIG_VALID_MARKER       0xA5A55A5AU
 #define ARGUS_CONFIG_MASK_STRING        "********"
 
@@ -30,6 +32,29 @@ extern "C" {
 
 #define ARGUS_CFG_PROVISIONED_IDENTITY  0x01  /**< Bit 0: identity is locked after initial provisioning */
 
+/**
+ * @brief Commissioned authority profile - who is the preferred ordinary
+ *        command authority for this installation.
+ *
+ * This is installation configuration. It is decided once at commissioning
+ * and is NEVER inferred from current network traffic, connection order, or
+ * which client happens to be present. Per the governing decision
+ * ("Deterministic Initial Authority Selection", 2026-07-26): connection
+ * proves presence, it does not grant control. A client must not win command
+ * authority because its boot time was shorter or its Wi-Fi associated first.
+ */
+typedef enum {
+    /** No ArgusCore services host is assigned. The authenticated HMI is the
+     *  ordinary command authority. ArgusCore cannot appear later and take
+     *  control without recommissioning. */
+    ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI = 0,
+    /** The pump belongs to an integrated Argus installation. ArgusCore is the
+     *  preferred supervisory authority and must explicitly acquire and renew
+     *  its lease; the HMI is the local fallback. */
+    ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED = 1,
+    ARGUS_AUTHORITY_PROFILE_MAX = ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED,
+} argus_authority_profile_t;
+
 typedef struct __attribute__((packed)) {
     char client_id[ARGUS_CFG_CLIENT_ID_MAX + 1];   /**< 32 chars + null */
     char unit_id[ARGUS_CFG_UNIT_ID_MAX + 1];       /**< 32 chars + null */
@@ -37,6 +62,7 @@ typedef struct __attribute__((packed)) {
     char sta_ssid[ARGUS_CFG_STA_SSID_MAX + 1];     /**< 32 bytes + null */
     char sta_pass[ARGUS_CFG_STA_PASS_MAX + 1];     /**< 63 chars + null */
     uint8_t provisioned_flags;                     /**< Bitfield: ARGUS_CFG_PROVISIONED_IDENTITY */
+    uint8_t authority_profile;                     /**< argus_authority_profile_t, commissioned */
 } argus_config_payload_t;
 
 typedef struct __attribute__((packed)) {

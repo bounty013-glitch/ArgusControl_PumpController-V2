@@ -1747,6 +1747,95 @@ static esp_err_t test_schema_v1_migration(void)
     return ESP_OK;
 }
 
+// Test 34b: V2 to V3 schema migration - authority_profile defaults to
+// STANDALONE_HMI, and provisioned_flags MUST survive.
+//
+// The preservation half is the one that matters. provisioned_flags carries
+// ARGUS_CFG_PROVISIONED_IDENTITY, the bit that locks a commissioned unit's
+// identity against further edits. A migration that reset it would silently
+// unlock every already-commissioned controller in the field.
+static esp_err_t test_schema_v2_migration(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_config_payload_t v2_cfg = {0};
+    snprintf(v2_cfg.client_id, sizeof(v2_cfg.client_id), "v2_co");
+    snprintf(v2_cfg.unit_id, sizeof(v2_cfg.unit_id), "v2_unit");
+    snprintf(v2_cfg.device_name, sizeof(v2_cfg.device_name), "V2 Pump");
+    snprintf(v2_cfg.sta_ssid, sizeof(v2_cfg.sta_ssid), "V2WiFi");
+    snprintf(v2_cfg.sta_pass, sizeof(v2_cfg.sta_pass), "V2Pass9999");
+    v2_cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;  /* locked */
+    v2_cfg.authority_profile = 0xEE;  /* garbage; must be overwritten */
+
+    /* CRC over only the V2 portion (229 bytes, no authority_profile) */
+    const uint8_t *raw = (const uint8_t *)&v2_cfg;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < ARGUS_CONFIG_PAYLOAD_V2_SIZE; i++) {
+        crc ^= raw[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320U;
+            else         crc = (crc >> 1);
+        }
+    }
+    uint32_t v2_only_crc = ~crc;
+
+    argus_cfg_slot_t v2_slot = {0};
+    v2_slot.schema_version = ARGUS_CONFIG_SCHEMA_V2;
+    v2_slot.config_generation = 9;
+    v2_slot.payload_length = ARGUS_CONFIG_PAYLOAD_V2_SIZE;
+    v2_slot.crc32 = v2_only_crc;
+    v2_slot.valid_marker = ARGUS_CONFIG_VALID_MARKER;
+    memcpy(&v2_slot.payload, &v2_cfg, sizeof(argus_config_payload_t));
+
+    store.slot_a = v2_slot;
+    store.has_slot_a = true;
+    store.has_slot_b = false;
+    store.selector = 0;
+    store.has_selector = true;
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "V2 migration init failed");
+    TEST_ASSERT(core.has_valid_config, "V2 config not recognized after migration");
+
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_core_get(&core, &readback) == ESP_OK, "V2 readback failed");
+    TEST_ASSERT(strcmp(readback.client_id, "v2_co") == 0, "V2 client_id lost");
+    TEST_ASSERT(strcmp(readback.sta_ssid, "V2WiFi") == 0, "V2 sta_ssid lost");
+    TEST_ASSERT(readback.provisioned_flags == ARGUS_CFG_PROVISIONED_IDENTITY,
+                "V2 migration must preserve the identity lock");
+    TEST_ASSERT(readback.authority_profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI,
+                "V2 migration must default authority_profile to STANDALONE_HMI");
+    return ESP_OK;
+}
+
+// Test 34c: an out-of-range authority_profile is not a usable configuration.
+// Coercing it to a default would let a corrupt or downgraded record decide
+// who is allowed to command the pump.
+static esp_err_t test_authority_profile_range_rejected(void)
+{
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "rng_co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "rng_unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Range Pump");
+    snprintf(cfg.sta_ssid, sizeof(cfg.sta_ssid), "RangeWiFi");
+    snprintf(cfg.sta_pass, sizeof(cfg.sta_pass), "RangePass99");
+
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_OK, "STANDALONE_HMI must validate");
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_OK, "ARGUSCORE_PREFERRED must validate");
+
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_MAX + 1;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_ERR_INVALID_ARG,
+                "out-of-range authority_profile must be rejected");
+    cfg.authority_profile = 0xFF;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_ERR_INVALID_ARG,
+                "0xFF authority_profile must be rejected");
+    return ESP_OK;
+}
+
 // Test 35: Restart transaction preflight failure — gate acquired and released, no side effects
 static esp_err_t test_restart_transaction_preflight_failure(void)
 {
@@ -5204,6 +5293,8 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_restart_transaction_success);
         RUN_TEST(test_new_ssid_without_password_rejected);
         RUN_TEST(test_schema_v1_migration);
+        RUN_TEST(test_schema_v2_migration);
+        RUN_TEST(test_authority_profile_range_rejected);
         RUN_TEST(test_restart_transaction_preflight_failure);
         RUN_TEST(test_restart_transaction_final_safety_failure);
         RUN_TEST(test_overlay_identity_sets_lock);
