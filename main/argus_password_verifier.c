@@ -18,6 +18,13 @@
 #define ARGUS_KDF_TASK_STACK 6144U
 #define ARGUS_KDF_TASK_PRIORITY 3U
 #define ARGUS_KDF_COOPERATE_INTERVAL 256U
+// How long a caller waits for its turn on the serialized KDF worker before
+// failing closed. Must comfortably exceed one derivation at
+// ARGUS_PASSWORD_ITERATIONS_MAX so a legitimate queued authentication is not
+// refused, while still bounding how long a broker or HTTP task can be parked
+// behind a wedged worker. TUNING VALUE - revisit against the measured
+// benchmark ([k] in the diagnostic menu reports elapsed_ms per derivation).
+#define ARGUS_KDF_SUBMIT_WAIT_MS 8000U
 
 typedef enum {
     ARGUS_KDF_CREATE = 0,
@@ -273,8 +280,37 @@ static esp_err_t submit(argus_kdf_request_t *request)
         xSemaphoreCreateBinaryStatic(&request->completion_storage);
     if (request->completion == NULL) return ESP_ERR_NO_MEM;
     request->result = ESP_FAIL;
+
+    // The KDF worker is deliberately serialized - one derivation at a time,
+    // so PBKDF2 cannot monopolise the CPU from several tasks at once. The
+    // queue is therefore depth 1, and a caller arriving while another
+    // derivation is queued must WAIT for its turn.
+    //
+    // This previously sent with zero wait and returned ESP_ERR_TIMEOUT
+    // immediately. That turned "someone else is authenticating right now"
+    // into "your credential is rejected": any two overlapping
+    // authentications, and one of them failed. Reproduced repeatedly on
+    // hardware - the HMI associating and authenticating mid-run made
+    // test_4d2_verifier_create_verify fail four runs out of four. Every
+    // caller here is an authentication path (argus_auth_service,
+    // argus_machine_service, security migration and provisioning), so the
+    // symptom in the field is an intermittently refused login or a refused
+    // MQTT CONNECT, with nothing wrong with the credential. Raising the AP
+    // client limit to 4 makes overlapping authentication more likely, not
+    // less.
+    //
+    // Bounded rather than portMAX_DELAY: a caller must never be parked
+    // forever behind a wedged worker. On expiry it still fails closed.
     if (xQueueSend(s_queue, &request, 0U) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+        ESP_LOGW(TAG,
+                 "KDF worker busy (concurrent authentication) - waiting up to %u ms",
+                 (unsigned)ARGUS_KDF_SUBMIT_WAIT_MS);
+        if (xQueueSend(s_queue, &request,
+                       pdMS_TO_TICKS(ARGUS_KDF_SUBMIT_WAIT_MS)) != pdTRUE) {
+            ESP_LOGE(TAG, "KDF submit timed out after %u ms - failing closed",
+                     (unsigned)ARGUS_KDF_SUBMIT_WAIT_MS);
+            return ESP_ERR_TIMEOUT;
+        }
     }
     (void)xSemaphoreTake(request->completion, portMAX_DELAY);
     return request->result;
