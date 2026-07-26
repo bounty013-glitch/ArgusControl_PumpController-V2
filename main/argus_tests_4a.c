@@ -5359,6 +5359,9 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_serial_number_arithmetic);
     RUN_TEST(test_4c_heartbeat_lease_binding);
     RUN_TEST(test_4c_heartbeat_expiry_is_observability_only);
+    RUN_TEST(test_4c_lease_follows_identity_across_reconnect);
+    RUN_TEST(test_4c_lease_rejects_other_identities);
+    RUN_TEST(test_4c_lease_identity_cleared_on_release);
     RUN_TEST(test_4c_disconnect_releases_matching_lease);
     RUN_TEST(test_4c_sequence_first_and_newer);
     RUN_TEST(test_4c_sequence_duplicate_and_conflict);

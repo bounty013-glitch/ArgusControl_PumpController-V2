@@ -104,6 +104,16 @@ typedef struct {
 typedef struct {
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     argus_mqtt_link_state_t link;
+    // Who holds the command lease. lease_machine_id is the stable
+    // authenticated identity and is what the lease actually belongs to;
+    // lease_connection_id proves that holder is still on the far end of a
+    // live socket and changes on every reconnect. Keying the lease to the
+    // connection alone locked a supervisor out of its own lease for up to
+    // ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS after any drop, which is a routine
+    // event on field cellular. Empty lease_machine_id means "no identity
+    // recorded" and preserves the pre-identity behaviour exactly.
+    char lease_machine_id[ARGUS_SECURITY_ID_MAX + 1U];
+    uint8_t lease_client_type;
     uint64_t lease_connection_id;
     uint64_t heartbeat_connection_id;
     uint32_t heartbeat_counter;
@@ -138,8 +148,14 @@ void argus_mqtt_session_core_init(argus_mqtt_session_core_t *core,
 esp_err_t argus_mqtt_session_format(uint32_t high, uint32_t low,
                                     char *out, size_t out_size);
 bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference);
+// machine_id is the authenticated identity of the heartbeat's sender, taken
+// from the broker message's principal. It may be NULL or empty, in which
+// case arbitration falls back to connection identity exactly as before.
+// client_type is recorded for the holder topic and for the precedence rules
+// planned in Phase 3; it does not affect arbitration in this pass.
 esp_err_t argus_mqtt_session_accept_heartbeat(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
     const argus_mqtt_heartbeat_t *heartbeat, uint64_t now_ms);
 bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms);
 bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,

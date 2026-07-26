@@ -239,14 +239,14 @@ esp_err_t test_4c_heartbeat_lease_binding(void)
     argus_mqtt_session_core_init(&core, SESSION);
     argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
     strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, NULL, 0U, &heartbeat, 100U) == ESP_OK);
     CHECK(core.link == ARGUS_MQTT_LINK_ONLINE && core.lease_connection_id == 11U);
     heartbeat.counter = 2U;
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, &heartbeat, 200U) ==
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, NULL, 0U, &heartbeat, 200U) ==
           ESP_ERR_INVALID_STATE);
     CHECK(core.lease_connection_id == 11U);
     heartbeat.counter = 1U;
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, &heartbeat, 200U) ==
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, NULL, 0U, &heartbeat, 200U) ==
           ESP_ERR_INVALID_STATE);
     return ESP_OK;
 }
@@ -261,19 +261,112 @@ esp_err_t test_4c_heartbeat_expiry_is_observability_only(void)
     argus_mqtt_session_core_init(&isolated.core, SESSION);
     argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
     strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
-    CHECK(argus_mqtt_session_accept_heartbeat(&isolated.core, 1U, &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_accept_heartbeat(&isolated.core, 1U, NULL, 0U, &heartbeat, 100U) == ESP_OK);
     CHECK(!argus_mqtt_session_tick(&isolated.core, 6099U));
     CHECK(argus_mqtt_session_tick(&isolated.core, 6100U));
     CHECK(isolated.core.link == ARGUS_MQTT_LINK_STALE);
     CHECK(isolated.core.lease_connection_id == 0U);
     CHECK(isolated.core.heartbeat_counter == 1U);
     CHECK(argus_mqtt_session_accept_heartbeat(
-              &isolated.core, 1U, &heartbeat, 6200U) == ESP_ERR_INVALID_STATE);
+              &isolated.core, 1U, NULL, 0U, &heartbeat, 6200U) == ESP_ERR_INVALID_STATE);
     heartbeat.counter = 2U;
     CHECK(argus_mqtt_session_accept_heartbeat(
-              &isolated.core, 1U, &heartbeat, 6200U) == ESP_OK);
+              &isolated.core, 1U, NULL, 0U, &heartbeat, 6200U) == ESP_OK);
     CHECK(isolated.motion_sentinel == 0x12345678U);
     CHECK(isolated.state_sentinel == 0x87654321U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_lease_follows_identity_across_reconnect(void)
+{
+    // The lease belongs to the authenticated principal. A supervisor that
+    // drops and reconnects arrives with a new connection_id and must reclaim
+    // its own lease immediately - previously it was refused until the 6s
+    // heartbeat timeout expired, a window in which any other client could
+    // take control of the pump.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+    CHECK(core.lease_connection_id == 11U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.lease_client_type == 5U);
+
+    // Same principal, new socket, counter restarted after reconnect.
+    heartbeat.counter = 1U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, "m-core", 5U,
+                                              &heartbeat, 200U) == ESP_OK);
+    CHECK(core.lease_connection_id == 12U);
+    CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_lease_rejects_other_identities(void)
+{
+    // Reconnect continuity must not become preemption. A DIFFERENT principal
+    // is still refused while the lease is held and ONLINE - precedence-based
+    // takeover is Phase 3 5.3 and is deliberately not implemented yet.
+    // Every rejection must leave the recorded holder completely unchanged.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+
+    heartbeat.counter = 2U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, "m-panel", 1U,
+                                              &heartbeat, 200U) == ESP_ERR_INVALID_STATE);
+    CHECK(core.lease_connection_id == 11U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.lease_client_type == 5U);
+
+    // An unidentified claimant must not match a named holder either, or an
+    // unauthenticated path would inherit someone else's lease.
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 13U, NULL, 0U,
+                                              &heartbeat, 200U) == ESP_ERR_INVALID_STATE);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 14U, "", 0U,
+                                              &heartbeat, 200U) == ESP_ERR_INVALID_STATE);
+    CHECK(core.lease_connection_id == 11U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+
+    // And a named claimant must not inherit a lease that carries no identity.
+    argus_mqtt_session_core_t legacy;
+    argus_mqtt_session_core_init(&legacy, SESSION);
+    heartbeat.counter = 1U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&legacy, 21U, NULL, 0U,
+                                              &heartbeat, 100U) == ESP_OK);
+    heartbeat.counter = 2U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&legacy, 22U, "m-panel", 1U,
+                                              &heartbeat, 200U) == ESP_ERR_INVALID_STATE);
+    CHECK(legacy.lease_connection_id == 21U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_lease_identity_cleared_on_release(void)
+{
+    // A released lease must not leave a stale holder behind, or the next
+    // claimant could be matched against a principal that is no longer there.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_tick(&core, 6100U));
+    CHECK(core.link == ARGUS_MQTT_LINK_STALE);
+    CHECK(core.lease_machine_id[0] == '\0' && core.lease_client_type == 0U);
+
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    CHECK(core.lease_machine_id[0] == '\0' && core.lease_client_type == 0U);
     return ESP_OK;
 }
 
@@ -283,14 +376,14 @@ esp_err_t test_4c_disconnect_releases_matching_lease(void)
     argus_mqtt_session_core_init(&core, SESSION);
     argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
     strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 7U, &heartbeat, 0U) == ESP_OK);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 7U, NULL, 0U, &heartbeat, 0U) == ESP_OK);
     CHECK(!argus_mqtt_session_disconnect(&core, 8U));
     CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
     CHECK(argus_mqtt_session_disconnect(&core, 7U));
     CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE && core.lease_connection_id == 0U);
 
     argus_mqtt_session_core_init(&core, SESSION);
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 9U, &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 9U, NULL, 0U, &heartbeat, 100U) == ESP_OK);
     CHECK(argus_mqtt_session_tick(&core, 6100U));
     CHECK(core.link == ARGUS_MQTT_LINK_STALE && core.lease_connection_id == 0U);
     CHECK(core.heartbeat_connection_id == 9U);

@@ -346,18 +346,58 @@ bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference)
     return delta != 0U && delta < 0x80000000U;
 }
 
+// True when `machine_id` names the principal that currently holds the lease.
+// Requires both sides to carry an identity: a blank stored identity means the
+// lease predates identity tracking and must not match a named claimant, and a
+// blank claimant must never match a named holder. Either way the caller falls
+// back to connection-identity arbitration.
+static bool lease_held_by(const argus_mqtt_session_core_t *core, const char *machine_id)
+{
+    return machine_id != NULL && machine_id[0] != '\0' &&
+           core->lease_machine_id[0] != '\0' &&
+           strcmp(core->lease_machine_id, machine_id) == 0;
+}
+
+static void lease_record_holder(argus_mqtt_session_core_t *core,
+                                const char *machine_id, uint8_t client_type)
+{
+    if (machine_id != NULL && machine_id[0] != '\0') {
+        snprintf(core->lease_machine_id, sizeof(core->lease_machine_id), "%s", machine_id);
+        core->lease_client_type = client_type;
+    } else {
+        core->lease_machine_id[0] = '\0';
+        core->lease_client_type = 0U;
+    }
+}
+
 esp_err_t argus_mqtt_session_accept_heartbeat(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
     const argus_mqtt_heartbeat_t *heartbeat, uint64_t now_ms)
 {
     if (core == NULL || heartbeat == NULL || connection_id == 0U ||
         strcmp(core->session, heartbeat->session) != 0) return ESP_ERR_INVALID_ARG;
+
+    // Reconnect continuity. The lease belongs to the authenticated identity,
+    // not to the socket, so the same principal arriving on a new connection
+    // reclaims its own lease immediately instead of being refused until the
+    // 6s heartbeat timeout expires - during which any other client could
+    // have taken it. This does NOT let a different principal preempt; that
+    // is Phase 3 §5.3 and is deliberately not implemented here.
+    bool same_principal = lease_held_by(core, machine_id);
     if (core->lease_connection_id != 0U && core->lease_connection_id != connection_id &&
-        core->link == ARGUS_MQTT_LINK_ONLINE) return ESP_ERR_INVALID_STATE;
+        core->link == ARGUS_MQTT_LINK_ONLINE && !same_principal) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Replay guard applies per connection. A reclaiming principal on a fresh
+    // connection legitimately restarts its counter, so the guard is scoped to
+    // the connection that produced the stored counter, as before.
     if (core->heartbeat_connection_id == connection_id && core->heartbeat_counter != 0U &&
         !argus_mqtt_session_is_newer(heartbeat->counter, core->heartbeat_counter)) {
         return ESP_ERR_INVALID_STATE;
     }
+    lease_record_holder(core, machine_id, client_type);
     core->lease_connection_id = connection_id;
     core->heartbeat_connection_id = connection_id;
     core->heartbeat_counter = heartbeat->counter;
@@ -372,6 +412,7 @@ bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms)
         now_ms - core->last_heartbeat_ms < ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS) return false;
     core->link = ARGUS_MQTT_LINK_STALE;
     core->lease_connection_id = 0U;
+    lease_record_holder(core, NULL, 0U);
     return true;
 }
 
@@ -382,6 +423,7 @@ bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,
         (core->lease_connection_id != connection_id &&
          core->heartbeat_connection_id != connection_id)) return false;
     core->lease_connection_id = 0U;
+    lease_record_holder(core, NULL, 0U);
     core->heartbeat_connection_id = 0U;
     core->heartbeat_counter = 0U;
     core->link = ARGUS_MQTT_LINK_OFFLINE;
