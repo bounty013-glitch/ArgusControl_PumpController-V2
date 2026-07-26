@@ -208,7 +208,9 @@ static void handle_heartbeat(const argus_mqtt_broker_message_t *message)
                                     &heartbeat) != ARGUS_MQTT_DECODE_OK) return;
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
     esp_err_t err = argus_mqtt_session_accept_heartbeat(
-        &s_runtime.session, message->connection_id, &heartbeat, now_ms());
+        &s_runtime.session, message->connection_id,
+        message->principal.identifier, message->principal.client_type,
+        &heartbeat, now_ms());
     xSemaphoreGive(s_runtime.mutex);
     if (err == ESP_OK) {
         publish_value(s_runtime.topics.state_supervisor_link, "ONLINE", true);
