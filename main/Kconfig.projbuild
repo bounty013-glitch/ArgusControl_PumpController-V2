@@ -7,33 +7,6 @@ menu "Argus V2 Pump Controller Configuration"
             Enables automated unit testing and the interactive serial command menu on startup.
             WARNING: Diagnostic mode is for testing only. Keep disabled in production.
 
-    config ARGUS_RUN_TESTS_AT_BOOT
-        bool "Run the pure unit suite once at boot"
-        depends on ARGUS_DIAGNOSTIC_MODE
-        default n
-        help
-            Runs the same suite as the interactive menu's [t] command once,
-            automatically, shortly after startup, then continues into normal
-            operation.
-
-            Exists because the diagnostic console cannot be driven by a script
-            over this board's USB-Serial-JTAG interface: asserting DTR holds
-            the chip in reset and asserting RTS resets it, so there is no way
-            to send a keypress without rebooting the device. That makes the
-            suite unrunnable in any automated or unattended flow, and forces a
-            human to sit at a terminal to verify a build.
-
-            The suite is read-only with respect to production state - it
-            carries its own isolation proof over authority, machine state,
-            network mode, NVS and broker lifecycle - so running it at boot
-            does not disturb the controller. It does delay reaching steady
-            state by the duration of the run.
-
-            Keep disabled by default. Enable it for a verification build, read
-            the result over the serial log, and disable it again. Never ship
-            it enabled: a production controller should not spend its startup
-            running tests.
-
     config ARGUS_SERVICE_AP_PASS
         string "Shared Service AP WPA2 Password"
         default ""

@@ -786,24 +786,6 @@ static void argus_diagnostic_menu_task(void *pvParameters)
 // ================= APP MAIN =================
 
 
-#ifdef CONFIG_ARGUS_RUN_TESTS_AT_BOOT
-// Runs the pure suite once, then exits. Delayed so startup logging has settled
-// and the network manager has reached a steady state first - otherwise the
-// isolation proof races an in-progress association and reports INCONCLUSIVE
-// for reasons that have nothing to do with the build under test.
-static void argus_boot_test_task(void *arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(8000));
-    printf("\n[BOOT-TEST] CONFIG_ARGUS_RUN_TESTS_AT_BOOT is enabled - running pure suite once.\n");
-    argus_tests_run_all();
-    esp_err_t suite = argus_tests_4a_run_all();
-    printf("[BOOT-TEST] Suite result: %s (%d)\n", esp_err_to_name(suite), (int)suite);
-    printf("[BOOT-TEST] Complete. Controller continues in normal operation.\n");
-    vTaskDelete(NULL);
-}
-#endif
-
 void app_main(void)
 {
     ESP_LOGI(TAG, "Argus Pump Controller V2 firmware starting (Phase 4D.4)...");
@@ -898,12 +880,6 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "Diagnostic console transport initialization failed: %s", esp_err_to_name(console_err));
     }
-#ifdef CONFIG_ARGUS_RUN_TESTS_AT_BOOT
-    // Verification builds only - see the Kconfig help. The console cannot be
-    // driven by a script over USB-Serial-JTAG on this board, so without this
-    // the suite cannot run unattended at all.
-    xTaskCreate(argus_boot_test_task, "boot_test", ARGUS_DIAGNOSTIC_TASK_STACK, NULL, 4, NULL);
-#endif
 #endif
 
     ESP_LOGI(TAG, "V2 Pump Controller Phase 4D.4 startup completed successfully.");
