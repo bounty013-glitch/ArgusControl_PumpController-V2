@@ -101,6 +101,17 @@ typedef struct {
     uint32_t counter;
 } argus_mqtt_heartbeat_t;
 
+// Outcome of an explicit authority request. Every denial is distinct because
+// the operator-facing reason differs: "another interface has control" and
+// "this installation is commissioned standalone" call for different actions.
+typedef enum {
+    ARGUS_MQTT_AUTHORITY_GRANTED = 0,       // ownership changed, epoch advanced
+    ARGUS_MQTT_AUTHORITY_ALREADY_HELD,      // requester already owns it; no epoch change
+    ARGUS_MQTT_AUTHORITY_DENIED_HELD,       // a higher- or equal-standing holder has it
+    ARGUS_MQTT_AUTHORITY_DENIED_PROFILE,    // commissioned profile forbids this client type
+    ARGUS_MQTT_AUTHORITY_DENIED_INVALID,    // malformed request
+} argus_mqtt_authority_result_t;
+
 typedef struct {
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     argus_mqtt_link_state_t link;
@@ -115,6 +126,12 @@ typedef struct {
     char lease_machine_id[ARGUS_SECURITY_ID_MAX + 1U];
     uint8_t lease_client_type;
     uint64_t lease_connection_id;
+    // Authority epoch. Increments on every OWNERSHIP CHANGE - initial grant,
+    // transfer, and release - and never on a renewal. Commands carrying a
+    // stale epoch are rejected, which is what makes a transfer immediately
+    // invalidate the previous owner's in-flight commands without having to
+    // chase them. Starts at 0 meaning "never owned".
+    uint32_t authority_epoch;
     uint64_t heartbeat_connection_id;
     uint32_t heartbeat_counter;
     uint64_t last_heartbeat_ms;
@@ -148,6 +165,32 @@ void argus_mqtt_session_core_init(argus_mqtt_session_core_t *core,
 esp_err_t argus_mqtt_session_format(uint32_t high, uint32_t low,
                                     char *out, size_t out_size);
 bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference);
+// Explicit authority acquisition (Phase 4C Amendment A1). Connection proves
+// presence; this is what grants control.
+//
+// `authority_profile` is the COMMISSIONED argus_authority_profile_t, not
+// anything inferred from live traffic. `core_window_open` is true only while
+// the bounded startup acquisition window is still running under
+// ARGUSCORE_PREFERRED; it is what keeps an early-booting HMI view-only until
+// ArgusCore has had its chance, so that a shorter boot time can never convert
+// into control.
+//
+// Capability (ARGUS_PERMISSION_REQUEST_AUTHORITY) is deliberately NOT checked
+// here - this core is pure and has no security store. The caller must reject
+// an unpermitted principal BEFORE calling. Keeping authorization and
+// arbitration separate is the same split the rest of the system uses.
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, uint64_t now_ms);
+
+// Voluntary release by the current holder. Advances the epoch, so commands
+// still in flight from the releasing owner become invalid immediately.
+// Returns false if the caller is not the holder - releasing someone else's
+// authority is not a thing any client may do.
+bool argus_mqtt_session_release_authority(
+    argus_mqtt_session_core_t *core, const char *machine_id);
+
 // machine_id is the authenticated identity of the heartbeat's sender, taken
 // from the broker message's principal. It may be NULL or empty, in which
 // case arbitration falls back to connection identity exactly as before.

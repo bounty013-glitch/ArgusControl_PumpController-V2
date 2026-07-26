@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "argus_identity.h"
+#include "argus_nvs_config.h"   // ARGUS_AUTHORITY_PROFILE_*
 
 typedef struct {
     const char *p;
@@ -370,6 +371,107 @@ static void lease_record_holder(argus_mqtt_session_core_t *core,
     }
 }
 
+// Does the commissioned profile permit this client type to hold ordinary
+// command authority at all? This is the rule that makes initial ownership a
+// property of how the installation was commissioned rather than of who
+// happened to connect first.
+static bool profile_permits(uint8_t authority_profile, uint8_t client_type,
+                            bool core_window_open)
+{
+    if (authority_profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI) {
+        // No ArgusCore is assigned to this pump. The panel is the authority,
+        // and a Core that turns up on the network cannot take control without
+        // the unit being recommissioned.
+        return client_type == ARGUS_MACHINE_CLIENT_HMI ||
+               client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL;
+    }
+
+    // ARGUSCORE_PREFERRED.
+    if (client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND) return true;
+    if (client_type == ARGUS_MACHINE_CLIENT_HMI ||
+        client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL) {
+        // The local fallback, but only once ArgusCore has had its bounded
+        // chance. While the window is open the panel stays view-only, so a
+        // shorter boot time never converts into control.
+        return !core_window_open;
+    }
+    return false;
+}
+
+// May `requester` take authority away from `holder`? Deliberately asymmetric,
+// per the governing decision: ArgusCore may request a transfer from the panel
+// and the controller adjudicates it, but the panel may NOT take authority from
+// a healthy ArgusCore lease.
+static bool may_preempt(uint8_t requester_type, uint8_t holder_type)
+{
+    return requester_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND &&
+           (holder_type == ARGUS_MACHINE_CLIENT_HMI ||
+            holder_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL);
+}
+
+static void advance_epoch(argus_mqtt_session_core_t *core)
+{
+    // 0 is reserved for "never owned", so wrap to 1 rather than back to 0.
+    core->authority_epoch++;
+    if (core->authority_epoch == 0U) core->authority_epoch = 1U;
+}
+
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, uint64_t now_ms)
+{
+    if (core == NULL || connection_id == 0U ||
+        machine_id == NULL || machine_id[0] == '\0' ||
+        authority_profile > ARGUS_AUTHORITY_PROFILE_MAX) {
+        return ARGUS_MQTT_AUTHORITY_DENIED_INVALID;
+    }
+    if (!profile_permits(authority_profile, client_type, core_window_open)) {
+        return ARGUS_MQTT_AUTHORITY_DENIED_PROFILE;
+    }
+
+    bool held = (core->link == ARGUS_MQTT_LINK_ONLINE &&
+                 core->lease_machine_id[0] != '\0');
+
+    if (held && strcmp(core->lease_machine_id, machine_id) == 0) {
+        // Already ours. Rebind to the current socket and refresh liveness, but
+        // do NOT advance the epoch - nothing changed hands, and bumping it
+        // would invalidate our own in-flight commands.
+        core->lease_connection_id = connection_id;
+        core->last_heartbeat_ms = now_ms;
+        return ARGUS_MQTT_AUTHORITY_ALREADY_HELD;
+    }
+
+    if (held && !may_preempt(client_type, core->lease_client_type)) {
+        return ARGUS_MQTT_AUTHORITY_DENIED_HELD;
+    }
+
+    // Grant: either unowned, or an admissible transfer. Ownership changed, so
+    // the epoch advances and the previous owner's in-flight commands become
+    // invalid immediately.
+    lease_record_holder(core, machine_id, client_type);
+    core->lease_connection_id = connection_id;
+    core->heartbeat_connection_id = connection_id;
+    core->heartbeat_counter = 0U;
+    core->last_heartbeat_ms = now_ms;
+    core->link = ARGUS_MQTT_LINK_ONLINE;
+    advance_epoch(core);
+    return ARGUS_MQTT_AUTHORITY_GRANTED;
+}
+
+bool argus_mqtt_session_release_authority(
+    argus_mqtt_session_core_t *core, const char *machine_id)
+{
+    if (core == NULL || !lease_held_by(core, machine_id)) return false;
+    lease_record_holder(core, NULL, 0U);
+    core->lease_connection_id = 0U;
+    core->heartbeat_connection_id = 0U;
+    core->heartbeat_counter = 0U;
+    core->link = ARGUS_MQTT_LINK_OFFLINE;
+    advance_epoch(core);
+    return true;
+}
+
 esp_err_t argus_mqtt_session_accept_heartbeat(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
     const char *machine_id, uint8_t client_type,
@@ -413,6 +515,11 @@ bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms)
     core->link = ARGUS_MQTT_LINK_STALE;
     core->lease_connection_id = 0U;
     lease_record_holder(core, NULL, 0U);
+    // Lease loss ends the authority epoch, so any command still in flight from
+    // the expired owner is rejected rather than applied late. This does NOT
+    // touch machine state, motion, RUN intent or the accepted setpoint - see
+    // the fail-operational rule in the contract's section 1.
+    advance_epoch(core);
     return true;
 }
 
@@ -427,6 +534,7 @@ bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,
     core->heartbeat_connection_id = 0U;
     core->heartbeat_counter = 0U;
     core->link = ARGUS_MQTT_LINK_OFFLINE;
+    advance_epoch(core);
     return true;
 }
 

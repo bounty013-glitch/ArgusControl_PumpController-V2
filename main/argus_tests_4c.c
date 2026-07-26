@@ -1,4 +1,6 @@
 #include "argus_tests_4c.h"
+#include "argus_nvs_config.h"
+#include "argus_security_store.h"
 
 #include <string.h>
 
@@ -276,6 +278,207 @@ esp_err_t test_4c_heartbeat_expiry_is_observability_only(void)
     CHECK(isolated.state_sentinel == 0x87654321U);
     return ESP_OK;
 }
+
+// ---- Explicit authority acquisition (Phase 4C Amendment A1) -------------
+//
+// Initial ownership is a property of how the installation was COMMISSIONED,
+// never of who connected first. Transfer is asymmetric: ArgusCore may request
+// authority from the panel; the panel may not take it from a healthy Core
+// lease. The controller adjudicates both.
+
+#define HMI_T   ARGUS_MACHINE_CLIENT_HMI
+#define CORE_T  ARGUS_MACHINE_CLIENT_ARGUS_COMMAND
+#define SVC_T   ARGUS_MACHINE_CLIENT_SERVICE_TOOL
+#define P_ALONE ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI
+#define P_CORE  ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED
+
+esp_err_t test_4c_authority_standalone_profile(void)
+{
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(core.authority_epoch == 0U);  // 0 means never owned
+
+    // The panel is the authority in a standalone installation.
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(strcmp(core.lease_machine_id, "m-panel") == 0);
+    CHECK(core.authority_epoch == 1U);
+    CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
+
+    // An ArgusCore that turns up on the network cannot take control of a unit
+    // commissioned standalone - that requires recommissioning, not a request.
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-core", CORE_T,
+              P_ALONE, false, 200U) == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
+    CHECK(strcmp(core.lease_machine_id, "m-panel") == 0);
+    CHECK(core.authority_epoch == 1U);  // a refused request changes nothing
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_startup_window_blocks_early_hmi(void)
+{
+    // The whole point of the bounded window: a panel that boots faster than
+    // ArgusCore must not win control by arriving first.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_CORE, true, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.authority_epoch == 0U);
+
+    // ArgusCore may acquire at any point during its own window.
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-core", CORE_T,
+              P_CORE, true, 200U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(core.lease_client_type == CORE_T);
+    CHECK(core.authority_epoch == 1U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_hmi_is_fallback_after_window(void)
+{
+    // If ArgusCore never acquires, the pump must not stay unusable.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(core.lease_client_type == HMI_T);
+    CHECK(core.authority_epoch == 1U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_transfer_is_asymmetric(void)
+{
+    // ArgusCore may request a transfer from the panel...
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch_after_panel = core.authority_epoch;
+
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-core", CORE_T,
+              P_CORE, false, 200U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.lease_client_type == CORE_T);
+    // Ownership changed hands, so the epoch MUST advance - that is what
+    // invalidates the panel's in-flight commands immediately.
+    CHECK(core.authority_epoch != epoch_after_panel);
+    uint32_t epoch_after_core = core.authority_epoch;
+
+    // ...but the panel may NOT take authority from a healthy Core lease.
+    CHECK(argus_mqtt_session_request_authority(&core, 13U, "m-panel", HMI_T,
+              P_CORE, false, 300U) == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.lease_client_type == CORE_T);
+    CHECK(core.authority_epoch == epoch_after_core);
+    CHECK(core.lease_connection_id == 12U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_reacquire_by_self_keeps_epoch(void)
+{
+    // Re-requesting authority you already hold must not advance the epoch, or
+    // an owner would invalidate its own in-flight commands by asking again.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-core", CORE_T,
+              P_CORE, false, 500U) == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
+    CHECK(core.authority_epoch == epoch);
+    CHECK(core.lease_connection_id == 12U);   // rebound to the current socket
+    CHECK(core.last_heartbeat_ms == 500U);    // liveness refreshed
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_release_rules(void)
+{
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+
+    // Releasing someone else's authority is not a thing any client may do.
+    CHECK(!argus_mqtt_session_release_authority(&core, "m-panel"));
+    CHECK(!argus_mqtt_session_release_authority(&core, NULL));
+    CHECK(!argus_mqtt_session_release_authority(&core, ""));
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.authority_epoch == epoch);
+
+    CHECK(argus_mqtt_session_release_authority(&core, "m-core"));
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.lease_connection_id == 0U);
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    CHECK(core.authority_epoch != epoch);  // release is an ownership change
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_epoch_never_reads_unowned(void)
+{
+    // 0 is reserved for "never owned". A wrapping counter must skip it, or a
+    // live epoch would be indistinguishable from having never had an owner.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    core.authority_epoch = 0xFFFFFFFFU;
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(core.authority_epoch == 1U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_rejects_malformed_requests(void)
+{
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 0U, "m-core", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_INVALID);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, NULL, CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_INVALID);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_INVALID);
+    // An out-of-range profile must not be coerced to a default - a corrupt
+    // record would then get to decide who commands the pump.
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core", CORE_T,
+              0xEE, false, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_INVALID);
+    // Every rejection leaves the core completely untouched.
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.authority_epoch == 0U);
+    CHECK(core.link != ARGUS_MQTT_LINK_ONLINE);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_authority_lease_expiry_ends_epoch(void)
+{
+    // Lease loss must invalidate the epoch so a late command from the expired
+    // owner is rejected rather than applied - while leaving machine state,
+    // motion and the accepted setpoint alone.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core", CORE_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+
+    core.has_sequence = true;
+    core.last_sequence = 77U;
+    strlcpy(core.cached_result, "ACCEPTED", sizeof(core.cached_result));
+
+    CHECK(argus_mqtt_session_tick(&core, 100U + ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS));
+    CHECK(core.link == ARGUS_MQTT_LINK_STALE);
+    CHECK(core.authority_epoch != epoch);
+    CHECK(core.lease_machine_id[0] == '\0');
+    // Fail-operational: the accepted-command record is untouched.
+    CHECK(core.has_sequence && core.last_sequence == 77U);
+    CHECK(strcmp(core.cached_result, "ACCEPTED") == 0);
+    return ESP_OK;
+}
+
+#undef HMI_T
+#undef CORE_T
+#undef SVC_T
+#undef P_ALONE
+#undef P_CORE
 
 // ---- Fail-operational regression tests (Phase 3 5.9) --------------------
 //

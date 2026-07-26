@@ -5490,6 +5490,15 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_serial_number_arithmetic);
     RUN_TEST(test_4c_heartbeat_lease_binding);
     RUN_TEST(test_4c_heartbeat_expiry_is_observability_only);
+    RUN_TEST(test_4c_authority_standalone_profile);
+    RUN_TEST(test_4c_authority_startup_window_blocks_early_hmi);
+    RUN_TEST(test_4c_authority_hmi_is_fallback_after_window);
+    RUN_TEST(test_4c_authority_transfer_is_asymmetric);
+    RUN_TEST(test_4c_authority_reacquire_by_self_keeps_epoch);
+    RUN_TEST(test_4c_authority_release_rules);
+    RUN_TEST(test_4c_authority_epoch_never_reads_unowned);
+    RUN_TEST(test_4c_authority_rejects_malformed_requests);
+    RUN_TEST(test_4c_authority_lease_expiry_ends_epoch);
     RUN_TEST(test_4c_fail_operational_lease_expiry_preserves_operation);
     RUN_TEST(test_4c_fail_operational_disconnect_preserves_operation);
     RUN_TEST(test_4c_fail_operational_epoch_survives_reconnect_blip);
