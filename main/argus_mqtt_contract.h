@@ -22,6 +22,10 @@ typedef enum {
     ARGUS_MQTT_ACTION_RESET_E_STOP,
     ARGUS_MQTT_ACTION_RECOVER,
     ARGUS_MQTT_ACTION_HEARTBEAT,
+    // Amendment A1: authority is acquired explicitly, never by connecting
+    // or by heartbeating.
+    ARGUS_MQTT_ACTION_REQUEST_AUTHORITY,
+    ARGUS_MQTT_ACTION_RELEASE_AUTHORITY,
 } argus_mqtt_action_t;
 
 typedef enum {
@@ -59,6 +63,14 @@ typedef struct {
     char command_reset_e_stop[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char command_recover[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char heartbeat[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    // Authority is a core concern, not a pump1 concern, so these sit under
+    // command/core/ rather than command/pump1/.
+    char command_request_authority[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char command_release_authority[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_control_owner[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_authority_epoch[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_authority_profile[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_local_control[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_device_name[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_model[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_firmware_version[ARGUS_MQTT_BROKER_TOPIC_CAP];

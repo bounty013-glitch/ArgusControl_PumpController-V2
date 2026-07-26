@@ -50,6 +50,12 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(command_reset_e_stop, "command/pump1/reset_e_stop");
     MAKE_TOPIC(command_recover, "command/pump1/recover");
     MAKE_TOPIC(heartbeat, "status/supervisor/heartbeat");
+    MAKE_TOPIC(command_request_authority, "command/core/request_authority");
+    MAKE_TOPIC(command_release_authority, "command/core/release_authority");
+    MAKE_TOPIC(status_control_owner, "status/core/control_owner");
+    MAKE_TOPIC(status_authority_epoch, "status/core/authority_epoch");
+    MAKE_TOPIC(status_authority_profile, "status/core/authority_profile");
+    MAKE_TOPIC(status_local_control, "status/core/local_control_status");
     MAKE_TOPIC(metadata_device_name, "metadata/core/device_name");
     MAKE_TOPIC(metadata_model, "metadata/core/model");
     MAKE_TOPIC(metadata_firmware_version, "metadata/core/firmware_version");
@@ -93,6 +99,8 @@ argus_mqtt_action_t argus_mqtt_topics_classify(
     if (strcmp(topic, topics->command_reset_e_stop) == 0) return ARGUS_MQTT_ACTION_RESET_E_STOP;
     if (strcmp(topic, topics->command_recover) == 0) return ARGUS_MQTT_ACTION_RECOVER;
     if (strcmp(topic, topics->heartbeat) == 0) return ARGUS_MQTT_ACTION_HEARTBEAT;
+    if (strcmp(topic, topics->command_request_authority) == 0) return ARGUS_MQTT_ACTION_REQUEST_AUTHORITY;
+    if (strcmp(topic, topics->command_release_authority) == 0) return ARGUS_MQTT_ACTION_RELEASE_AUTHORITY;
     return ARGUS_MQTT_ACTION_NONE;
 }
 
@@ -117,6 +125,8 @@ const char *argus_mqtt_action_name(argus_mqtt_action_t action)
     case ARGUS_MQTT_ACTION_RESET_E_STOP: return "reset_e_stop";
     case ARGUS_MQTT_ACTION_RECOVER: return "recover";
     case ARGUS_MQTT_ACTION_HEARTBEAT: return "heartbeat";
+    case ARGUS_MQTT_ACTION_REQUEST_AUTHORITY: return "request_authority";
+    case ARGUS_MQTT_ACTION_RELEASE_AUTHORITY: return "release_authority";
     default: return "unknown";
     }
 }

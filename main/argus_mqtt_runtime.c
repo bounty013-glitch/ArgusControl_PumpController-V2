@@ -20,11 +20,20 @@
 #include "argus_security_audit.h"
 #include "argus_net_mgr.h"
 #include "argus_state_mgr.h"
+#include "argus_nvs_config.h"
+#include "argus_security_store.h"
 
 static const char *TAG = "argus_mqtt_runtime";
 
 #define ARGUS_MQTT_RUNTIME_QUEUE_DEPTH 12U
 #define ARGUS_MQTT_RUNTIME_TASK_STACK 6144U
+// Bounded startup window during which, under ARGUSCORE_PREFERRED, only
+// ArgusCore may acquire authority. Long enough for a normally booting
+// supervisor to authenticate and request; short enough that an operator is
+// not left staring at a panel that will not take control. TUNING VALUE -
+// exercised only under ARGUSCORE_PREFERRED, and the bench unit is
+// STANDALONE_HMI, so it is unverified in the field as yet.
+#define ARGUS_MQTT_CORE_ACQUISITION_WINDOW_MS 45000U
 
 typedef enum {
     RUNTIME_EVENT_MESSAGE = 0,
@@ -72,6 +81,8 @@ static void publish_number(const char *topic, int64_t value)
     snprintf(payload, sizeof(payload), "%" PRId64, value);
     publish_value(topic, payload, true);
 }
+
+static void publish_authority_state(void);
 
 static void publish_operational_snapshot(void)
 {
@@ -140,8 +151,13 @@ static void publish_baseline(void)
                   s_runtime.identity.mac_uid, true);
     publish_value(s_runtime.topics.status_command_session,
                   s_runtime.session.session, true);
+    // Retained from startup so a client connecting before anyone has acquired
+    // authority still learns the profile and that control is unowned, rather
+    // than seeing nothing and having to guess.
+    publish_authority_state();
     publish_operational_snapshot();
 }
+
 
 static const char *decode_reason(argus_mqtt_decode_result_t result)
 {
@@ -206,15 +222,181 @@ static void handle_heartbeat(const argus_mqtt_broker_message_t *message)
     argus_mqtt_heartbeat_t heartbeat;
     if (argus_mqtt_decode_heartbeat(message->payload, message->payload_len,
                                     &heartbeat) != ARGUS_MQTT_DECODE_OK) return;
+    // Amendment A1: a heartbeat RENEWS a lease, it never acquires one. A
+    // heartbeat from a principal that does not already hold authority is not
+    // an acquisition and is refused - otherwise connecting and heartbeating
+    // would still be enough to take control of the pump, which is exactly
+    // what the commissioned-profile model exists to prevent.
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
-    esp_err_t err = argus_mqtt_session_accept_heartbeat(
-        &s_runtime.session, message->connection_id,
-        message->principal.identifier, message->principal.client_type,
-        &heartbeat, now_ms());
+    bool is_holder = s_runtime.session.lease_machine_id[0] != '\0' &&
+                     strcmp(s_runtime.session.lease_machine_id,
+                            message->principal.identifier) == 0;
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (is_holder) {
+        err = argus_mqtt_session_accept_heartbeat(
+            &s_runtime.session, message->connection_id,
+            message->principal.identifier, message->principal.client_type,
+            &heartbeat, now_ms());
+    }
     xSemaphoreGive(s_runtime.mutex);
+    if (!is_holder) {
+        ESP_LOGD(TAG, "heartbeat ignored from non-holder %s",
+                 message->principal.identifier);
+        return;
+    }
     if (err == ESP_OK) {
         publish_value(s_runtime.topics.state_supervisor_link, "ONLINE", true);
     }
+}
+
+// Reads the COMMISSIONED authority profile. Deliberately re-read per request
+// rather than cached: commissioning can change it, and a stale cache would let
+// a recommissioned unit keep arbitrating by its old profile. Falls back to
+// STANDALONE_HMI only if the store is unreadable, which is the choice that
+// keeps a pump operable from its own panel rather than waiting on a supervisor
+// it may not have.
+static uint8_t commissioned_authority_profile(void)
+{
+    argus_config_payload_t cfg;
+    bool has_persisted = false;
+    if (argus_nvs_config_get_effective(&cfg, &has_persisted) != ESP_OK) {
+        ESP_LOGW(TAG, "authority profile unreadable; assuming STANDALONE_HMI");
+        return ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
+    }
+    if (cfg.authority_profile > ARGUS_AUTHORITY_PROFILE_MAX) {
+        ESP_LOGW(TAG, "authority profile out of range (%u); assuming STANDALONE_HMI",
+                 (unsigned)cfg.authority_profile);
+        return ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
+    }
+    return cfg.authority_profile;
+}
+
+// True while the bounded startup window for ArgusCore is still open. Only
+// meaningful under ARGUSCORE_PREFERRED; it is what keeps a fast-booting panel
+// view-only until the supervisor has had its chance.
+static bool core_acquisition_window_open(void)
+{
+    return now_ms() < ARGUS_MQTT_CORE_ACQUISITION_WINDOW_MS;
+}
+
+static const char *authority_result_reason(argus_mqtt_authority_result_t r)
+{
+    switch (r) {
+    case ARGUS_MQTT_AUTHORITY_GRANTED:        return "granted";
+    case ARGUS_MQTT_AUTHORITY_ALREADY_HELD:   return "already_held";
+    case ARGUS_MQTT_AUTHORITY_DENIED_HELD:    return "denied_held_by_other";
+    case ARGUS_MQTT_AUTHORITY_DENIED_PROFILE: return "denied_by_commissioned_profile";
+    default:                                  return "denied_invalid";
+    }
+}
+
+
+static void handle_authority_request(const argus_mqtt_broker_message_t *message,
+                                     bool release)
+{
+    if (!message->policy_admitted) return;
+
+    // Authorization is checked HERE, before arbitration, and never inside the
+    // pure core. A principal without REQUEST_AUTHORITY must not be able to
+    // influence ownership at all.
+    if ((message->principal.permissions & ARGUS_PERMISSION_REQUEST_AUTHORITY) == 0U) {
+        ESP_LOGW(TAG, "authority %s refused: machine %s lacks request_authority",
+                 release ? "release" : "request", message->principal.identifier);
+        return;
+    }
+
+    if (release) {
+        xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+        bool released = argus_mqtt_session_release_authority(
+            &s_runtime.session, message->principal.identifier);
+        uint32_t epoch = s_runtime.session.authority_epoch;
+        xSemaphoreGive(s_runtime.mutex);
+        ESP_LOGW(TAG, "authority release by %s: %s (epoch=%lu)",
+                 message->principal.identifier,
+                 released ? "accepted" : "refused_not_holder",
+                 (unsigned long)epoch);
+        if (released) {
+            publish_value(s_runtime.topics.state_supervisor_link, "OFFLINE", true);
+            publish_authority_state();
+        }
+        return;
+    }
+
+    uint8_t profile = commissioned_authority_profile();
+    bool window_open = core_acquisition_window_open();
+
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    argus_mqtt_authority_result_t result = argus_mqtt_session_request_authority(
+        &s_runtime.session, message->connection_id,
+        message->principal.identifier, message->principal.client_type,
+        profile, window_open, now_ms());
+    uint32_t epoch = s_runtime.session.authority_epoch;
+    xSemaphoreGive(s_runtime.mutex);
+
+    // Audited unconditionally: a refusal is as interesting as a grant when
+    // working out why a panel would not take control.
+    ESP_LOGW(TAG, "authority request by %s (type=%u): %s (profile=%u window=%d epoch=%lu)",
+             message->principal.identifier, (unsigned)message->principal.client_type,
+             authority_result_reason(result), (unsigned)profile, (int)window_open,
+             (unsigned long)epoch);
+
+    if (result == ARGUS_MQTT_AUTHORITY_GRANTED ||
+        result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD) {
+        publish_value(s_runtime.topics.state_supervisor_link, "ONLINE", true);
+        publish_authority_state();
+    }
+}
+
+// Retained so any client that connects later - or reconnects after a drop -
+// learns who holds control without having to catch a transient event. This is
+// what lets a panel say "ArgusCore has control" instead of the opaque
+// "another interface has control" it could manage before.
+static void publish_authority_state(void)
+{
+    char owner[ARGUS_SECURITY_ID_MAX + 1U];
+    uint8_t client_type;
+    uint32_t epoch;
+    argus_mqtt_link_state_t link;
+
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    strlcpy(owner, s_runtime.session.lease_machine_id, sizeof(owner));
+    client_type = s_runtime.session.lease_client_type;
+    epoch = s_runtime.session.authority_epoch;
+    link = s_runtime.session.link;
+    xSemaphoreGive(s_runtime.mutex);
+
+    bool owned = (owner[0] != '\0' && link == ARGUS_MQTT_LINK_ONLINE);
+    const char *owner_kind = "NONE";
+    if (owned) {
+        switch (client_type) {
+        case ARGUS_MACHINE_CLIENT_HMI:           owner_kind = "LOCAL_HMI"; break;
+        case ARGUS_MACHINE_CLIENT_ARGUS_COMMAND: owner_kind = "ARGUSCORE"; break;
+        case ARGUS_MACHINE_CLIENT_SERVICE_TOOL:  owner_kind = "SERVICE_TOOL"; break;
+        default:                                 owner_kind = "OTHER"; break;
+        }
+    }
+
+    uint8_t profile = commissioned_authority_profile();
+    publish_value(s_runtime.topics.status_authority_profile,
+                  profile == ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED
+                      ? "ARGUSCORE_PREFERRED" : "STANDALONE_HMI", true);
+    publish_value(s_runtime.topics.status_control_owner, owner_kind, true);
+    publish_number(s_runtime.topics.status_authority_epoch, epoch);
+
+    // What the panel needs in order to decide whether to offer controls at
+    // all, without it having to reason about profiles and windows itself.
+    const char *local_status;
+    if (owned && client_type == ARGUS_MACHINE_CLIENT_HMI) {
+        local_status = "ACTIVE";
+    } else if (owned) {
+        local_status = "UNAVAILABLE";
+    } else if (profile == ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED &&
+               core_acquisition_window_open()) {
+        local_status = "WAITING";
+    } else {
+        local_status = "AVAILABLE";
+    }
+    publish_value(s_runtime.topics.status_local_control, local_status, true);
 }
 
 static void handle_command(const argus_mqtt_broker_message_t *message,
@@ -248,10 +430,17 @@ static void handle_command(const argus_mqtt_broker_message_t *message,
         reject_decoded(&command, "session_mismatch");
         return;
     }
+    // The lease belongs to the authenticated principal; the connection id
+    // proves that holder is still on this socket. Both must agree, so a
+    // second connection authenticated as the same machine cannot command
+    // alongside the holder.
     if (s_runtime.session.link != ARGUS_MQTT_LINK_ONLINE ||
+        s_runtime.session.lease_machine_id[0] == '\0' ||
+        strcmp(s_runtime.session.lease_machine_id,
+               message->principal.identifier) != 0 ||
         s_runtime.session.lease_connection_id != message->connection_id) {
         xSemaphoreGive(s_runtime.mutex);
-        reject_decoded(&command, "supervisor_not_bound");
+        reject_decoded(&command, "not_authority_holder");
         return;
     }
     sequence = argus_mqtt_session_check_sequence(
@@ -310,6 +499,10 @@ static void handle_message(const argus_mqtt_broker_message_t *message)
         &s_runtime.topics, message->topic);
     if (action == ARGUS_MQTT_ACTION_HEARTBEAT) {
         handle_heartbeat(message);
+    } else if (action == ARGUS_MQTT_ACTION_REQUEST_AUTHORITY) {
+        handle_authority_request(message, false);
+    } else if (action == ARGUS_MQTT_ACTION_RELEASE_AUTHORITY) {
+        handle_authority_request(message, true);
     } else if (action != ARGUS_MQTT_ACTION_NONE) {
         handle_command(message, action);
     }
