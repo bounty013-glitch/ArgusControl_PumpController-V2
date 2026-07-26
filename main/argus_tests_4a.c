@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /**
  * @file argus_tests_4a.c
  * @brief Phase 4A Pure Non-Motion Unit Test Suite Implementation (100% Stack-Local Isolation)
@@ -5675,14 +5676,37 @@ esp_err_t argus_tests_4a_run_all(void)
     // the only remaining explanation and it fails.
     bool station_count_observed =
         (snap_before.ap_station_status == ESP_OK && snap_after.ap_station_status == ESP_OK);
-    bool station_count_changed =
-        station_count_observed && (snap_before.ap_station_count != snap_after.ap_station_count);
-    bool env_delta_explained = !env_non_mutated && station_count_changed;
+
+    // Magnitude of environment activity during the run. A broker client delta
+    // is environmental BY CONSTRUCTION: this is a pure suite with no network
+    // path, so it cannot open or close an MQTT connection - only an outside
+    // client can. An earlier version of this check required the AP station
+    // count to move before excusing anything, and got a real case wrong: a
+    // station that had already associated brought its MQTT client up mid-run,
+    // so the client count and task count moved while the station count held
+    // steady at 1. Counting the client delta as evidence fixes that.
+    long station_delta = station_count_observed
+        ? labs((long)snap_after.ap_station_count - (long)snap_before.ap_station_count) : 0;
+    long client_delta =
+        labs((long)snap_after.broker_obs.active_client_count -
+             (long)snap_before.broker_obs.active_client_count);
+    long task_delta = labs((long)snap_after.task_count - (long)snap_before.task_count);
+    long env_evidence = station_delta + client_delta;
+
+    // Explained only if there IS outside activity and the task delta is no
+    // larger than it accounts for - the broker spawns roughly a task per
+    // client. Tasks appearing beyond that are not explained away.
+    bool env_delta_explained =
+        !env_non_mutated && env_evidence > 0 && task_delta <= env_evidence;
 
     printf("  AP Stations           : %s (%u -> %u)%s\n",
-           station_count_observed ? (station_count_changed ? "CHANGED" : "STEADY") : "UNOBSERVABLE",
+           station_count_observed ? (station_delta != 0 ? "CHANGED" : "STEADY") : "UNOBSERVABLE",
            (unsigned)snap_before.ap_station_count, (unsigned)snap_after.ap_station_count,
            station_count_observed ? "" : " [AP not started]");
+    printf("  Broker Clients        : %s (%u -> %u)\n",
+           client_delta != 0 ? "CHANGED" : "STEADY",
+           (unsigned)snap_before.broker_obs.active_client_count,
+           (unsigned)snap_after.broker_obs.active_client_count);
 
     bool broker_status_ok =
         (snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
@@ -5691,19 +5715,24 @@ esp_err_t argus_tests_4a_run_all(void)
     bool inconclusive = core_ok && !env_non_mutated && env_delta_explained;
 
     if (inconclusive) {
-        printf("\n  NOTE: task_count and/or broker.active_client_count changed, and the\n");
-        printf("        associated-station count changed with them (%u -> %u). A station\n",
-               (unsigned)snap_before.ap_station_count, (unsigned)snap_after.ap_station_count);
-        printf("        joined or left the Service AP during this run. That is an external\n");
-        printf("        event, not a test side effect. Every field the suite could actually\n");
-        printf("        mutate - authority, machine state, network mode, NVS, broker\n");
-        printf("        lifecycle - is UNCHANGED. Re-run with no stations joining or\n");
-        printf("        leaving for a clean isolation proof.\n");
+        printf("\n  NOTE: task_count and/or broker.active_client_count changed, and outside\n");
+        printf("        activity accounts for it (stations %ld, broker clients %ld,\n",
+               station_delta, client_delta);
+        printf("        tasks %ld). A station joined or left the AP, or an already\n", task_delta);
+        printf("        associated station brought its MQTT client up or down. That is an\n");
+        printf("        external event, not a test side effect - this suite has no network\n");
+        printf("        path and cannot open an MQTT connection. Every field the suite could\n");
+        printf("        actually mutate - authority, machine state, network mode, NVS,\n");
+        printf("        broker lifecycle - is UNCHANGED. Re-run with the network quiet for a\n");
+        printf("        clean isolation proof.\n");
     } else if (core_ok && !env_non_mutated) {
-        printf("\n  WARNING: task_count and/or broker.active_client_count changed while the\n");
-        printf("           associated-station count held steady. This is NOT explained by a\n");
-        printf("           station joining, so the suite is the remaining explanation -\n");
-        printf("           most likely a test leaking a task or a broker client.\n");
+        printf("\n  WARNING: task_count and/or broker.active_client_count changed and the\n");
+        printf("           observed outside activity does not account for it (stations %ld,\n",
+               station_delta);
+        printf("           broker clients %ld, tasks %ld). The suite is the remaining\n",
+               client_delta, task_delta);
+        printf("           explanation - most likely a test leaking a task or a broker\n");
+        printf("           client.\n");
     }
 
     printf("\n===================================================\n");
