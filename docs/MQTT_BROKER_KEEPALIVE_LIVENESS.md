@@ -87,7 +87,28 @@ Live behavior with the rotary HMI:
   — the lockout that motivated this fix did not recur;
 - sustained telemetry delivery, ~2000 messages, no broker faults.
 
-**Not yet exercised:** the silent-death path specifically (power-cut the
-client and confirm reaping at 1.5× keep-alive). The reset case exercises
-clean socket teardown; a true silent death is the case the timer covers and
-it has not been forced deliberately. Recorded as a gap rather than claimed.
+## Silent-death path — PROVEN 2026-07-26
+
+The gap recorded above is now closed. The rotary HMI's power was physically
+disconnected while it held a live, subscribed MQTT session, left off, then
+reconnected. That is a genuine silent death: no DISCONNECT packet, a
+half-open socket on the broker, and exactly the case the keep-alive timer
+exists to handle.
+
+**The HMI reconnected unaided.**
+
+The decisive detail is the broker session identifier. `status/core/command_session`
+read `ed8192703745619c` both before the power cut and after the reconnect —
+byte-identical. Per Phase 4C §6 every controller boot and every broker
+lifecycle generates a fresh random value, so an unchanged session proves the
+**controller did not reboot**. Before this fix, a controller restart was the
+only thing that could release a dead client; the HMI rejoining the same
+broker lifecycle therefore proves the keep-alive sweep genuinely reaped the
+stale connection and freed both the slot and the client ID.
+
+Corroborating, from the same window: no session change, no parse failures,
+no error-level output, and the reconnected client's subscriptions were
+granted in full (5/5, none rejected).
+
+Full HMI-side capture and analysis:
+`ArgusControl_PumpHMI-Rotary-V1/docs/evidence/phase2/PHASE2_STATUS.md`.
