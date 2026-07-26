@@ -10,6 +10,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -26,6 +27,14 @@ static const char *TAG = "argus_mqtt_broker";
 #define ARGUS_MQTT_MAX_TOPIC_LEN ARGUS_MQTT_BROKER_TOPIC_CAP
 #define ARGUS_MQTT_MAX_PAYLOAD_LEN ARGUS_MQTT_BROKER_PAYLOAD_CAP
 #define ARGUS_MQTT_MAX_PACKET_LEN 1024
+
+/* How often a blocked client task wakes to re-check liveness. Not the
+ * disconnect deadline - that is the client's own declared keep-alive. */
+#define ARGUS_MQTT_RECV_POLL_S 2
+
+/* Deadline for a freshly accepted socket to send CONNECT. Without it, a peer
+ * that opens a socket and says nothing holds a client slot indefinitely. */
+#define ARGUS_MQTT_CONNECT_GRACE_US UINT64_C(30000000)
 #define ARGUS_MQTT_CLIENT_TASK_STACK 8192
 #define ARGUS_MQTT_SERVER_TASK_STACK 4096
 
@@ -52,6 +61,21 @@ typedef struct {
     argus_machine_principal_t principal;
     char subscriptions[ARGUS_MQTT_MAX_SUBS_PER_CLIENT][ARGUS_MQTT_MAX_TOPIC_LEN];
     size_t subscription_count;
+    /* Keep-alive liveness (2026-07-26). The CONNECT keep-alive was parsed
+     * but never enforced, so a peer that died without a clean DISCONNECT
+     * (device reset, power loss, Wi-Fi drop) left its slot and its client ID
+     * occupied indefinitely - the client task blocked forever in recv().
+     * Because duplicate client IDs are deterministically rejected by design
+     * (Phase 4C S5), that permanently locked the real device out of its own
+     * controller until the controller was rebooted. Observed with the rotary
+     * HMI during Phase 2.5 bring-up.
+     *
+     * MQTT 3.1.1 S3.1.2.10 requires exactly this behavior: if keep-alive is
+     * non-zero and no Control Packet arrives within 1.5x that period, the
+     * server MUST disconnect. Enforcing it makes "already connected" mean
+     * "actually alive" and leaves the duplicate-rejection rule unchanged. */
+    uint16_t keep_alive_s;
+    uint64_t last_activity_us;
 } argus_mqtt_client_t;
 
 typedef struct {
@@ -101,14 +125,31 @@ typedef struct {
  * MQTT wire helpers  (unchanged from original)
  * =========================================================================*/
 
+/* Mid-packet read. Sockets now carry SO_RCVTIMEO so the client task can
+ * check liveness while idle (2026-07-26), which means a recv() here can
+ * return EAGAIN simply because a packet arrived split across TCP segments.
+ * Treating that as a disconnect would drop healthy clients, so retry on
+ * EAGAIN with a bounded budget: a peer that has genuinely stopped mid-packet
+ * still fails, but a momentary gap does not. Only the first header byte is
+ * read without retrying - that read is the idle detector. */
+#define ARGUS_MQTT_PARTIAL_READ_POLLS 8
+
 static int argus_mqtt_read_exact(int sock, uint8_t *buffer, size_t len)
 {
     size_t offset = 0;
+    int idle_polls = 0;
     while (offset < len) {
         int got = recv(sock, buffer + offset, len - offset, 0);
+        if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (++idle_polls > ARGUS_MQTT_PARTIAL_READ_POLLS) {
+                return -1; /* stalled mid-packet - treat as dead */
+            }
+            continue;
+        }
         if (got <= 0) {
             return got;
         }
+        idle_polls = 0;
         offset += (size_t)got;
     }
     return (int)offset;
@@ -555,6 +596,11 @@ static esp_err_t argus_mqtt_handle_connect(
         client->principal = auth.principal;
         client->subscription_count = 0U;
         client->connected = true;
+        /* Adopt the client's declared keep-alive so the liveness sweep in
+         * argus_mqtt_client_task() can reap this connection if the peer
+         * stops talking. Zero means "no timeout" per MQTT 3.1.1. */
+        client->keep_alive_s = request.keep_alive_s;
+        client->last_activity_us = (uint64_t)esp_timer_get_time();
     }
     xSemaphoreGive(s_broker.client_lock);
     argus_password_zeroize(&request, sizeof(request));
@@ -898,14 +944,58 @@ static void argus_mqtt_client_task(void *arg)
     argus_mqtt_client_t *client = (argus_mqtt_client_t *)arg;
     uint8_t packet[ARGUS_MQTT_MAX_PACKET_LEN];
 
+    /* Start the liveness clock at accept, so a socket that never sends
+     * CONNECT is reaped by the grace deadline below. */
+    client->last_activity_us = (uint64_t)esp_timer_get_time();
+
     while (true) {
         uint8_t fixed_header = 0;
         uint32_t remaining_len = 0;
 
-        int got = argus_mqtt_read_exact(client->sock, &fixed_header, 1);
+        /* Deliberately a bare recv(), not argus_mqtt_read_exact(): this read
+         * must surface EAGAIN so the liveness check below can run. */
+        int got = recv(client->sock, &fixed_header, 1, 0);
+        if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* Idle poll, not an error. Decide whether this peer is dead.
+             *
+             * Before CONNECT: a fixed grace period. After CONNECT: 1.5x the
+             * client's declared keep-alive, per MQTT 3.1.1 S3.1.2.10. A
+             * keep-alive of zero disables the timeout, also per spec. */
+            xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+            bool connected = client->connected;
+            uint16_t keep_alive_s = client->keep_alive_s;
+            uint64_t last_activity_us = client->last_activity_us;
+            xSemaphoreGive(s_broker.client_lock);
+
+            uint64_t idle_us = (uint64_t)esp_timer_get_time() - last_activity_us;
+            uint64_t deadline_us;
+            if (!connected) {
+                deadline_us = ARGUS_MQTT_CONNECT_GRACE_US;
+            } else if (keep_alive_s == 0U) {
+                continue; /* client asked for no timeout */
+            } else {
+                deadline_us = ((uint64_t)keep_alive_s * UINT64_C(1500000));
+            }
+
+            if (idle_us < deadline_us) {
+                continue;
+            }
+            ESP_LOGW(TAG,
+                     "reaping unresponsive MQTT client (connected=%d, idle=%llus, "
+                     "keep_alive=%us) - releasing its slot and client ID",
+                     (int)connected,
+                     (unsigned long long)(idle_us / UINT64_C(1000000)),
+                     (unsigned)keep_alive_s);
+            break;
+        }
         if (got <= 0) {
             break;
         }
+
+        /* A packet arrived: the peer is alive. */
+        xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+        client->last_activity_us = (uint64_t)esp_timer_get_time();
+        xSemaphoreGive(s_broker.client_lock);
 
         got = argus_mqtt_decode_remaining_length(client->sock, &remaining_len);
         if (got <= 0 || remaining_len > sizeof(packet)) {
@@ -1163,6 +1253,22 @@ static void argus_mqtt_server_task(void *arg)
 
         /* Reserve the active-client count BEFORE creating the task. */
         atomic_fetch_add(&s_broker.active_client_count, 1);
+
+        /* Bound recv() so the per-client task cannot block forever on a peer
+         * that has silently died. Without this the keep-alive sweep below
+         * could never run. The interval only sets how often liveness is
+         * re-checked; the actual disconnect deadline is the client's own
+         * keep-alive (see argus_mqtt_client_task). */
+        {
+            struct timeval recv_timeout = {
+                .tv_sec = ARGUS_MQTT_RECV_POLL_S,
+                .tv_usec = 0,
+            };
+            if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                           &recv_timeout, sizeof(recv_timeout)) != 0) {
+                ESP_LOGW(TAG, "could not set recv timeout: errno=%d", errno);
+            }
+        }
 
         uint8_t receiving_interface =
             argus_mqtt_receiving_interface(sock);

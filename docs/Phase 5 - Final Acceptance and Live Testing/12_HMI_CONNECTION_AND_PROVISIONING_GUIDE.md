@@ -395,7 +395,8 @@ the retired HMI's secret.
 | Symptom | Check |
 |---|---|
 | Wi-Fi does not connect | Active SSID/password, selected topology, signal, and HMI STA logs |
-| MQTT CONNACK code 2 | Client ID must exactly equal the machine ID; check duplicate live client ID and clean-session/Will flags |
+| MQTT CONNACK code 2 | Client ID must exactly equal the machine ID; check duplicate live client ID and clean-session/Will flags. Note this code also covers the *bind* stage, which is reached only after authentication succeeds — so a repeating code 2 with correct credentials means a duplicate/stale client ID, not a bad secret. See `docs/MQTT_BROKER_KEEPALIVE_LIVENESS.md`; before 2026-07-26 a stale entry was never reaped and required a controller reboot |
+| Subscriptions rejected or connection reset right after SUBSCRIBE | The broker caps a client at `ARGUS_MQTT_MAX_SUBS_PER_CLIENT` (20, counted cumulatively) and `ARGUS_MQTT_MAX_PACKET_LEN` (1024 bytes). Subscribe using the approved category wildcards (`<root>/metadata/#`, `state/#`, `status/#`, `telemetry/#`) plus the exact `event/pump1/command_result`, not one filter per topic |
 | MQTT CONNACK code 4 | Machine secret, enabled/revoked state, receiving interface, or authentication throttle |
 | SUBACK `0x80` | Requested filter is outside approved metadata/state/status/telemetry or exact command-result policy, or outside topic scope |
 | MQTT connects but supervisor stays `OFFLINE`/`STALE` | Current session, heartbeat topic, strict JSON, QoS 1, RETAIN false, counter progression, and `request_authority` capability |
