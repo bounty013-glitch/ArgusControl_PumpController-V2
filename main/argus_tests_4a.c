@@ -923,6 +923,17 @@ typedef struct {
     UBaseType_t task_count;
     argus_mqtt_broker_lifecycle_obs_t broker_obs;
     esp_err_t broker_obs_status;
+    // Environment discriminator. task_count and broker.active_client_count
+    // move when a station associates with the Service AP - an event the test
+    // suite neither causes nor controls. Without a way to tell "the suite
+    // mutated production state" apart from "the world changed mid-run", a
+    // laptop joining the AP reported as PHASE 4D.4 SUITE: FAILED with zero
+    // failing tests, which is a false alarm that costs real diagnostic time.
+    // Recording the associated-station count lets the verdict distinguish
+    // them without weakening the check: if the station count held steady and
+    // task_count still grew, that is a genuine leak and it still fails.
+    uint8_t ap_station_count;
+    esp_err_t ap_station_status;
 } argus_prod_snapshot_t;
 
 static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
@@ -952,12 +963,36 @@ static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
     }
 
     out->task_count = uxTaskGetNumberOfTasks();
+
+    // Not fatal if unavailable (AP not started): recorded as a status and
+    // treated as "no environment evidence", which keeps the verdict strict
+    // rather than silently lenient.
+    wifi_sta_list_t sta_list;
+    memset(&sta_list, 0, sizeof(sta_list));
+    out->ap_station_status = esp_wifi_ap_get_sta_list(&sta_list);
+    out->ap_station_count =
+        (out->ap_station_status == ESP_OK) ? (uint8_t)sta_list.num : 0U;
+
     return ESP_OK;
 }
 
-static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
+// `out_env_match` reports separately on the fields an associating station can
+// move (task_count, broker.active_client_count). The return value covers
+// everything else - authority, machine state, network mode, NVS, broker
+// lifecycle - and a false there is always a genuine failure.
+static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a,
+                                        bool *out_env_match)
 {
     bool match = true;
+    bool env_match = true;
+
+#define CHECK_DIFF_ENV_INT(field_name, val_b, val_a) \
+    do { \
+        if ((val_b) != (val_a)) { \
+            printf("\nField  : %s\nBefore : %ld\nAfter  : %ld\n", (field_name), (long)(val_b), (long)(val_a)); \
+            env_match = false; \
+        } \
+    } while(0)
 
 #define CHECK_DIFF_INT(field_name, val_b, val_a) \
     do { \
@@ -1049,11 +1084,14 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
         CHECK_DIFF_MEM("slot_b.payload", &b->nvs_obs.slot_b.payload, &a->nvs_obs.slot_b.payload, sizeof(argus_config_payload_t));
     }
 
-    CHECK_DIFF_INT("30. task_count", b->task_count, a->task_count);
+    // Environment-attributable. Routed to env_match, not match: a station
+    // joining the AP moves these without the suite touching anything. The
+    // verdict correlates them against ap_station_count before excusing them.
+    CHECK_DIFF_ENV_INT("30. task_count", b->task_count, a->task_count);
 
     CHECK_DIFF_INT("31. broker_obs_status", b->broker_obs_status, a->broker_obs_status);
     CHECK_DIFF_INT("32. broker.state", b->broker_obs.state, a->broker_obs.state);
-    CHECK_DIFF_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
+    CHECK_DIFF_ENV_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
     CHECK_DIFF_INT("34. broker.has_server_task", b->broker_obs.has_server_task, a->broker_obs.has_server_task);
     CHECK_DIFF_INT("35. broker.has_listener", b->broker_obs.has_listener, a->broker_obs.has_listener);
     CHECK_DIFF_INT("35a. broker.running", b->broker_obs.running, a->broker_obs.running);
@@ -1062,6 +1100,8 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
 #undef CHECK_DIFF_INT
 #undef CHECK_DIFF_UINT64
 #undef CHECK_DIFF_MEM
+#undef CHECK_DIFF_ENV_INT
+    if (out_env_match != NULL) *out_env_match = env_match;
     return match;
 }
 
@@ -5577,7 +5617,8 @@ esp_err_t argus_tests_4a_run_all(void)
         }
         return ESP_FAIL;
     }
-    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
+    bool env_non_mutated = true;
+    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after, &env_non_mutated);
 
     printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a+4D.4 Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
@@ -5619,12 +5660,53 @@ esp_err_t argus_tests_4a_run_all(void)
            (snap_before.task_count == snap_after.task_count) ? "UNCHANGED" : "MUTATED",
            (unsigned)snap_after.task_count);
 
-    bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
+    // Did the environment move under us? Only an actual change in associated
+    // stations excuses a delta in the environment-attributable fields. If the
+    // station count held steady and those fields still moved, the suite is
+    // the only remaining explanation and it fails.
+    bool station_count_observed =
+        (snap_before.ap_station_status == ESP_OK && snap_after.ap_station_status == ESP_OK);
+    bool station_count_changed =
+        station_count_observed && (snap_before.ap_station_count != snap_after.ap_station_count);
+    bool env_delta_explained = !env_non_mutated && station_count_changed;
+
+    printf("  AP Stations           : %s (%u -> %u)%s\n",
+           station_count_observed ? (station_count_changed ? "CHANGED" : "STEADY") : "UNOBSERVABLE",
+           (unsigned)snap_before.ap_station_count, (unsigned)snap_after.ap_station_count,
+           station_count_observed ? "" : " [AP not started]");
+
+    bool broker_status_ok =
+        (snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
+    bool core_ok = (failed_executions == 0 && non_mutated && broker_status_ok);
+    bool overall_pass = core_ok && env_non_mutated;
+    bool inconclusive = core_ok && !env_non_mutated && env_delta_explained;
+
+    if (inconclusive) {
+        printf("\n  NOTE: task_count and/or broker.active_client_count changed, and the\n");
+        printf("        associated-station count changed with them (%u -> %u). A station\n",
+               (unsigned)snap_before.ap_station_count, (unsigned)snap_after.ap_station_count);
+        printf("        joined or left the Service AP during this run. That is an external\n");
+        printf("        event, not a test side effect. Every field the suite could actually\n");
+        printf("        mutate - authority, machine state, network mode, NVS, broker\n");
+        printf("        lifecycle - is UNCHANGED. Re-run with no stations joining or\n");
+        printf("        leaving for a clean isolation proof.\n");
+    } else if (core_ok && !env_non_mutated) {
+        printf("\n  WARNING: task_count and/or broker.active_client_count changed while the\n");
+        printf("           associated-station count held steady. This is NOT explained by a\n");
+        printf("           station joining, so the suite is the remaining explanation -\n");
+        printf("           most likely a test leaking a task or a broker client.\n");
+    }
 
     printf("\n===================================================\n");
     printf("PHASE 4D.4 PURE UNIT TEST SUITE: %s\n",
-           overall_pass ? "PASSED" : "FAILED");
+           overall_pass ? "PASSED" : (inconclusive ? "PASSED (ISOLATION INCONCLUSIVE)" : "FAILED"));
     printf("===================================================\n\n");
 
-    return overall_pass ? ESP_OK : ESP_FAIL;
+    // Inconclusive isolation is not a pass of the isolation proof, but it is
+    // also not a test failure. Returning ESP_OK here would erase the
+    // distinction the caller needs; returning ESP_FAIL would repeat the false
+    // alarm this change exists to remove. ESP_ERR_INVALID_STATE says
+    // "tests passed, isolation unproven" and is distinguishable from both.
+    if (overall_pass) return ESP_OK;
+    return inconclusive ? ESP_ERR_INVALID_STATE : ESP_FAIL;
 }
