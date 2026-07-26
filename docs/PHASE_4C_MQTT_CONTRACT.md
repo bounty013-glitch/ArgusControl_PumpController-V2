@@ -280,3 +280,256 @@ Sessions, sequences, connection IDs, client IDs, and topic policy provide lifecy
 7. Observe retained state and telemetry; do not infer physical motion from HTTP/MQTT acceptance or generated pulses.
 
 On reconnect, read the session again before sending anything. Never replay buffered commands from an earlier session.
+
+---
+
+# Amendment A2 — Authority Wire Contract (2026-07-26)
+
+**Status: NORMATIVE. Amends the accepted Phase 4C MQTT Supervisory Contract.**
+Authorized by Shawn in the authority-protocol correction order, 2026-07-26.
+The accepted tag is not rewritten; this amends forward on the integration
+branch.
+
+A1 established that authority is acquired explicitly and that a heartbeat
+renews rather than grants. A1 did **not** define the wire protocol, and the
+first implementation shipped with the payload ignored and the topics
+unreachable at the broker. A2 defines the protocol completely so that no
+part of it is left to implementation choice.
+
+**Publishing to the correct topic is not a request.** A request exists only
+when it decodes, validates, and passes admission as defined below.
+
+## A2.1 Topics
+
+All topics are relative to the dynamic root `argus/<client_id>/<unit_id>`.
+
+| Topic | Direction | QoS | Retain |
+|---|---|---|---|
+| `command/core/request_authority` | client → controller | 1 | **must be false** |
+| `command/core/release_authority` | client → controller | 1 | **must be false** |
+| `event/core/authority_result` | controller → clients | 1 | false |
+| `status/core/control_owner` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_epoch` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_profile` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/local_control_status` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/core_lease_status` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_reason` | controller → clients | 1 | **true (snapshot)** |
+
+A retained request is rejected with `retain_forbidden`. A retained command
+topic would let a broker replay an acquisition after a session change, which
+is precisely the class of thing this contract exists to prevent.
+
+**Subscription budget.** The result topic is deliberately placed under
+`event/` so an existing subscriber can widen its fifth filter from
+`event/pump1/command_result` to `event/#` and cover both. The filter count
+stays at 5 and the per-client subscription limit is not raised.
+
+## A2.2 Request schema — `command/core/request_authority`
+
+Maximum payload: **512 bytes**. Larger is rejected `payload_too_large`
+without parsing.
+
+```json
+{
+  "schema": 1,
+  "request_id": "a1b2c3d4",
+  "session": "0123456789abcdef",
+  "authority_epoch": 7,
+  "intent": "OPERATOR_INTENT"
+}
+```
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `schema` | uint | yes | Must be `1`. Anything else → `schema_unsupported`. |
+| `request_id` | string | yes | 1–36 chars, `[A-Za-z0-9._-]` only. |
+| `session` | string | yes | Exactly the controller's current 16-char lowercase-hex command session. |
+| `authority_epoch` | uint32 | yes | The epoch the request is predicated on. `0` means "no assumption" and is permitted **for requests only**. |
+| `intent` | string | no | One of `OPERATOR_INTENT`, `SUPERVISORY_START`, `SERVICE`, `FALLBACK`. Advisory; recorded in audit, never affects admission. |
+
+Unknown fields are **rejected**, not ignored (`unknown_field`), matching the
+existing strict command decoder. Wrong types are rejected `invalid_value`.
+
+## A2.3 Release schema — `command/core/release_authority`
+
+Identical shape and limits, with one difference that matters:
+
+`authority_epoch` **must equal the controller's current epoch exactly.**
+`0` is not permitted. A release predicated on a stale epoch is rejected
+`stale_epoch` and changes nothing.
+
+This is what stops a delayed release from a previous owner releasing a later
+owner's authority.
+
+A release is valid only when **all** hold:
+- the sender is the authenticated current owner (`not_owner` otherwise);
+- the session matches (`session_mismatch`);
+- the epoch matches exactly (`stale_epoch`);
+- machine-state and profile policy admit it (`denied_machine_state`).
+
+**Releasing authority does not stop the pump**, clear RUN intent, clear the
+accepted setpoint, or alter output or trajectory. It changes only who may
+issue the next accepted command.
+
+## A2.4 Result schema — `event/core/authority_result`
+
+Published for every request that survives broker admission, accepted or
+rejected. A request rejected *at the broker* (topic scope or permission)
+produces no result, because the controller never sees it — that is a
+deliberate isolation property, not an omission.
+
+```json
+{
+  "schema": 1,
+  "request_id": "a1b2c3d4",
+  "session": "0123456789abcdef",
+  "outcome": "ACCEPTED",
+  "reason": "granted",
+  "control_owner": "LOCAL_HMI",
+  "authority_epoch": 8,
+  "core_lease_status": "ACTIVE",
+  "local_control_status": "ACTIVE"
+}
+```
+
+This satisfies the minimum observability requirement: the requester can
+determine `request_id`, accepted/rejected, reason, current owner, current
+epoch, and controller session from a single message.
+
+## A2.5 Stable rejection-reason vocabulary
+
+These strings are contract surface. They may be added to; existing values
+must not be renamed or repurposed.
+
+**Decode and envelope:** `schema_unsupported`, `payload_too_large`,
+`malformed_json`, `missing_field`, `unknown_field`, `invalid_value`,
+`retain_forbidden`, `qos_1_required`, `invalid_request_id`
+
+**Binding:** `session_mismatch`, `stale_epoch`, `duplicate_conflict`
+
+**Authorization** (broker boundary; no result published):
+`topic_scope_denied`, `not_permitted`
+
+**Admission:** `denied_by_profile`, `denied_held_by_other`,
+`denied_machine_state`, `not_owner`, `transfer_unsupported_running`
+
+**Success:** `granted`, `already_held`, `released`
+
+## A2.6 Duplicate handling
+
+Keyed on `(session, request_id)`.
+
+- **Identical repeat** — same key, byte-identical payload: the cached result
+  is republished. No arbitration, no epoch change, no lease renewal. This
+  makes QoS 1 redelivery idempotent.
+- **Conflicting repeat** — same key, different payload: rejected
+  `duplicate_conflict` with zero mutation. A request id is not reusable for
+  a different request.
+
+The duplicate record is scoped to the controller session and is discarded on
+session change.
+
+## A2.7 Session and epoch change behaviour
+
+- **Controller session change** invalidates every previous session's requests,
+  results, duplicate records, and operational commands. A request carrying a
+  prior session is rejected `session_mismatch` with zero mutation.
+- **Authority epoch change** invalidates every operational command predicated
+  on the previous epoch (see A2.9), and every release predicated on it.
+
+## A2.8 Supported acquisition and transfer subset — CURRENT PHASE
+
+Stated explicitly so the contract does not imply capability that does not
+exist yet.
+
+| Case | Supported now |
+|---|---|
+| Grant when unowned, profile permits | **Yes** |
+| Same principal re-requests while holding | **Yes** — `already_held`, epoch unchanged |
+| Owner releases | **Yes** |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **not** running | **Yes** — epoch advances |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **running** | **No** — rejected `transfer_unsupported_running` |
+| `LOCAL_HMI` takes from a healthy `ARGUSCORE` lease | **No** — `denied_held_by_other` |
+| Any client takes from a same- or higher-standing holder | **No** — `denied_held_by_other` |
+
+Live running transfer awaits proven bumpless PID tracking. Until then it is
+**deferred, not simulated**: the request is rejected with a defined reason,
+the current owner keeps authority, and the pump keeps running. The controller
+must never stop the pump to make a transfer easier to implement.
+
+## A2.9 Operational command envelope — `authority_epoch` becomes REQUIRED
+
+Every operational command envelope gains a required field:
+
+```json
+{
+  "session": "0123456789abcdef",
+  "sequence": 42,
+  "command_id": "…",
+  "authority_epoch": 8,
+  "target_rpm_milli": 72000
+}
+```
+
+A command whose `authority_epoch` does not equal the controller's current
+epoch is rejected `stale_epoch` **before** the command sequence is consumed,
+before any state mutation, before any setpoint change, before any motion
+dispatch, and before any last-accepted-command record is updated.
+
+Epoch validation **supplements** the existing identity, connection, session,
+freshness, sequence, machine-state, and safety checks. It replaces none of
+them.
+
+Required sequence, which must hold even when the same principal regains
+authority:
+
+1. Principal A owns epoch 1.
+2. A command from epoch 1 is delayed in flight.
+3. Authority moves away from A. Epoch becomes 2.
+4. A later reacquires authority. Epoch becomes 3.
+5. The delayed epoch-1 command arrives.
+6. It is **rejected with zero mutation**, even though A is the owner again.
+
+An epochless command is invalid and is rejected `missing_field`. Contract
+snapshots, fixtures, tests, and client plans must be updated so no client can
+construct one.
+
+## A2.10 Authority state vocabulary
+
+`control_owner`: `NONE` | `LOCAL_HMI` | `ARGUSCORE` | `SERVICE_TOOL` | `OTHER`
+
+`authority_profile`: `STANDALONE_HMI` | `ARGUSCORE_PREFERRED`
+
+`core_lease_status`: `NONE` | `ACQUIRING` | `ACTIVE` | `EXPIRING` | `EXPIRED`
+
+`local_control_status`: `UNAVAILABLE` | `WAITING` | `AVAILABLE` | `ACTIVE`
+
+`authority_reason`: `STARTUP` | `STANDALONE_ACQUISITION` | `CORE_ACQUISITION`
+| `OPERATOR_TRANSFER` | `CORE_LEASE_EXPIRED` | `CORE_REACQUISITION` |
+`SESSION_INVALIDATED` | `RELEASED` | `TRANSPORT_LOST`
+
+All six are retained snapshots and must be internally consistent after every
+transition listed in the correction order §6. If the controller cannot
+determine a value, it publishes the **most restrictive** value it can
+justify — never a fictional `AVAILABLE`. Presentation fails closed.
+
+## A2.11 Transport versus lease — normative
+
+These are distinct concepts and must not be collapsed:
+
+transport/link condition · authenticated principal identity · authority
+ownership · renewable lease validity · heartbeat deadline · connection binding
+
+- A transport disconnect marks the link offline and invalidates the departed
+  connection binding. It **does not** clear an otherwise unexpired lease,
+  **does not** advance the epoch by itself, and **does not** touch RUN intent,
+  setpoint, output, or trajectory. The heartbeat deadline keeps running.
+- The **same** authenticated principal may rebind to a new connection while
+  the lease is unexpired, preserving owner and epoch. The old connection is
+  rejected from that moment. Rebinding is not acquisition and replays nothing.
+- A **different** principal may not inherit the lease by connecting or by
+  heartbeating.
+- On deadline expiry with no valid renewal: the lease expires, the epoch
+  advances, delayed commands from the old epoch are invalidated, the
+  commissioned fallback policy applies, RUN intent / setpoint / output are
+  preserved, and the full A2.10 state is republished with an accurate reason.
