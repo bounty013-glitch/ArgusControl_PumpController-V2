@@ -938,7 +938,30 @@ static esp_err_t populate_service_ap_config(bool factory,
     memcpy(out_config->ap.password, secret, secret_len);
     out_config->ap.password[secret_len] = 0U;
     out_config->ap.ssid_len = strlen(identity->service_ssid);
-    out_config->ap.max_connection = 1;
+    // Service AP client capacity. Raised from 1 to 4 on 2026-07-26 (see
+    // docs/PHASE_4B_IMPLEMENTATION_PLAN.md Q5 amendment).
+    //
+    // The original value of 1 was a deliberate hardening choice made when the
+    // AP had no per-client authentication and "a single phone" was the only
+    // expected client. That assumption stopped holding once the rotary HMI
+    // became a PERMANENT resident of this AP: the panel occupied the single
+    // slot, and every other station - including the browser console used for
+    // commissioning, machine enrollment and setting authority_profile - was
+    // deauthenticated with "max connection, deauth!". A commissioned pump was
+    // effectively un-administerable without powering down the panel.
+    //
+    // The control that the limit of 1 was standing in for now lives somewhere
+    // stronger: since Phase 4D.4 every machine authenticates with an
+    // independently revocable credential and allowed_interfaces scopes who may
+    // use SoftAP at all. Client count is a capacity limit, not a security
+    // boundary.
+    //
+    // 4 is chosen to match HTTP_MAX_CONNECTIONS (argus_http_server.c) so that
+    // a station can never associate and then fail confusingly at the HTTP
+    // layer. Everything above this is already sized for it or beyond: the
+    // session manager holds 8 sessions (2 per principal) and the MQTT broker
+    // holds 10 clients.
+    out_config->ap.max_connection = 4;
     out_config->ap.authmode = WIFI_AUTH_WPA2_PSK;
     argus_password_zeroize(secret, sizeof(secret));
     return ESP_OK;

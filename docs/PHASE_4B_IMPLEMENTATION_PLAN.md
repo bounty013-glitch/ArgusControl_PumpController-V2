@@ -846,3 +846,43 @@ connection?
 **Recommendation:** 1. This matches the AP `max_connection=1` setting.
 A single phone is the intended client. Multiple connections would
 complicate authority tracking without adding value.
+
+**AMENDED 2026-07-26 — superseded. AP `max_connection` is now 4.**
+
+Authorized by Shawn on 2026-07-26 after the limit was hit in the field:
+attempting to join the Service AP produced repeated
+`wifi:max connection, deauth!` and the station never associated.
+
+*What broke the original reasoning.* Q5 assumed "a single phone is the
+intended client." That held when it was written. It stopped holding when the
+rotary HMI became a **permanent resident** of the Service AP — the panel
+occupied the single slot and every other station was deauthenticated,
+including the browser console used for commissioning, machine enrollment,
+and setting `authority_profile`. A commissioned pump was effectively
+un-administerable without powering down the panel, and standalone bring-up
+was blocked outright: it needs the HMI associated *and* the console
+reachable at the same time, which were mutually exclusive.
+
+*Why raising it is safe.* The limit of 1 was standing in for a security
+control that now lives somewhere stronger. Since Phase 4D.4 every machine
+authenticates with an independently revocable credential, and
+`allowed_interfaces` scopes which machines may use SoftAP at all. Client
+count is a capacity limit, not a security boundary. The "complicates
+authority tracking" concern was also resolved by later phases: the session
+manager holds 8 sessions (2 per principal) and the authority manager tracks a
+single explicit owner regardless of how many clients are connected.
+
+*Correction to this Q5 entry as written:* it states the HTTP server was set
+to 1 to match. The code has `HTTP_MAX_CONNECTIONS 4`
+(`main/argus_http_server.c:102`), so the HTTP half of this recommendation was
+already superseded in implementation before this amendment. Only the AP
+retained the value of 1.
+
+*Chosen value: 4.* Matches `HTTP_MAX_CONNECTIONS` so a station can never
+associate and then fail confusingly at the HTTP layer. The MQTT broker
+already holds 10 clients (`ARGUS_MQTT_MAX_CLIENTS`), so it is not the
+constraint.
+
+*Not yet verified:* AP/STA coexistence behaviour with 4 associated stations
+while the broker runs on the same core. Build-verified only; this needs bench
+observation before the change is treated as accepted.
