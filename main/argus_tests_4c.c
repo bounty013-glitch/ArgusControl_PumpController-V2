@@ -277,6 +277,137 @@ esp_err_t test_4c_heartbeat_expiry_is_observability_only(void)
     return ESP_OK;
 }
 
+// ---- Fail-operational regression tests (Phase 3 5.9) --------------------
+//
+// Shawn's binding decision ("Pump Operation - Authority Changes",
+// 2026-07-26): loss or transfer of ordinary command authority must NOT
+// cancel RUN intent, clear the accepted setpoint, or stop the pump. Losing
+// the services host, the MQTT session, the network path or the supervisory
+// PID must not by itself stop chemical injection. The real-world cost of
+// getting this wrong is roughly $4,000/hour when a coiled tubing unit is in
+// hole.
+//
+// The behaviour is ALREADY correct - argus_mqtt_runtime.c logs "supervisor
+// heartbeat stale; motion state intentionally unchanged" and mutates
+// nothing. These tests exist to pin it so a future change cannot silently
+// couple a comms watchdog to a stop. They are deliberately written as
+// exact-delta assertions rather than spot checks: any new field a future
+// author clears on lease loss fails the test by construction, even though
+// this test was written before that field existed.
+
+static esp_err_t assert_only_lease_fields_changed(
+    const argus_mqtt_session_core_t *before,
+    const argus_mqtt_session_core_t *after,
+    bool heartbeat_binding_may_change)
+{
+    // The controller's accepted-command record must survive comms loss. If
+    // any of these change, an authority event has reached into operational
+    // state, which is exactly what the decision forbids.
+    CHECK(strcmp(before->session, after->session) == 0);
+    CHECK(before->has_sequence == after->has_sequence);
+    CHECK(before->last_sequence == after->last_sequence);
+    CHECK(before->cached_action == after->cached_action);
+    CHECK(strcmp(before->cached_command_id, after->cached_command_id) == 0);
+    CHECK(strcmp(before->cached_payload, after->cached_payload) == 0);
+    CHECK(strcmp(before->cached_result, after->cached_result) == 0);
+    CHECK(before->last_heartbeat_ms == after->last_heartbeat_ms);
+    if (!heartbeat_binding_may_change) {
+        CHECK(before->heartbeat_connection_id == after->heartbeat_connection_id);
+        CHECK(before->heartbeat_counter == after->heartbeat_counter);
+    }
+    return ESP_OK;
+}
+
+esp_err_t test_4c_fail_operational_lease_expiry_preserves_operation(void)
+{
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+
+    // Stand in for a controller that has accepted a command and is running.
+    // Losing the supervisor must not disturb any of it.
+    core.has_sequence = true;
+    core.last_sequence = 42U;
+    core.cached_action = ARGUS_MQTT_ACTION_SET_TARGET;
+    strlcpy(core.cached_command_id, "cmd-72rpm", sizeof(core.cached_command_id));
+    strlcpy(core.cached_payload, "{\"target_rpm_milli\":72000}", sizeof(core.cached_payload));
+    strlcpy(core.cached_result, "ACCEPTED", sizeof(core.cached_result));
+
+    argus_mqtt_session_core_t before = core;
+    CHECK(argus_mqtt_session_tick(&core, 6100U));
+
+    // What lease expiry IS allowed to do, and all it is allowed to do.
+    CHECK(core.link == ARGUS_MQTT_LINK_STALE);
+    CHECK(core.lease_connection_id == 0U);
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.lease_client_type == 0U);
+    CHECK(assert_only_lease_fields_changed(&before, &core, false) == ESP_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_fail_operational_disconnect_preserves_operation(void)
+{
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+
+    core.has_sequence = true;
+    core.last_sequence = 42U;
+    core.cached_action = ARGUS_MQTT_ACTION_SET_TARGET;
+    strlcpy(core.cached_command_id, "cmd-72rpm", sizeof(core.cached_command_id));
+    strlcpy(core.cached_payload, "{\"target_rpm_milli\":72000}", sizeof(core.cached_payload));
+    strlcpy(core.cached_result, "ACCEPTED", sizeof(core.cached_result));
+
+    argus_mqtt_session_core_t before = core;
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+
+    // A hard disconnect drops the heartbeat binding as well as the lease -
+    // but still may not touch the accepted-command record.
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    CHECK(core.lease_connection_id == 0U);
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.heartbeat_connection_id == 0U && core.heartbeat_counter == 0U);
+    CHECK(assert_only_lease_fields_changed(&before, &core, true) == ESP_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_fail_operational_epoch_survives_reconnect_blip(void)
+{
+    // Shawn's decision 8.1 (2026-07-26): a TCP reconnect INSIDE the lease
+    // term preserves authority. A dropped packet is a comms event, and comms
+    // events must not move authority. The lease timer keeps running through
+    // the blip, so a genuinely dead supervisor still expires on schedule
+    // rather than hiding inside a reconnect loop.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
+                                              &heartbeat, 100U) == ESP_OK);
+
+    // Same principal returns on a new socket, well inside the lease term.
+    heartbeat.counter = 1U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, "m-core", 5U,
+                                              &heartbeat, 3000U) == ESP_OK);
+    CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
+    CHECK(core.lease_connection_id == 12U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+
+    // The blip must not have restarted the expiry clock from the blip time:
+    // the lease deadline follows the renewing heartbeat, so a supervisor
+    // that goes truly silent after reconnecting still expires.
+    CHECK(!argus_mqtt_session_tick(&core, 8999U));
+    CHECK(argus_mqtt_session_tick(&core, 9000U));
+    CHECK(core.link == ARGUS_MQTT_LINK_STALE);
+    return ESP_OK;
+}
+
 esp_err_t test_4c_lease_follows_identity_across_reconnect(void)
 {
     // The lease belongs to the authenticated principal. A supervisor that
