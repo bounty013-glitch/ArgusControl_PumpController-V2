@@ -1,8 +1,51 @@
 # Phase 4C MQTT Supervisory Contract
 
-**Status:** ACCEPTED on July 22, 2026
+**Status:** ACCEPTED on July 22, 2026. **AMENDED — see Amendment A1 below.
+The amendment is in force on the `atlantis-authority-integration` branch and
+merges to `main` only after acceptance testing.**
 
 **Firmware identity:** `v2-phase4c-dev`
+
+## Amendment A1 — Authority acquisition becomes explicit (2026-07-26)
+
+Authorized by Shawn on 2026-07-26. Governing decision documents:
+"Deterministic Initial Authority Selection" and "Pump Operation — Authority
+Changes". Implementation plan:
+`ArgusControl_PumpHMI-Rotary-V1/docs/plan/PHASE_3_PROVISIONING_AND_COMMAND_PLAN.md`.
+
+**What changed and why.** As accepted, §7 made the heartbeat *itself* the
+act of acquiring command authority: the first valid current-session
+heartbeat bound the lease. That is implicit acquisition, and it is
+incompatible with the governing rule that **connection proves presence but
+does not grant control**. It also made authority depend on connection order,
+which the decision prohibits outright — a client must not win control
+because its boot time is shorter or its Wi-Fi associated first.
+
+Under A1:
+
+1. **Acquisition is an explicit, validated, epoch-changing request.** The
+   controller evaluates identity, scope, capability, session, the
+   commissioned `authority_profile`, and current machine state, then grants
+   or refuses. Refusal has no side effects.
+2. **The heartbeat is demoted to lease renewal.** It keeps an
+   already-granted lease alive. It can no longer create one.
+3. **The lease belongs to the authenticated principal**, not to the socket.
+4. **Initial ownership comes from the commissioned `authority_profile`**
+   (`STANDALONE_HMI` or `ARGUSCORE_PREFERRED`), never from arrival order.
+5. **Transfer is asymmetric and controller-adjudicated.** ArgusCore may
+   request transfer from the HMI; the HMI may not take authority from a
+   healthy ArgusCore lease; the controller decides both.
+
+**What did NOT change, and must not.** §1's fail-operational rule stands
+unaltered and is reinforced by A1: loss of MQTT, loss of the heartbeat, loss
+of the lease, and transfer of authority all remain incapable of stopping
+motion, clearing a target, disabling the driver, or synthesizing a command.
+Authority determines who may issue the *next* accepted command. It does not
+own the RUN intent or accepted setpoint the controller already holds.
+Regression tests `test_4c_fail_operational_*` pin this.
+
+Sections amended: §5 (final paragraph) and §7 (replaced). All other sections
+are unchanged and remain as accepted.
 
 ## 1. Authority and Safety Boundary
 
@@ -105,7 +148,9 @@ Subscriptions are read-only observation and do not grant publication authority.
 
 Each accepted socket receives a monotonically allocated 64-bit connection identity. Application callbacks receive a bounded copy of client ID, connection identity, exact topic, payload length, QoS, RETAIN, DUP, and broker-policy result. No application callback retains a broker packet pointer.
 
-Simultaneously active duplicate MQTT client IDs are rejected deterministically. Lease ownership uses the connection identity, not the client ID, so a recycled slot or repeated name cannot impersonate an earlier socket.
+Simultaneously active duplicate MQTT client IDs are rejected deterministically.
+
+**Amended by A1.** As accepted, this paragraph stated that lease ownership uses the connection identity rather than the client ID, so that a recycled slot or repeated name could not impersonate an earlier socket. That protection is retained but re-based: **lease ownership uses the authenticated machine principal**, and the connection identity proves that principal is still on the far end of a live socket. Impersonation is prevented by authentication rather than by socket identity, which is strictly stronger — a repeated client ID never reaches lease arbitration unauthenticated. Keying solely to the connection also had an operational defect: a supervisor that dropped and reconnected was refused its own lease until the heartbeat timeout expired, opening a window in which another client could take control. See §7.
 
 ## 6. Broker Command Session
 
@@ -121,9 +166,52 @@ Heartbeat schema:
 
 The object is strict, flat, bounded, non-retained, and contains exactly one `session` and one nonzero uint32 `counter`. Unknown, duplicate, missing, nested, malformed, oversized, embedded-NUL, and trailing content is rejected.
 
-The first valid current-session heartbeat binds an unowned lease to the actual connection. A different connection cannot steal an `ONLINE` lease. Counters advance under uint32 serial-number arithmetic. Equal, older, or ambiguous half-range counters are rejected.
+**Amended by A1. The heartbeat renews a lease; it does not acquire one.**
 
-Supervisors should publish every two seconds. After six seconds without a valid heartbeat, link state becomes `STALE` and the lease is released. A confirmed disconnect becomes `OFFLINE`. Counter history is retained while an expired socket remains connected to reject replay, then cleared when that socket disconnects. Neither transition mutates machine state or motion output.
+As accepted, the first valid current-session heartbeat bound an unowned
+lease to the connection that sent it. That behaviour is withdrawn: a
+heartbeat from a principal that does not already hold the lease is not an
+acquisition and is refused. Authority is acquired only through the explicit
+request described in A1, and initial ownership follows the commissioned
+`authority_profile`, never arrival order.
+
+The heartbeat therefore now means exactly one thing: *the holder is still
+alive and still wants the lease.*
+
+Rules in force:
+
+- A heartbeat from the **current holder** renews the lease and refreshes the
+  expiry deadline.
+- A heartbeat from **any other principal** is refused and has no effect on
+  the lease, the epoch, or machine state.
+- The holder is the authenticated machine principal. A reconnect **inside
+  the lease term** by that same principal renews the lease on the new
+  connection and **preserves the authority epoch** — a dropped packet is a
+  comms event, and comms events must not move authority. The expiry deadline
+  continues to follow the most recent valid heartbeat, so a supervisor that
+  goes silent after reconnecting still expires on schedule rather than
+  surviving indefinitely inside a reconnect loop.
+- Counters advance under uint32 serial-number arithmetic. Equal, older, or
+  ambiguous half-range counters are rejected. Counter history is scoped to
+  the connection that produced it, so a reconnecting holder may legitimately
+  restart its counter.
+
+Supervisors should publish every two seconds. After six seconds without a
+valid heartbeat, link state becomes `STALE` and the lease is released; the
+authority epoch ends with it. A confirmed disconnect becomes `OFFLINE`.
+Counter history is retained while an expired socket remains connected to
+reject replay, then cleared when that socket disconnects.
+
+Once a lease has actually **expired**, the epoch is gone. A returning
+principal — including the previous holder — must re-authenticate, read
+current authoritative state, synchronize its output to the live target, and
+submit a new explicit request. Reconnection never restores a former lease
+and never automatically reclaims control.
+
+**Neither expiry nor disconnect nor transfer mutates machine state, motion
+output, RUN intent, or the accepted setpoint.** This is the §1
+fail-operational rule and it is binding: no comms or lease watchdog may be
+connected to a stop, a deceleration, or clearing the setpoint.
 
 ## 8. Command Envelope
 
