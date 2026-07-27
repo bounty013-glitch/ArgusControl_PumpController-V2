@@ -5482,6 +5482,8 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_topic_component_rejections);
     RUN_TEST(test_4c_topic_ownership_policy);
     RUN_TEST(test_4c_command_decoder_all_actions);
+    RUN_TEST(test_4c_command_requires_authority_epoch);
+    RUN_TEST(test_4c_epoch_advances_across_loss_and_regain);
     RUN_TEST(test_4c_command_decoder_strict_structure);
     RUN_TEST(test_4c_command_decoder_value_contract);
     RUN_TEST(test_4c_command_decoder_identity_fields);

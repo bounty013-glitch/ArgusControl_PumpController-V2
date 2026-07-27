@@ -315,6 +315,12 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
             } else {
                 valid = parse_true(&cursor);
             }
+        } else if (strcmp(key, "authority_epoch") == 0) {
+            // A2.9: required on every operational command. 0 decodes fine but
+            // can never match a live epoch, so a client cannot opt out of
+            // admission by sending 0.
+            bit = 16U;
+            valid = parse_u32(&cursor, &decoded.authority_epoch);
         } else {
             return ARGUS_MQTT_DECODE_UNKNOWN_FIELD;
         }
@@ -328,7 +334,8 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
     }
     skip_ws(&cursor);
     if (cursor.p != cursor.end) return ARGUS_MQTT_DECODE_MALFORMED;
-    if (fields != 15U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
+    // 31 = session|sequence|command_id|value|authority_epoch, all required.
+    if (fields != 31U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
     *out = decoded;
     return ARGUS_MQTT_DECODE_OK;
 }

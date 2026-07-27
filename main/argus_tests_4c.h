@@ -6,6 +6,8 @@ esp_err_t test_4c_topic_root_and_canonical_topics(void);
 esp_err_t test_4c_topic_component_rejections(void);
 esp_err_t test_4c_topic_ownership_policy(void);
 esp_err_t test_4c_command_decoder_all_actions(void);
+esp_err_t test_4c_command_requires_authority_epoch(void);
+esp_err_t test_4c_epoch_advances_across_loss_and_regain(void);
 esp_err_t test_4c_command_decoder_strict_structure(void);
 esp_err_t test_4c_command_decoder_value_contract(void);
 esp_err_t test_4c_command_decoder_identity_fields(void);

@@ -87,7 +87,7 @@ esp_err_t test_4c_command_decoder_all_actions(void)
     };
     const char *body =
         "{\"session\":\"0123456789abcdef\",\"sequence\":1,"
-        "\"command_id\":\"cmd-1\",\"value\":true}";
+        "\"authority_epoch\":0,\"command_id\":\"cmd-1\",\"value\":true}";
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); ++i) {
         argus_mqtt_command_t out;
         CHECK(argus_mqtt_decode_command(body, strlen(body), actions[i],
@@ -95,7 +95,7 @@ esp_err_t test_4c_command_decoder_all_actions(void)
         CHECK(out.action == actions[i] && out.sequence == 1U);
     }
     const char *target =
-        "{\"value\":8000,\"command_id\":\"target.1\",\"sequence\":2,"
+        "{\"value\":8000,\"authority_epoch\":0,\"command_id\":\"target.1\",\"sequence\":2,"
         "\"session\":\"0123456789abcdef\"}";
     argus_mqtt_command_t out;
     CHECK(argus_mqtt_decode_command(target, strlen(target),
@@ -105,15 +105,77 @@ esp_err_t test_4c_command_decoder_all_actions(void)
     return ESP_OK;
 }
 
+esp_err_t test_4c_command_requires_authority_epoch(void)
+{
+    // A2.9: epochless commands are invalid, so no client can construct one.
+    const char *epochless =
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,"
+        "\"command_id\":\"x\",\"value\":true}";
+    argus_mqtt_command_t out;
+    CHECK(argus_mqtt_decode_command(epochless, strlen(epochless),
+              ARGUS_MQTT_ACTION_START, 200000, &out) ==
+          ARGUS_MQTT_DECODE_MISSING_FIELD);
+
+    const char *with_epoch =
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,"
+        "\"authority_epoch\":7,\"command_id\":\"x\",\"value\":true}";
+    CHECK(argus_mqtt_decode_command(with_epoch, strlen(with_epoch),
+              ARGUS_MQTT_ACTION_START, 200000, &out) == ARGUS_MQTT_DECODE_OK);
+    CHECK(out.authority_epoch == 7U);
+
+    // A duplicate epoch field is rejected like any other duplicate.
+    const char *dup =
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":1,"
+        "\"authority_epoch\":2,\"command_id\":\"x\",\"value\":true}";
+    CHECK(argus_mqtt_decode_command(dup, strlen(dup),
+              ARGUS_MQTT_ACTION_START, 200000, &out) ==
+          ARGUS_MQTT_DECODE_DUPLICATE_FIELD);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_epoch_advances_across_loss_and_regain(void)
+{
+    // The exact sequence A2.9 requires. This is the case the identity gate
+    // cannot catch on its own, so it is proved at the core level: after A
+    // loses and regains authority, the epoch it holds is NOT the epoch its
+    // delayed command was predicated on.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+
+    // 1. Principal A owns epoch N.
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 100U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t delayed_command_epoch = core.authority_epoch;
+
+    // 2-3. Authority leaves A (voluntary release is an ownership change).
+    CHECK(argus_mqtt_session_release_authority(&core, "m-core"));
+    CHECK(core.authority_epoch != delayed_command_epoch);
+
+    // 4. A reacquires under a new epoch.
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 200U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+
+    // 5-6. A is the owner again, and identity alone would admit the delayed
+    // command - but the epoch it carries no longer matches, so admission
+    // rejects it.
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.authority_epoch != delayed_command_epoch);
+    return ESP_OK;
+}
+
 esp_err_t test_4c_command_decoder_strict_structure(void)
 {
     static const char *const invalid[] = {
         "", "[]", "{}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":true",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":true} trailing",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":true,\"extra\":1}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"sequence\":2,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":{\"nested\":1},\"sequence\":1,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true} trailing",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true,\"extra\":1}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"sequence\":2,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":{\"nested\":1},\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         argus_mqtt_command_t out;
@@ -127,9 +189,9 @@ esp_err_t test_4c_command_decoder_strict_structure(void)
 esp_err_t test_4c_command_decoder_value_contract(void)
 {
     static const char *const invalid_start[] = {
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":false}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":1}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":\"true\"}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":false}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":1}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":\"true\"}",
     };
     for (size_t i = 0; i < sizeof(invalid_start) / sizeof(invalid_start[0]); ++i) {
         argus_mqtt_command_t out;
@@ -138,11 +200,11 @@ esp_err_t test_4c_command_decoder_value_contract(void)
               ARGUS_MQTT_DECODE_OK);
     }
     const char *too_high =
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":200001}";
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":200001}";
     const char *negative =
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":-1}";
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":-1}";
     const char *zero =
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":0}";
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":0}";
     argus_mqtt_command_t out;
     CHECK(argus_mqtt_decode_command(too_high, strlen(too_high),
                                     ARGUS_MQTT_ACTION_SET_TARGET, 200000, &out) !=
@@ -160,13 +222,13 @@ esp_err_t test_4c_command_decoder_value_contract(void)
 esp_err_t test_4c_command_decoder_identity_fields(void)
 {
     static const char *const invalid[] = {
-        "{\"session\":\"0123456789abcdeF\",\"sequence\":1,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":\"short\",\"sequence\":1,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":0,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":01,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":4294967296,\"command_id\":\"x\",\"value\":true}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"\",\"value\":true}",
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"bad/id\",\"value\":true}",
+        "{\"session\":\"0123456789abcdeF\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"short\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":0,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":01,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":4294967296,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"\",\"value\":true}",
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"bad/id\",\"value\":true}",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         argus_mqtt_command_t out;
@@ -186,7 +248,7 @@ esp_err_t test_4c_command_decoder_length_and_nul(void)
                                     ARGUS_MQTT_ACTION_START, 200000, &out) ==
           ARGUS_MQTT_DECODE_TOO_LARGE);
     const char body[] =
-        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"command_id\":\"x\",\"value\":true}";
+        "{\"session\":\"0123456789abcdef\",\"sequence\":1,\"authority_epoch\":0,\"command_id\":\"x\",\"value\":true}";
     char embedded[sizeof(body)];
     memcpy(embedded, body, sizeof(body));
     embedded[10] = '\0';

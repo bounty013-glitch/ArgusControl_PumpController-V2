@@ -105,6 +105,10 @@ typedef struct {
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     uint32_t sequence;
     char command_id[ARGUS_MQTT_COMMAND_ID_MAX + 1U];
+    // Amendment A2.9. REQUIRED. The authority epoch this command is
+    // predicated on, validated against the controller's current epoch before
+    // the sequence is consumed or any state moves.
+    uint32_t authority_epoch;
     argus_mqtt_action_t action;
     int32_t target_rpm_milli;
     bool forward;

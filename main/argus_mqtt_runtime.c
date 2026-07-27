@@ -517,6 +517,23 @@ static void handle_command(const argus_mqtt_broker_message_t *message,
         reject_decoded(&command, "not_authority_holder");
         return;
     }
+    // A2.9 epoch admission. Placed AFTER identity/session/binding and BEFORE
+    // check_sequence(), which is the first thing that consumes state: a
+    // stale-epoch command must not burn a sequence number, touch the cached
+    // result, or reach dispatch. Supplements the checks above, replaces none.
+    //
+    // This catches what the identity gate alone cannot: a principal that lost
+    // authority and later regained it under a NEW epoch would otherwise have a
+    // delayed command from its OWN previous epoch accepted, because identity
+    // and connection binding both match again.
+    if (command.authority_epoch != s_runtime.session.authority_epoch) {
+        uint32_t current = s_runtime.session.authority_epoch;
+        xSemaphoreGive(s_runtime.mutex);
+        ESP_LOGW(TAG, "command rejected: stale authority epoch %" PRIu32
+                 " (current %" PRIu32 ")", command.authority_epoch, current);
+        reject_decoded(&command, "stale_epoch");
+        return;
+    }
     sequence = argus_mqtt_session_check_sequence(
         &s_runtime.session, &command, message->payload);
     if (sequence == ARGUS_MQTT_SEQUENCE_DUPLICATE) {
