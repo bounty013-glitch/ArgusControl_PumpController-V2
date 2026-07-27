@@ -187,6 +187,36 @@ static argus_permission_set_t permission_from_name(const char *name)
     return 0U;
 }
 
+// The permission bits a MACHINE may hold, by name. Exactly the complement of
+// the administrative set actor_can_manage() forbids on a machine, so a UI
+// built from this list cannot offer a capability the service would refuse.
+//
+// Emitted with the machines listing so the portal can render checkboxes
+// without duplicating bit constants in JavaScript. Duplicating them is how a
+// UI ends up offering a permission that does not exist, or silently omitting
+// one that does.
+static const char *const MACHINE_PERMISSION_NAMES[] = {
+    "view_status", "request_authority", "motion",
+    "software_estop", "reset_software_estop", "ack_alarms",
+};
+
+static bool add_permission_names(cJSON *item, argus_permission_set_t set)
+{
+    cJSON *names = cJSON_AddArrayToObject(item, "permission_names");
+    if (names == NULL) return false;
+    for (size_t i = 0U;
+         i < sizeof(MACHINE_PERMISSION_NAMES) / sizeof(MACHINE_PERMISSION_NAMES[0]);
+         ++i) {
+        argus_permission_set_t bit =
+            permission_from_name(MACHINE_PERMISSION_NAMES[i]);
+        if (bit == 0U || (set & bit) == 0U) continue;
+        cJSON *entry = cJSON_CreateString(MACHINE_PERMISSION_NAMES[i]);
+        if (entry == NULL) return false;
+        cJSON_AddItemToArray(names, entry);
+    }
+    return true;
+}
+
 static bool permission_array(
     const cJSON *array, argus_permission_set_t *out)
 {
@@ -1289,6 +1319,7 @@ static esp_err_t machines_get(httpd_req_t *req)
                 item, "api_scope", record->api_scope) != NULL &&
             cJSON_AddStringToObject(
                 item, "permissions", permissions) != NULL &&
+            add_permission_names(item, record->permissions) &&
             cJSON_AddNumberToObject(
                 item, "credential_version",
                 record->credential_version) != NULL &&
