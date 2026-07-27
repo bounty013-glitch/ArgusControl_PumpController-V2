@@ -5527,7 +5527,9 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_seam_unauthorized_principal_never_reaches_arbitration);
     RUN_TEST(test_4c_seam_qos_zero_request_refused);
     RUN_TEST(test_4c_seam_decode_rejects_structure);
-    RUN_TEST(test_4c_seam_decode_documented_laxness);
+    RUN_TEST(test_4c_seam_decode_trailing_comma_now_rejected);
+    RUN_TEST(test_4c_seam_decode_schema_and_request_id_reasons);
+    RUN_TEST(test_4c_seam_decode_intent_enum);
     RUN_TEST(test_4c_seam_decode_rejects_unknown_and_duplicate_fields);
     RUN_TEST(test_4c_seam_decode_rejects_missing_fields);
     RUN_TEST(test_4c_seam_decode_rejects_invalid_values);
@@ -5541,6 +5543,13 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_seam_core_preempts_panel_end_to_end);
     RUN_TEST(test_4c_seam_panel_cannot_preempt_core_end_to_end);
     RUN_TEST(test_4c_seam_denied_paths_preserve_operation);
+    RUN_TEST(test_4c_seam_transfer_unsupported_running_end_to_end);
+    RUN_TEST(test_4c_seam_transfer_unsupported_running_only_gates_the_running_transfer_case);
+    RUN_TEST(test_4c_seam_duplicate_cache_replays_across_interleaving);
+    RUN_TEST(test_4c_seam_duplicate_cache_conflict_vs_replay);
+    RUN_TEST(test_4c_seam_duplicate_cache_is_bounded_and_evicts_fifo);
+    RUN_TEST(test_4c_seam_authority_result_topic_and_schema);
+    RUN_TEST(test_4c_seam_disconnected_lease_reports_truthful_ownership);
     /* Phase 4D.2 security storage, verifier, and local recovery foundation */
     RUN_TEST(test_4d2_permission_ceiling_metadata);
     RUN_TEST(test_4d2_record_schema_validation);

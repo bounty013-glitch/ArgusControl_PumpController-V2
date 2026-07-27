@@ -43,6 +43,11 @@ typedef enum {
     ARGUS_MQTT_DECODE_MISSING_FIELD,
     ARGUS_MQTT_DECODE_INVALID_VALUE,
     ARGUS_MQTT_DECODE_TOO_LARGE,
+    // A2.5 gives these their own wire vocabulary distinct from the generic
+    // invalid_value, because a client reacts differently to "you asked for a
+    // schema version I don't speak" than to "one field failed validation".
+    ARGUS_MQTT_DECODE_SCHEMA_UNSUPPORTED,
+    ARGUS_MQTT_DECODE_INVALID_REQUEST_ID,
 } argus_mqtt_decode_result_t;
 
 typedef enum {
@@ -67,6 +72,10 @@ typedef struct {
     // command/core/ rather than command/pump1/.
     char command_request_authority[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char command_release_authority[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    // A2.1/A2.4. The authority result is a distinct application result from
+    // event/pump1/command_result: an authority request is not a pump command
+    // and must not be reported on the pump's own result channel.
+    char event_authority_result[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_control_owner[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_authority_epoch[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_authority_profile[ARGUS_MQTT_BROKER_TOPIC_CAP];
@@ -152,6 +161,12 @@ typedef enum {
     ARGUS_MQTT_AUTHORITY_DENIED_HELD,       // a higher- or equal-standing holder has it
     ARGUS_MQTT_AUTHORITY_DENIED_PROFILE,    // commissioned profile forbids this client type
     ARGUS_MQTT_AUTHORITY_DENIED_INVALID,    // malformed request
+    // A2.8. An otherwise-admissible ArgusCore transfer from LOCAL_HMI/
+    // SERVICE_TOOL, refused only because the pump is actively driving the
+    // motor. Live running transfer awaits proven bumpless PID tracking; until
+    // then it is deferred, not simulated, and the current owner keeps
+    // authority while the pump keeps running.
+    ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING,
 } argus_mqtt_authority_result_t;
 
 typedef struct {
@@ -225,6 +240,26 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
     const char *machine_id, uint8_t client_type,
     uint8_t authority_profile, bool core_window_open, uint64_t now_ms);
+
+// Thin, additive wrapper around argus_mqtt_session_request_authority() that
+// adds the one machine-state-aware rule the wire contract defines (A2.8):
+// an ArgusCore transfer from LOCAL_HMI/SERVICE_TOOL is refused while the pump
+// is actively driving the motor, without mutating anything. `machine_running`
+// is the caller's own judgement of "actively driving" (STARTING, RUNNING, or
+// DECELERATING) - this core has no state-manager coupling and is not the
+// place that decision belongs.
+//
+// Deliberately NOT folded into the base function: the base function is
+// exercised directly by dozens of existing tests that have no notion of
+// machine state, and every one of them is implicitly "not running", which is
+// still a real and current case (A2.8's "not running" row). Duplicating the
+// arbitration logic here would risk the two drifting; this wrapper delegates
+// entirely to the base function once the running-transfer check clears.
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority_with_state(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, bool machine_running,
+    uint64_t now_ms);
 
 // Voluntary release by the current holder. Advances the epoch, so commands
 // still in flight from the releasing owner become invalid immediately.

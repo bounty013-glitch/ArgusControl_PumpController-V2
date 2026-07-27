@@ -52,6 +52,7 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(heartbeat, "status/supervisor/heartbeat");
     MAKE_TOPIC(command_request_authority, "command/core/request_authority");
     MAKE_TOPIC(command_release_authority, "command/core/release_authority");
+    MAKE_TOPIC(event_authority_result, "event/core/authority_result");
     MAKE_TOPIC(status_control_owner, "status/core/control_owner");
     MAKE_TOPIC(status_authority_epoch, "status/core/authority_epoch");
     MAKE_TOPIC(status_authority_profile, "status/core/authority_profile");
@@ -244,9 +245,17 @@ argus_mqtt_decode_result_t argus_mqtt_decode_heartbeat(
     json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
     if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
     uint8_t fields = 0;
+    // Set only immediately after consuming a comma. A '}' seen while this is
+    // true is a trailing comma, which the contract's "trailing content is
+    // rejected" strictness excludes even though it is not itself trailing -
+    // it is inside the object, but names no field.
+    bool after_comma = false;
     while (true) {
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
         char key[24];
         if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) return ARGUS_MQTT_DECODE_MALFORMED;
         uint8_t bit = 0;
@@ -263,8 +272,9 @@ argus_mqtt_decode_result_t argus_mqtt_decode_heartbeat(
         if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
         if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
         fields |= bit;
+        after_comma = false;
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
         if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
         return ARGUS_MQTT_DECODE_MALFORMED;
     }
@@ -290,9 +300,13 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
     json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
     if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
     uint8_t fields = 0;
+    bool after_comma = false;
     while (true) {
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
         char key[24];
         if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) return ARGUS_MQTT_DECODE_MALFORMED;
         uint8_t bit = 0;
@@ -327,8 +341,9 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
         if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
         if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
         fields |= bit;
+        after_comma = false;
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
         if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
         return ARGUS_MQTT_DECODE_MALFORMED;
     }
@@ -353,6 +368,18 @@ static bool valid_request_id(const char *id)
     return true;
 }
 
+// A2.2: intent is advisory and never affects admission, but an UNSUPPORTED
+// value is still refused rather than silently accepted-and-ignored - a
+// client that misspells or invents an intent should learn that at request
+// time, not discover its audit trail says something it never asked for.
+static bool valid_intent(const char *intent)
+{
+    return strcmp(intent, "OPERATOR_INTENT") == 0 ||
+           strcmp(intent, "SUPERVISORY_START") == 0 ||
+           strcmp(intent, "SERVICE") == 0 ||
+           strcmp(intent, "FALLBACK") == 0;
+}
+
 argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
     const char *payload, size_t payload_len, bool is_release,
     argus_mqtt_authority_request_t *out)
@@ -369,20 +396,32 @@ argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
     json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
     if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
     uint8_t fields = 0;
+    bool after_comma = false;
     while (true) {
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
         char key[24];
         if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) {
             return ARGUS_MQTT_DECODE_MALFORMED;
         }
         uint8_t bit = 0;
         bool valid = false;
+        // A2.5 gives schema and request_id their own rejection reasons,
+        // distinct from the generic invalid_value every other field falls
+        // back to. Defaulted per-field rather than globally so the fallback
+        // stays correct for session/authority_epoch/intent without repeating
+        // this assignment in every branch.
+        argus_mqtt_decode_result_t on_invalid = ARGUS_MQTT_DECODE_INVALID_VALUE;
         if (strcmp(key, "schema") == 0) {
             bit = 1U;
-            valid = parse_u32(&cursor, &decoded.schema);
+            on_invalid = ARGUS_MQTT_DECODE_SCHEMA_UNSUPPORTED;
+            valid = parse_u32(&cursor, &decoded.schema) && decoded.schema == 1U;
         } else if (strcmp(key, "request_id") == 0) {
             bit = 2U;
+            on_invalid = ARGUS_MQTT_DECODE_INVALID_REQUEST_ID;
             valid = parse_string(&cursor, decoded.request_id,
                                  sizeof(decoded.request_id)) &&
                     valid_request_id(decoded.request_id);
@@ -395,16 +434,18 @@ argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
             valid = parse_u32(&cursor, &decoded.authority_epoch);
         } else if (strcmp(key, "intent") == 0) {
             bit = 16U;   // optional
-            valid = parse_string(&cursor, decoded.intent, sizeof(decoded.intent));
+            valid = parse_string(&cursor, decoded.intent, sizeof(decoded.intent)) &&
+                    valid_intent(decoded.intent);
             decoded.has_intent = valid;
         } else {
             return ARGUS_MQTT_DECODE_UNKNOWN_FIELD;
         }
         if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
-        if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
+        if (!valid) return on_invalid;
         fields |= bit;
+        after_comma = false;
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
         if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
         return ARGUS_MQTT_DECODE_MALFORMED;
     }
@@ -412,7 +453,6 @@ argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
     if (cursor.p != cursor.end) return ARGUS_MQTT_DECODE_MALFORMED;
     // 15 = schema|request_id|session|authority_epoch. intent is optional.
     if ((fields & 15U) != 15U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
-    if (decoded.schema != 1U) return ARGUS_MQTT_DECODE_INVALID_VALUE;
     // A2.3: a release must name the epoch it releases. 0 is "no assumption",
     // which is meaningless for a release and is refused.
     if (is_release && decoded.authority_epoch == 0U) {
@@ -567,6 +607,37 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
     core->link = ARGUS_MQTT_LINK_ONLINE;
     advance_epoch(core);
     return ARGUS_MQTT_AUTHORITY_GRANTED;
+}
+
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority_with_state(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, bool machine_running,
+    uint64_t now_ms)
+{
+    // Peeks the same held/preempt facts the base function would compute, and
+    // does so WITHOUT mutating: if this turns out not to be a running
+    // transfer, control falls through to the base function, which performs
+    // its own complete (and independently tested) admission from scratch.
+    // Duplicating that logic here, rather than reusing may_preempt(), would
+    // let the two definitions of "who may take from whom" drift apart.
+    //
+    // The expiry check is repeated from the base function deliberately: a
+    // lease past its deadline is unowned there even before tick() has run,
+    // and this peek must agree, or a legitimately unowned lease (deadline
+    // passed, nobody ticked yet) would be misread as a running transfer and
+    // refused when the base function would in fact have granted it.
+    bool expired = core != NULL &&
+                   (now_ms - core->last_heartbeat_ms) >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS;
+    if (core != NULL && core->lease_machine_id[0] != '\0' && !expired &&
+        !lease_held_by(core, machine_id) &&
+        may_preempt(client_type, core->lease_client_type) &&
+        machine_running) {
+        return ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING;
+    }
+    return argus_mqtt_session_request_authority(
+        core, connection_id, machine_id, client_type, authority_profile,
+        core_window_open, now_ms);
 }
 
 bool argus_mqtt_session_release_authority(

@@ -12,8 +12,20 @@ static bool approved_read_filter(
         return false;
     }
     const char *leaf = filter + root_length + 1U;
+    // A2.1: the result topic sits under event/ deliberately, so an existing
+    // subscriber can widen its filter from the single literal
+    // event/pump1/command_result to event/# and cover both the pump result
+    // and the new event/core/authority_result without a second subscription
+    // - the per-client filter count stays at 5. "event" was previously
+    // absent from this list, so only an exact-literal match to command_result
+    // (via the fallback this replaces) worked; event/# and a direct
+    // subscription to event/core/authority_result both failed closed. Adding
+    // it here, rather than keeping a second special case for the new topic,
+    // is the same rule already applied uniformly to metadata/state/status/
+    // telemetry: category-level wildcard or a single fully-named leaf, never
+    // a mid-path wildcard.
     static const char *const categories[] = {
-        "metadata", "state", "status", "telemetry",
+        "metadata", "state", "status", "telemetry", "event",
     };
     for (size_t i = 0U; i < sizeof(categories) / sizeof(categories[0]); ++i) {
         size_t length = strlen(categories[i]);
@@ -26,7 +38,7 @@ static bool approved_read_filter(
                    remainder[0] != '\0';
         }
     }
-    return strcmp(filter, topics->command_result) == 0;
+    return false;
 }
 
 bool argus_mqtt_security_subscription_allowed(

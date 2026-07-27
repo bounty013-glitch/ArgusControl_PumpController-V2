@@ -5,7 +5,9 @@
 #include <string.h>
 
 #include "argus_mqtt_contract.h"
+#include "argus_mqtt_runtime.h"
 #include "argus_mqtt_security.h"
+#include "argus_state_mgr.h"
 
 #define CHECK(condition) do { if (!(condition)) return ESP_FAIL; } while (0)
 
@@ -1138,11 +1140,23 @@ static argus_mqtt_broker_message_t seam_message(
 
 // The seam itself. Gate order transcribed from argus_mqtt_runtime.c; every
 // call below is the real production function.
+// Correction order §7. This used to reimplement handle_authority_request's
+// gate sequence by hand - correct in what it modelled, but a rename or
+// reorder of the real gates could drift from it silently. It now transcribes
+// only the two gates that genuinely live OUTSIDE argus_mqtt_authority_admit()
+// by design (broker publish admission and the REQUEST_AUTHORITY capability
+// check - both documented as the caller's responsibility in
+// argus_mqtt_runtime.h), calling the real production functions for each, and
+// then calls argus_mqtt_authority_admit() ITSELF - the exact function
+// handle_authority_request calls in production - for everything from
+// decoding onward. A rename or reorder inside admit() is now caught here
+// automatically, because this test runs the same code, not a description of
+// it.
 static seam_outcome_t seam_run(const argus_mqtt_topics_t *topics,
                                argus_mqtt_session_core_t *core,
                                const argus_mqtt_broker_message_t *message,
                                uint8_t profile, bool window_open,
-                               uint64_t now_ms)
+                               bool machine_running, uint64_t now_ms)
 {
     seam_outcome_t out = {
         .stage = SEAM_STAGE_ARBITRATED,
@@ -1159,13 +1173,8 @@ static seam_outcome_t seam_run(const argus_mqtt_topics_t *topics,
         return out;
     }
 
-    // broker_policy_cb. A refusal here still delivers the message, with
-    // policy_admitted cleared, so the handler can audit it.
-    bool admitted =
-        message->policy_admitted &&
-        argus_mqtt_topics_external_publish_allowed(topics, message);
-
-    // handle_message
+    // handle_message's classification, which decides release vs request and
+    // which action a non-authority topic would have been.
     argus_mqtt_action_t action =
         argus_mqtt_topics_classify(topics, message->topic);
     bool release;
@@ -1178,7 +1187,13 @@ static seam_outcome_t seam_run(const argus_mqtt_topics_t *topics,
         return out;
     }
 
-    // handle_authority_request
+    // handle_authority_request's own two pre-admit checks: policy_admitted
+    // (broker_policy_cb's outcome, recomputed here the same way the broker
+    // computes it) and the REQUEST_AUTHORITY capability gate. Both are
+    // documented in argus_mqtt_runtime.h as the caller's job, not admit()'s.
+    bool admitted =
+        message->policy_admitted &&
+        argus_mqtt_topics_external_publish_allowed(topics, message);
     if (!admitted) {
         out.stage = SEAM_STAGE_POLICY;
         return out;
@@ -1188,47 +1203,68 @@ static seam_outcome_t seam_run(const argus_mqtt_topics_t *topics,
         out.stage = SEAM_STAGE_CAPABILITY;
         return out;
     }
-    if (message->retain) {
+
+    // Everything from here on is the REAL production function - not a
+    // transcription of it.
+    argus_mqtt_authority_outcome_t real = argus_mqtt_authority_admit(
+        core, message, release, profile, window_open, machine_running, now_ms);
+
+    switch (real.stage) {
+    case ARGUS_MQTT_AUTHORITY_ADMIT_RETAINED_REFUSED:
         out.stage = SEAM_STAGE_RETAINED;
         return out;
-    }
-    if (message->qos != 1U) {
+    case ARGUS_MQTT_AUTHORITY_ADMIT_QOS_REFUSED:
         out.stage = SEAM_STAGE_QOS;
         return out;
-    }
-
-    out.decode = argus_mqtt_decode_authority_request(
-        message->payload, message->payload_len, release, &out.request);
-    if (out.decode != ARGUS_MQTT_DECODE_OK) {
+    case ARGUS_MQTT_AUTHORITY_ADMIT_DECODE_REJECTED:
         out.stage = SEAM_STAGE_DECODE;
+        out.decode = real.decode;
         return out;
-    }
-    if (strcmp(out.request.session, core->session) != 0) {
+    case ARGUS_MQTT_AUTHORITY_ADMIT_SESSION_MISMATCH:
         out.stage = SEAM_STAGE_SESSION;
         return out;
-    }
-
-    // A2.6 duplicate suppression sits here in production. See the section
-    // header: it is runtime-static state and is deliberately not modelled.
-
-    if (release) {
-        if (out.request.authority_epoch != core->authority_epoch) {
-            out.stage = SEAM_STAGE_STALE_EPOCH;
-            return out;
-        }
-        out.released = argus_mqtt_session_release_authority(
-            core, message->principal.identifier);
+    case ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_STALE_EPOCH:
+        out.stage = SEAM_STAGE_STALE_EPOCH;
+        return out;
+    case ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED:
+        out.stage = SEAM_STAGE_ARBITRATED;
+        out.released = true;
+        return out;
+    case ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_NOT_OWNER:
+        out.stage = SEAM_STAGE_ARBITRATED;
+        out.released = false;
+        return out;
+    case ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED:
+        out.stage = SEAM_STAGE_ARBITRATED;
+        out.arbitration = real.request_result;
+        return out;
+    case ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY:
+    case ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_CONFLICT:
+    default:
+        // The pre-existing seam_outcome_t shape has no slot for these two -
+        // duplicate handling is exercised directly against
+        // argus_mqtt_authority_admit() in its own tests below, which can see
+        // the cached JSON and the CONFLICT/REPLAY distinction that this
+        // narrower struct was never built to carry.
+        out.stage = SEAM_STAGE_ARBITRATED;
         return out;
     }
-
-    out.arbitration = argus_mqtt_session_request_authority(
-        core, message->connection_id, message->principal.identifier,
-        message->principal.client_type, profile, window_open, now_ms);
-    return out;
 }
 
 #define SEAM_REQ_OK \
     "{\"schema\":1,\"request_id\":\"req-1\"," \
+    "\"session\":\"0123456789abcdef\",\"authority_epoch\":0}"
+// A second, distinct request. Needed anywhere a test sends two logically
+// SEPARATE requests in sequence: with the real A2.6 duplicate cache now live
+// (argus_mqtt_authority_admit() calls into it - see the comment on
+// seam_run()), reusing SEAM_REQ_OK's exact bytes for both would make the
+// second call a byte-identical replay of the first's cached result rather
+// than a fresh request, which is not what those tests are exercising.
+#define SEAM_REQ_OK_2 \
+    "{\"schema\":1,\"request_id\":\"req-2\"," \
+    "\"session\":\"0123456789abcdef\",\"authority_epoch\":0}"
+#define SEAM_REQ_OK_3 \
+    "{\"schema\":1,\"request_id\":\"req-3\"," \
     "\"session\":\"0123456789abcdef\",\"authority_epoch\":0}"
 
 static const argus_permission_set_t SEAM_PANEL_PERMS =
@@ -1240,6 +1276,7 @@ static const argus_permission_set_t SEAM_PANEL_PERMS =
 esp_err_t test_4c_seam_authority_topic_permission_map(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     CHECK(argus_mqtt_topics_classify(&topics, topics.command_request_authority) ==
           ARGUS_MQTT_ACTION_REQUEST_AUTHORITY);
@@ -1279,6 +1316,7 @@ esp_err_t test_4c_seam_authority_topic_permission_map(void)
 esp_err_t test_4c_seam_publish_admission_requires_topic_scope(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     argus_machine_principal_t in_scope = seam_principal(
         "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
@@ -1308,6 +1346,7 @@ esp_err_t test_4c_seam_publish_admission_requires_topic_scope(void)
 esp_err_t test_4c_seam_publish_admission_requires_capability(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     argus_machine_principal_t viewer = seam_principal(
         "m-view", HMI_T, ARGUS_PERMISSION_VIEW_STATUS, SEAM_SCOPE);
@@ -1331,6 +1370,7 @@ esp_err_t test_4c_seam_authority_and_motion_are_separate_capabilities(void)
     // Holding authority and being allowed to move the pump are independently
     // granted. Neither implies the other, in either direction.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     argus_machine_principal_t authority_only = seam_principal(
         "m-sup", CORE_T, ARGUS_PERMISSION_REQUEST_AUTHORITY, SEAM_SCOPE);
@@ -1357,6 +1397,7 @@ esp_err_t test_4c_seam_authority_and_motion_are_separate_capabilities(void)
 esp_err_t test_4c_seam_controller_owned_topics_reject_external_publish(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     // The most privileged machine principal the system can express still may
     // not publish controller-owned state. Ownership of a topic is structural,
@@ -1389,6 +1430,7 @@ esp_err_t test_4c_seam_retained_request_refused_before_arbitration(void)
     // on its own account. This test pins WHICH gate fires first, so that
     // removing either one is visible rather than silently tolerated.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -1400,7 +1442,7 @@ esp_err_t test_4c_seam_retained_request_refused_before_arbitration(void)
     message.retain = true;
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 100U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_POLICY);
     CHECK(seam_unchanged(&before, &core));
     CHECK(core.authority_epoch == 0U);
@@ -1421,6 +1463,7 @@ esp_err_t test_4c_seam_retained_request_refused_before_arbitration(void)
 esp_err_t test_4c_seam_malformed_transport_refused_at_broker(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -1434,7 +1477,7 @@ esp_err_t test_4c_seam_malformed_transport_refused_at_broker(void)
     nul_message.payload[8] = '\0';
     seam_image_t before = seam_capture(&core);
     seam_outcome_t out =
-        seam_run(&topics, &core, &nul_message, P_ALONE, false, 100U);
+        seam_run(&topics, &core, &nul_message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_POLICY);
     CHECK(seam_unchanged(&before, &core));
 
@@ -1442,7 +1485,7 @@ esp_err_t test_4c_seam_malformed_transport_refused_at_broker(void)
     argus_mqtt_broker_message_t big_message = seam_message(
         topics.command_request_authority, SEAM_REQ_OK, &panel);
     big_message.payload_len = sizeof(big_message.payload);
-    out = seam_run(&topics, &core, &big_message, P_ALONE, false, 100U);
+    out = seam_run(&topics, &core, &big_message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_POLICY);
     CHECK(seam_unchanged(&before, &core));
 
@@ -1450,7 +1493,7 @@ esp_err_t test_4c_seam_malformed_transport_refused_at_broker(void)
     // and is refused before scope is even consulted.
     argus_mqtt_broker_message_t wildcard = seam_message(
         "argus/paladin/pump_001/command/core/+", SEAM_REQ_OK, &panel);
-    out = seam_run(&topics, &core, &wildcard, P_ALONE, false, 100U);
+    out = seam_run(&topics, &core, &wildcard, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_PUBLISH_AUTHZ);
     CHECK(seam_unchanged(&before, &core));
     CHECK(seam_assert_operational_state(&core) == ESP_OK);
@@ -1463,6 +1506,7 @@ esp_err_t test_4c_seam_unauthorized_principal_never_reaches_arbitration(void)
     // capability is stopped at the broker, so the arbitration core is never
     // called at all - not called and refused, but never called.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -1473,7 +1517,7 @@ esp_err_t test_4c_seam_unauthorized_principal_never_reaches_arbitration(void)
         topics.command_request_authority, SEAM_REQ_OK, &viewer);
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 100U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_PUBLISH_AUTHZ);
     CHECK(seam_unchanged(&before, &core));
     CHECK(core.authority_epoch == 0U);
@@ -1483,7 +1527,7 @@ esp_err_t test_4c_seam_unauthorized_principal_never_reaches_arbitration(void)
         "m-other", HMI_T, SEAM_PANEL_PERMS, "argus/paladin/pump_002");
     argus_mqtt_broker_message_t foreign_message = seam_message(
         topics.command_request_authority, SEAM_REQ_OK, &foreign);
-    out = seam_run(&topics, &core, &foreign_message, P_ALONE, false, 100U);
+    out = seam_run(&topics, &core, &foreign_message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_PUBLISH_AUTHZ);
     CHECK(seam_unchanged(&before, &core));
 
@@ -1501,6 +1545,7 @@ esp_err_t test_4c_seam_unauthorized_principal_never_reaches_arbitration(void)
 esp_err_t test_4c_seam_qos_zero_request_refused(void)
 {
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -1512,7 +1557,7 @@ esp_err_t test_4c_seam_qos_zero_request_refused(void)
     message.qos = 0U;
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 100U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_QOS);
     CHECK(seam_unchanged(&before, &core));
     CHECK(core.authority_epoch == 0U);
@@ -1550,53 +1595,153 @@ esp_err_t test_4c_seam_decode_rejects_structure(void)
     return ESP_OK;
 }
 
-esp_err_t test_4c_seam_decode_documented_laxness(void)
+esp_err_t test_4c_seam_decode_trailing_comma_now_rejected(void)
 {
-    // Two places where the decoder is more permissive than "strict" implies.
-    // Both are asserted here deliberately, as the CURRENT behaviour, so that
-    // they are visible in the suite instead of living only in someone's head.
-    // Neither is a hole - every field is still bounded, typed and validated,
-    // and nothing here lets an unintended value through - but neither is
-    // strict JSON either, and if the contract is meant to be exact then this
-    // is what would have to change.
+    // Correction order §6. This decoder used to accept a trailing comma
+    // before the closing brace - not strict JSON, even though every field
+    // was still bounded, typed and validated once reached. The independent
+    // review called this out and the contract's own strictness language
+    // ("trailing content is rejected") gives no exception for it. Fixed for
+    // all three decoders that share this parsing shape (heartbeat, command,
+    // authority request); this test pins the authority-request case, which
+    // is the one the correction order named.
     argus_mqtt_authority_request_t out;
 
-    // 1. A trailing comma before the closing brace is accepted.
     const char *trailing_comma =
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
         "\"authority_epoch\":1,}";
     CHECK(argus_mqtt_decode_authority_request(
               trailing_comma, strlen(trailing_comma), false, &out) ==
-          ARGUS_MQTT_DECODE_OK);
-    CHECK(out.authority_epoch == 1U);
+          ARGUS_MQTT_DECODE_MALFORMED);
 
-    // 2. Trailing whitespace after the closing brace is accepted.
+    // A comma after EVERY field, not just the last, is equally a trailing
+    // comma the moment it precedes the close.
+    const char *trailing_comma_single_field = "{\"schema\":1,}";
+    CHECK(argus_mqtt_decode_authority_request(
+              trailing_comma_single_field, strlen(trailing_comma_single_field),
+              false, &out) == ARGUS_MQTT_DECODE_MALFORMED);
+
+    // A release with a trailing comma is malformed for the same structural
+    // reason, before the release-specific epoch rule is ever reached.
+    const char *trailing_comma_release =
+        "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
+        "\"authority_epoch\":1,}";
+    CHECK(argus_mqtt_decode_authority_request(
+              trailing_comma_release, strlen(trailing_comma_release),
+              true, &out) == ARGUS_MQTT_DECODE_MALFORMED);
+
+    // Trailing whitespace AFTER the closing brace is a different thing from
+    // a trailing comma INSIDE the object, and remains explicitly permitted -
+    // MQTT payloads are not always trimmed by every publisher, and nothing
+    // about that whitespace could ever be misread as content.
     const char *trailing_space =
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
         "\"authority_epoch\":1}  ";
     CHECK(argus_mqtt_decode_authority_request(
               trailing_space, strlen(trailing_space), false, &out) ==
           ARGUS_MQTT_DECODE_OK);
+    CHECK(out.authority_epoch == 1U);
 
-    // What matters is that laxness stops at the shape. A trailing comma does
-    // not excuse a missing required field, and does not relax any value rule.
-    const char *lax_but_incomplete = "{\"schema\":1,}";
-    CHECK(argus_mqtt_decode_authority_request(
-              lax_but_incomplete, strlen(lax_but_incomplete), false, &out) ==
-          ARGUS_MQTT_DECODE_MISSING_FIELD);
-    const char *lax_but_invalid =
+    // A comma is legal BETWEEN two real fields - only a comma immediately
+    // followed by the close is the defect.
+    const char *interior_comma =
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":-1,}";
+        "\"authority_epoch\":1}";
     CHECK(argus_mqtt_decode_authority_request(
-              lax_but_invalid, strlen(lax_but_invalid), false, &out) ==
+              interior_comma, strlen(interior_comma), false, &out) ==
+          ARGUS_MQTT_DECODE_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_decode_schema_and_request_id_reasons(void)
+{
+    // Correction order §6: schema and request_id failures get their own
+    // A2.5 wire reasons rather than falling into the generic invalid_value
+    // every other field's failure uses.
+    argus_mqtt_authority_request_t out;
+
+    static const char *const bad_schema[] = {
+        "{\"schema\":0,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
+        "\"authority_epoch\":1}",
+        "{\"schema\":2,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
+        "\"authority_epoch\":1}",
+        "{\"schema\":true,\"request_id\":\"r\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
+    };
+    for (size_t i = 0; i < sizeof(bad_schema) / sizeof(bad_schema[0]); ++i) {
+        CHECK(argus_mqtt_decode_authority_request(
+                  bad_schema[i], strlen(bad_schema[i]), false, &out) ==
+              ARGUS_MQTT_DECODE_SCHEMA_UNSUPPORTED);
+    }
+
+    static const char *const bad_request_id[] = {
+        "{\"schema\":1,\"request_id\":\"\",\"session\":\"0123456789abcdef\","
+        "\"authority_epoch\":1}",
+        "{\"schema\":1,\"request_id\":\"bad/id\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
+        "{\"schema\":1,\"request_id\":\"bad id\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
+        "{\"schema\":1,\"request_id\":7,\"session\":\"0123456789abcdef\","
+        "\"authority_epoch\":1}",
+    };
+    for (size_t i = 0; i < sizeof(bad_request_id) / sizeof(bad_request_id[0]); ++i) {
+        CHECK(argus_mqtt_decode_authority_request(
+                  bad_request_id[i], strlen(bad_request_id[i]), false, &out) ==
+              ARGUS_MQTT_DECODE_INVALID_REQUEST_ID);
+    }
+
+    // session and authority_epoch still fall through to the generic reason -
+    // only schema and request_id were named in the correction order.
+    const char *bad_session =
+        "{\"schema\":1,\"request_id\":\"r\",\"session\":\"nothex\","
+        "\"authority_epoch\":1}";
+    CHECK(argus_mqtt_decode_authority_request(
+              bad_session, strlen(bad_session), false, &out) ==
           ARGUS_MQTT_DECODE_INVALID_VALUE);
-    // And a release with a trailing comma still must name its epoch.
-    const char *lax_release =
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_decode_intent_enum(void)
+{
+    // A2.2: intent is optional, advisory, and never affects admission - but
+    // an unsupported value is refused rather than silently accepted and
+    // ignored.
+    argus_mqtt_authority_request_t out;
+    static const char *const supported[] = {
+        "OPERATOR_INTENT", "SUPERVISORY_START", "SERVICE", "FALLBACK",
+    };
+    for (size_t i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i) {
+        char body[160];
+        snprintf(body, sizeof(body),
+            "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
+            "\"authority_epoch\":1,\"intent\":\"%s\"}", supported[i]);
+        CHECK(argus_mqtt_decode_authority_request(
+                  body, strlen(body), false, &out) == ARGUS_MQTT_DECODE_OK);
+        CHECK(out.has_intent && strcmp(out.intent, supported[i]) == 0);
+    }
+
+    static const char *const unsupported[] = {
+        "operator_intent",   // case matters
+        "OPERATOR",
+        "URGENT",
+        "",
+    };
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i) {
+        char body[160];
+        snprintf(body, sizeof(body),
+            "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
+            "\"authority_epoch\":1,\"intent\":\"%s\"}", unsupported[i]);
+        CHECK(argus_mqtt_decode_authority_request(
+                  body, strlen(body), false, &out) == ARGUS_MQTT_DECODE_INVALID_VALUE);
+    }
+
+    // Absent entirely: still valid, still optional.
+    const char *no_intent =
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":0,}";
+        "\"authority_epoch\":1}";
     CHECK(argus_mqtt_decode_authority_request(
-              lax_release, strlen(lax_release), true, &out) ==
-          ARGUS_MQTT_DECODE_INVALID_VALUE);
+              no_intent, strlen(no_intent), false, &out) == ARGUS_MQTT_DECODE_OK);
+    CHECK(!out.has_intent);
     return ESP_OK;
 }
 
@@ -1677,13 +1822,12 @@ esp_err_t test_4c_seam_decode_rejects_missing_fields(void)
 
 esp_err_t test_4c_seam_decode_rejects_invalid_values(void)
 {
+    // Schema and request_id failures moved to their own dedicated reasons -
+    // see test_4c_seam_decode_schema_and_request_id_reasons(). What remains
+    // here is every value-shape failure that still falls through to the
+    // generic invalid_value, per A2.5.
     argus_mqtt_authority_request_t out;
     static const char *const invalid[] = {
-        // schema is pinned to 1; an unknown version is refused, not guessed at
-        "{\"schema\":0,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":1}",
-        "{\"schema\":2,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":1}",
         // session must be exactly 16 lowercase hex digits
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789ABCDEF\","
         "\"authority_epoch\":1}",
@@ -1695,13 +1839,6 @@ esp_err_t test_4c_seam_decode_rejects_invalid_values(void)
         "\"authority_epoch\":1}",
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"\","
         "\"authority_epoch\":1}",
-        // request_id character set
-        "{\"schema\":1,\"request_id\":\"\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":1}",
-        "{\"schema\":1,\"request_id\":\"bad/id\","
-        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
-        "{\"schema\":1,\"request_id\":\"bad id\","
-        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
         // numbers are unsigned integers, nothing else
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
         "\"authority_epoch\":-1}",
@@ -1715,11 +1852,6 @@ esp_err_t test_4c_seam_decode_rejects_invalid_values(void)
         "\"authority_epoch\":\"1\"}",
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
         "\"authority_epoch\":null}",
-        // types are not coerced
-        "{\"schema\":true,\"request_id\":\"r\","
-        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}",
-        "{\"schema\":1,\"request_id\":7,\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":1}",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         CHECK(argus_mqtt_decode_authority_request(
@@ -1814,6 +1946,7 @@ esp_err_t test_4c_seam_rejection_matrix_never_mutates_arbitration(void)
     // or disturbed the accepted setpoint would fail here regardless of which
     // path produced it.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
 
@@ -1866,14 +1999,14 @@ esp_err_t test_4c_seam_rejection_matrix_never_mutates_arbitration(void)
         argus_mqtt_broker_message_t as_request = seam_message(
             topics.command_request_authority, rejected[i], &challenger);
         seam_outcome_t out =
-            seam_run(&topics, &core, &as_request, P_ALONE, false, 200U);
+            seam_run(&topics, &core, &as_request, P_ALONE, false, false, 200U);
         CHECK(out.stage == SEAM_STAGE_DECODE);
         CHECK(out.decode != ARGUS_MQTT_DECODE_OK);
         CHECK(seam_unchanged(&before, &core));
 
         argus_mqtt_broker_message_t as_release = seam_message(
             topics.command_release_authority, rejected[i], &panel);
-        out = seam_run(&topics, &core, &as_release, P_ALONE, false, 200U);
+        out = seam_run(&topics, &core, &as_release, P_ALONE, false, false, 200U);
         CHECK(out.stage == SEAM_STAGE_DECODE);
         CHECK(out.decode != ARGUS_MQTT_DECODE_OK);
         CHECK(seam_unchanged(&before, &core));
@@ -1883,7 +2016,7 @@ esp_err_t test_4c_seam_rejection_matrix_never_mutates_arbitration(void)
     argus_mqtt_broker_message_t zero_release = seam_message(
         topics.command_release_authority, SEAM_REQ_OK, &panel);
     seam_outcome_t out =
-        seam_run(&topics, &core, &zero_release, P_ALONE, false, 200U);
+        seam_run(&topics, &core, &zero_release, P_ALONE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_DECODE);
     CHECK(out.decode == ARGUS_MQTT_DECODE_INVALID_VALUE);
     CHECK(seam_unchanged(&before, &core));
@@ -1902,6 +2035,7 @@ esp_err_t test_4c_seam_session_mismatch_rejected_before_arbitration(void)
     // is what stops a request composed before a controller restart from taking
     // effect after it.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -1915,7 +2049,7 @@ esp_err_t test_4c_seam_session_mismatch_rejected_before_arbitration(void)
         topics.command_request_authority, stale_session, &panel);
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 100U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_SESSION);
     CHECK(seam_unchanged(&before, &core));
     CHECK(core.authority_epoch == 0U);
@@ -1930,6 +2064,7 @@ esp_err_t test_4c_seam_release_stale_epoch_preserves_owner(void)
     // current is refused, so a release that was in flight across a transfer
     // cannot release the new owner's authority.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
@@ -1946,7 +2081,7 @@ esp_err_t test_4c_seam_release_stale_epoch_preserves_owner(void)
         topics.command_release_authority, wrong_epoch, &panel);
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 200U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_STALE_EPOCH);
     CHECK(!out.released);
     CHECK(seam_unchanged(&before, &core));
@@ -1959,7 +2094,7 @@ esp_err_t test_4c_seam_release_stale_epoch_preserves_owner(void)
         "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}";
     argus_mqtt_broker_message_t good = seam_message(
         topics.command_release_authority, right_epoch, &panel);
-    out = seam_run(&topics, &core, &good, P_ALONE, false, 300U);
+    out = seam_run(&topics, &core, &good, P_ALONE, false, false, 300U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(out.released);
     CHECK(core.authority_epoch == 2U);          // ownership changed
@@ -1974,6 +2109,7 @@ esp_err_t test_4c_seam_release_by_non_owner_refused(void)
     // Releasing someone else's authority is not a thing any client may do,
     // even one that is otherwise fully permitted and names the correct epoch.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
@@ -1989,7 +2125,7 @@ esp_err_t test_4c_seam_release_by_non_owner_refused(void)
         topics.command_release_authority, body, &stranger);
 
     seam_image_t before = seam_capture(&core);
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 200U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(!out.released);
     CHECK(seam_unchanged(&before, &core));
@@ -2006,6 +2142,7 @@ esp_err_t test_4c_seam_request_granted_end_to_end(void)
     // The one path that is supposed to work, exercised the whole way through:
     // scoped and permitted panel, well-formed request, standalone profile.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     seam_load_operational_state(&core);
@@ -2015,7 +2152,7 @@ esp_err_t test_4c_seam_request_granted_end_to_end(void)
     argus_mqtt_broker_message_t message = seam_message(
         topics.command_request_authority, SEAM_REQ_OK, &panel);
 
-    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, 100U);
+    seam_outcome_t out = seam_run(&topics, &core, &message, P_ALONE, false, false, 100U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(out.decode == ARGUS_MQTT_DECODE_OK);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_GRANTED);
@@ -2029,11 +2166,14 @@ esp_err_t test_4c_seam_request_granted_end_to_end(void)
 
     // Re-requesting from the same identity rebinds but does not advance the
     // epoch: nothing changed hands, and a bump would invalidate our own
-    // in-flight commands.
+    // in-flight commands. A distinct request_id: a real second acquisition
+    // attempt is a new request, not a redelivery of the first, and reusing
+    // SEAM_REQ_OK here would now be caught as an exact A2.6 replay of the
+    // first call's cached GRANTED result instead of being freshly evaluated.
     argus_mqtt_broker_message_t again = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &panel);
+        topics.command_request_authority, SEAM_REQ_OK_2, &panel);
     again.connection_id = 12U;
-    out = seam_run(&topics, &core, &again, P_ALONE, false, 200U);
+    out = seam_run(&topics, &core, &again, P_ALONE, false, false, 200U);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
     CHECK(core.authority_epoch == 1U);
     CHECK(core.lease_connection_id == 12U);
@@ -2046,6 +2186,7 @@ esp_err_t test_4c_seam_core_preempts_panel_end_to_end(void)
     // ArgusCore may request a transfer from the panel and the controller
     // adjudicates it. Run through the whole seam rather than the core alone.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
 
@@ -2057,15 +2198,17 @@ esp_err_t test_4c_seam_core_preempts_panel_end_to_end(void)
     argus_mqtt_broker_message_t panel_request = seam_message(
         topics.command_request_authority, SEAM_REQ_OK, &panel);
     seam_outcome_t out =
-        seam_run(&topics, &core, &panel_request, P_CORE, false, 100U);
+        seam_run(&topics, &core, &panel_request, P_CORE, false, false, 100U);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_GRANTED);
     CHECK(core.authority_epoch == 1U);
     seam_load_operational_state(&core);
 
+    // A distinct request_id: this is ArgusCore's own separate request, not a
+    // redelivery of the panel's.
     argus_mqtt_broker_message_t core_request = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &argus_core);
+        topics.command_request_authority, SEAM_REQ_OK_2, &argus_core);
     core_request.connection_id = 12U;
-    out = seam_run(&topics, &core, &core_request, P_CORE, false, 200U);
+    out = seam_run(&topics, &core, &core_request, P_CORE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_GRANTED);
     CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
@@ -2084,6 +2227,7 @@ esp_err_t test_4c_seam_panel_cannot_preempt_core_end_to_end(void)
     // from a healthy ArgusCore lease. Same permissions, same scope, same
     // well-formed request - refused on the commissioned policy alone.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
 
@@ -2095,16 +2239,18 @@ esp_err_t test_4c_seam_panel_cannot_preempt_core_end_to_end(void)
     argus_mqtt_broker_message_t core_request = seam_message(
         topics.command_request_authority, SEAM_REQ_OK, &argus_core);
     seam_outcome_t out =
-        seam_run(&topics, &core, &core_request, P_CORE, false, 100U);
+        seam_run(&topics, &core, &core_request, P_CORE, false, false, 100U);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_GRANTED);
     seam_load_operational_state(&core);
     CHECK(core.authority_epoch == 1U);
 
+    // Distinct request_id, same reason as above: a separate request, not a
+    // redelivery of ArgusCore's.
     argus_mqtt_broker_message_t panel_request = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &panel);
+        topics.command_request_authority, SEAM_REQ_OK_2, &panel);
     panel_request.connection_id = 12U;
     seam_image_t before = seam_capture(&core);
-    out = seam_run(&topics, &core, &panel_request, P_CORE, false, 200U);
+    out = seam_run(&topics, &core, &panel_request, P_CORE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
     CHECK(seam_unchanged(&before, &core));
@@ -2119,6 +2265,7 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
     // Every arbitration refusal, through the seam, against a running pump.
     // A denial is a denial of ownership, never an interruption of operation.
     CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
 
     // DENIED_PROFILE - an ArgusCore against a unit commissioned standalone.
     argus_mqtt_session_core_t standalone;
@@ -2135,7 +2282,7 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
 
     seam_image_t before = seam_capture(&standalone);
     seam_outcome_t out =
-        seam_run(&topics, &standalone, &core_request, P_ALONE, false, 200U);
+        seam_run(&topics, &standalone, &core_request, P_ALONE, false, false, 200U);
     CHECK(out.stage == SEAM_STAGE_ARBITRATED);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
     CHECK(seam_unchanged(&before, &standalone));
@@ -2148,11 +2295,17 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
     seam_load_operational_state(&windowed);
     argus_machine_principal_t panel = seam_principal(
         "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    // Distinct request_id: each of these three is an independent scenario
+    // against a different session core, and the A2.6 duplicate cache is
+    // keyed on (session, request_id) alone - it has no notion of `core`.
+    // Reusing SEAM_REQ_OK across scenarios within this one test would make
+    // the second and third calls exact-payload replays of the first's
+    // cached (denied) result rather than fresh evaluations.
     argus_mqtt_broker_message_t panel_request = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &panel);
+        topics.command_request_authority, SEAM_REQ_OK_2, &panel);
 
     before = seam_capture(&windowed);
-    out = seam_run(&topics, &windowed, &panel_request, P_CORE, true, 100U);
+    out = seam_run(&topics, &windowed, &panel_request, P_CORE, true, false, 100U);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
     CHECK(seam_unchanged(&before, &windowed));
     CHECK(windowed.authority_epoch == 0U);
@@ -2168,15 +2321,375 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
     argus_machine_principal_t second_panel = seam_principal(
         "m-panel-2", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
     argus_mqtt_broker_message_t second_request = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &second_panel);
+        topics.command_request_authority, SEAM_REQ_OK_3, &second_panel);
     second_request.connection_id = 13U;
 
     before = seam_capture(&held);
-    out = seam_run(&topics, &held, &second_request, P_ALONE, false, 200U);
+    out = seam_run(&topics, &held, &second_request, P_ALONE, false, false, 200U);
     CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
     CHECK(seam_unchanged(&before, &held));
     CHECK(strcmp(held.lease_machine_id, "m-panel") == 0);
     CHECK(held.authority_epoch == 1U);
     CHECK(seam_assert_operational_state(&held) == ESP_OK);
+    return ESP_OK;
+}
+
+// ===========================================================================
+// Independent-review correction order - additional §9 seam coverage.
+//
+// Everything below exercises production surface added or corrected by that
+// pass: the machine-state-aware transfer rule (A2.8), the bounded A2.6
+// duplicate cache with real interleaving, the event/core/authority_result
+// schema and topic, and the disconnected-but-unexpired truthful-ownership
+// fix (A2.11). All of it goes through argus_mqtt_authority_admit() directly
+// - the real production function - or through argus_mqtt_authority_status_snapshot's
+// pure sibling, not a reimplementation.
+// ===========================================================================
+
+esp_err_t test_4c_seam_transfer_unsupported_running_end_to_end(void)
+{
+    // A2.8: ArgusCore may take over from the panel while the pump is NOT
+    // running (already covered by test_4c_seam_core_preempts_panel_end_to_end).
+    // While it IS running, the same request must be refused with zero
+    // mutation, and the pump must keep running - live running transfer
+    // awaits proven bumpless PID tracking and is deferred, not simulated.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_CORE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    seam_load_operational_state(&core);
+    CHECK(core.authority_epoch == 1U);
+
+    argus_machine_principal_t argus_core = seam_principal(
+        "m-core", CORE_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_mqtt_broker_message_t core_request = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &argus_core);
+    core_request.connection_id = 12U;
+
+    seam_image_t before = seam_capture(&core);
+    argus_mqtt_authority_outcome_t out = argus_mqtt_authority_admit(
+        &core, &core_request, false, P_CORE, false, /*machine_running=*/true, 200U);
+    CHECK(out.stage == ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING);
+    CHECK(seam_unchanged(&before, &core));
+    CHECK(strcmp(core.lease_machine_id, "m-panel") == 0);
+    CHECK(core.authority_epoch == 1U);
+    CHECK(seam_assert_operational_state(&core) == ESP_OK);
+
+    // The published result names the exact A2.5 reason string.
+    CHECK(strstr(out.result_json, "\"reason\":\"transfer_unsupported_running\"") != NULL);
+    CHECK(strstr(out.result_json, "\"outcome\":\"REJECTED\"") != NULL);
+
+    // The instant the pump stops, the identical request (a fresh
+    // request_id - see the SEAM_REQ_OK_2 comment) is admissible.
+    seam_load_operational_state(&core);   // re-affirm cached state is untouched
+    argus_mqtt_broker_message_t retry = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK_2, &argus_core);
+    retry.connection_id = 12U;
+    out = argus_mqtt_authority_admit(&core, &retry, false, P_CORE, false,
+                                     /*machine_running=*/false, 300U);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.authority_epoch == 2U);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_transfer_unsupported_running_only_gates_the_running_transfer_case(void)
+{
+    // The running check must not leak into cases A2.8 does not name: a
+    // same-principal re-request while running (not a transfer at all), and
+    // a same-or-higher-standing denial that was already going to be refused
+    // for an unrelated reason (denied_held_by_other), must both be
+    // unaffected by machine_running.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    seam_load_operational_state(&core);
+
+    // Same principal, running: not a transfer, must still rebind cleanly.
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_mqtt_broker_message_t same_principal = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel);
+    same_principal.connection_id = 12U;
+    argus_mqtt_authority_outcome_t out = argus_mqtt_authority_admit(
+        &core, &same_principal, false, P_ALONE, false, /*machine_running=*/true, 200U);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
+    CHECK(core.authority_epoch == 1U);
+
+    // A second HMI/service principal (not ArgusCore) may never preempt at
+    // all, running or not - may_preempt() only admits ARGUSCORE as
+    // requester, so this stays DENIED_HELD rather than becoming
+    // TRANSFER_UNSUPPORTED_RUNNING.
+    argus_machine_principal_t other_panel = seam_principal(
+        "m-panel-2", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_mqtt_broker_message_t other_request = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK_2, &other_panel);
+    other_request.connection_id = 13U;
+    out = argus_mqtt_authority_admit(&core, &other_request, false, P_ALONE,
+                                     false, /*machine_running=*/true, 300U);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
+    CHECK(strcmp(core.lease_machine_id, "m-panel") == 0);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_duplicate_cache_replays_across_interleaving(void)
+{
+    // Correction order §5. The single-slot cache this replaced could only
+    // remember the ONE most recently seen (session, request_id): request A,
+    // then request B, then a redelivery of A would have B silently evict A's
+    // remembered entry, so the redelivery would be re-arbitrated instead of
+    // replayed - exactly what A2.6 forbids. This proves the bounded
+    // multi-entry cache preserves A2.6 across that interleaving.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+
+    argus_machine_principal_t panel_a = seam_principal(
+        "m-panel-a", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_machine_principal_t panel_b = seam_principal(
+        "m-panel-b", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+
+    // Request A grants.
+    argus_mqtt_broker_message_t req_a = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel_a);
+    req_a.connection_id = 11U;
+    argus_mqtt_authority_outcome_t out_a = argus_mqtt_authority_admit(
+        &core, &req_a, false, P_ALONE, false, false, 100U);
+    CHECK(out_a.stage == ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED);
+    CHECK(out_a.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(strcmp(core.lease_machine_id, "m-panel-a") == 0);
+    CHECK(core.authority_epoch == 1U);
+
+    // Request B, a DIFFERENT request_id, interleaves - DENIED_HELD (panel_b
+    // cannot preempt panel_a), which is itself now cached.
+    argus_mqtt_broker_message_t req_b = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK_2, &panel_b);
+    req_b.connection_id = 12U;
+    argus_mqtt_authority_outcome_t out_b = argus_mqtt_authority_admit(
+        &core, &req_b, false, P_ALONE, false, false, 150U);
+    CHECK(out_b.request_result == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
+
+    // A QoS 1 redelivery of A - byte-identical payload, same principal,
+    // arriving AFTER B. Must replay A's ORIGINAL cached GRANTED result
+    // without re-arbitrating - critically, without this being misread as
+    // "panel_a re-requesting while holding" (which would read ALREADY_HELD,
+    // a DIFFERENT outcome) and without B's intervening request having
+    // evicted A's entry.
+    seam_image_t before = seam_capture(&core);
+    argus_mqtt_broker_message_t req_a_redelivered = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel_a);
+    req_a_redelivered.connection_id = 99U;   // even a different transport connection
+    argus_mqtt_authority_outcome_t replay = argus_mqtt_authority_admit(
+        &core, &req_a_redelivered, false, P_ALONE, false, false, 200U);
+    CHECK(replay.stage == ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY);
+    CHECK(strcmp(replay.result_json, out_a.result_json) == 0);
+    // No arbitration occurred: byte-identical to the core state after A was
+    // granted and B was denied, connection_id 99 never bound to anything.
+    CHECK(seam_unchanged(&before, &core));
+    CHECK(core.lease_connection_id == 11U);
+
+    // A redelivery of B likewise replays B's cached DENIED_HELD result, not
+    // a fresh (and by now different, since A still holds) re-arbitration.
+    argus_mqtt_broker_message_t req_b_redelivered = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK_2, &panel_b);
+    argus_mqtt_authority_outcome_t replay_b = argus_mqtt_authority_admit(
+        &core, &req_b_redelivered, false, P_ALONE, false, false, 250U);
+    CHECK(replay_b.stage == ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY);
+    CHECK(strcmp(replay_b.result_json, out_b.result_json) == 0);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_duplicate_cache_conflict_vs_replay(void)
+{
+    // Same (session, request_id), DIFFERENT payload bytes: A2.6's
+    // duplicate_conflict, not a replay. A request_id is not reusable for a
+    // different request.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+
+    argus_mqtt_broker_message_t original = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel);
+    argus_mqtt_authority_outcome_t out = argus_mqtt_authority_admit(
+        &core, &original, false, P_ALONE, false, false, 100U);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+
+    const char *conflicting =
+        "{\"schema\":1,\"request_id\":\"req-1\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":0,"
+        "\"intent\":\"SERVICE\"}";
+    argus_mqtt_broker_message_t conflict_message = seam_message(
+        topics.command_request_authority, conflicting, &panel);
+    seam_image_t before = seam_capture(&core);
+    argus_mqtt_authority_outcome_t conflict = argus_mqtt_authority_admit(
+        &core, &conflict_message, false, P_ALONE, false, false, 150U);
+    CHECK(conflict.stage == ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_CONFLICT);
+    CHECK(strstr(conflict.result_json, "\"reason\":\"duplicate_conflict\"") != NULL);
+    CHECK(seam_unchanged(&before, &core));
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_duplicate_cache_is_bounded_and_evicts_fifo(void)
+{
+    // §5: memory is explicitly bounded. This proves the bound is real - a
+    // (session, request_id) beyond the cache's capacity displaces the
+    // OLDEST entry - and documents the accepted consequence: a redelivery
+    // of that displaced request is no longer recognized and is
+    // re-arbitrated rather than replayed. Re-arbitration is safe (full
+    // admission runs again); it is simply not the A2.6-idempotent path.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+
+    // The cache holds 8. Fill it with 8 distinct, cache-populating requests
+    // (releases naming the wrong epoch decode fine and populate the cache
+    // without disturbing ownership, which keeps this test's setup simple).
+    for (uint32_t i = 0; i < 8U; ++i) {
+        char body[160];
+        snprintf(body, sizeof(body),
+            "{\"schema\":1,\"request_id\":\"fill-%lu\","
+            "\"session\":\"0123456789abcdef\",\"authority_epoch\":99}",
+            (unsigned long)i);
+        argus_mqtt_broker_message_t filler = seam_message(
+            topics.command_release_authority, body, &panel);
+        argus_mqtt_authority_outcome_t filled = argus_mqtt_authority_admit(
+            &core, &filler, true, P_ALONE, false, false, 200U + i);
+        CHECK(filled.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_STALE_EPOCH);
+    }
+
+    // "fill-0" was the first entry stored and is now the oldest. A 9th
+    // distinct key evicts it.
+    const char *ninth =
+        "{\"schema\":1,\"request_id\":\"fill-8\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":99}";
+    argus_mqtt_broker_message_t ninth_message = seam_message(
+        topics.command_release_authority, ninth, &panel);
+    argus_mqtt_authority_outcome_t ninth_out = argus_mqtt_authority_admit(
+        &core, &ninth_message, true, P_ALONE, false, false, 210U);
+    CHECK(ninth_out.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_STALE_EPOCH);
+
+    // A redelivery of "fill-0" no longer finds a cached entry - it is
+    // re-evaluated (still STALE_EPOCH on its own merits, since epoch 99 is
+    // still wrong; the point is that it is EVALUATED, not that a lookup ever
+    // ran), rather than being recognized as a replay. Confirmed the only way
+    // observable from outside the cache itself: still gets the correct
+    // answer, still zero mutation.
+    seam_image_t before = seam_capture(&core);
+    const char *fill_zero_again =
+        "{\"schema\":1,\"request_id\":\"fill-0\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":99}";
+    argus_mqtt_broker_message_t redelivered = seam_message(
+        topics.command_release_authority, fill_zero_again, &panel);
+    argus_mqtt_authority_outcome_t redelivered_out = argus_mqtt_authority_admit(
+        &core, &redelivered, true, P_ALONE, false, false, 220U);
+    CHECK(redelivered_out.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_STALE_EPOCH);
+    CHECK(seam_unchanged(&before, &core));
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_authority_result_topic_and_schema(void)
+{
+    // §2: the result is published on event/core/authority_result, never on
+    // event/pump1/command_result, and carries every field A2.4 requires -
+    // including core_lease_status and local_control_status, which the
+    // pre-correction result omitted entirely.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    CHECK(strcmp(topics.event_authority_result,
+                 "argus/paladin/pump_001/event/core/authority_result") == 0);
+    CHECK(strcmp(topics.event_authority_result, topics.command_result) != 0);
+
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_mqtt_broker_message_t message = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel);
+    argus_mqtt_authority_outcome_t out = argus_mqtt_authority_admit(
+        &core, &message, false, P_ALONE, false, false, 100U);
+    CHECK(out.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+
+    CHECK(strstr(out.result_json, "\"schema\":1") != NULL);
+    CHECK(strstr(out.result_json, "\"request_id\":\"req-1\"") != NULL);
+    CHECK(strstr(out.result_json, "\"session\":\"0123456789abcdef\"") != NULL);
+    CHECK(strstr(out.result_json, "\"outcome\":\"ACCEPTED\"") != NULL);
+    CHECK(strstr(out.result_json, "\"reason\":\"granted\"") != NULL);
+    CHECK(strstr(out.result_json, "\"control_owner\":\"LOCAL_HMI\"") != NULL);
+    CHECK(strstr(out.result_json, "\"authority_epoch\":1") != NULL);
+    CHECK(strstr(out.result_json, "\"core_lease_status\":\"ACTIVE\"") != NULL);
+    CHECK(strstr(out.result_json, "\"local_control_status\":\"ACTIVE\"") != NULL);
+
+    // A SERVICE_TOOL owner is reported distinctly - the pre-correction
+    // publish_authority_result() folded it into the same default branch
+    // ARGUSCORE and OTHER shared, which would have misreported it.
+    argus_mqtt_session_core_t svc_core;
+    argus_mqtt_session_core_init(&svc_core, SESSION);
+    argus_machine_principal_t svc = seam_principal(
+        "m-svc", SVC_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+    argus_mqtt_broker_message_t svc_message = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &svc);
+    argus_mqtt_authority_outcome_t svc_out = argus_mqtt_authority_admit(
+        &svc_core, &svc_message, false, P_ALONE, false, false, 100U);
+    CHECK(svc_out.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(strstr(svc_out.result_json, "\"control_owner\":\"SERVICE_TOOL\"") != NULL);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_seam_disconnected_lease_reports_truthful_ownership(void)
+{
+    // A2.11, the defect the correction order's §4 named directly: a
+    // transport disconnect must not make published ownership say NONE (or
+    // local_control_status say AVAILABLE) while the lease is still
+    // unexpired. Exercises argus_mqtt_session_disconnect() (the real
+    // production function) followed by the real
+    // authority_status_from_core() computation, not a reimplementation of
+    // either.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    CHECK(strcmp(core.lease_machine_id, "m-panel") == 0);   // lease survives
+
+    char lease_status[16];
+    char local_status[16];
+    authority_status_from_core(&core, P_ALONE, false, 200U,
+                               lease_status, sizeof(lease_status),
+                               local_status, sizeof(local_status));
+    // The fix: EXPIRING (owner known, transport down, deadline still
+    // running), never NONE. Before the fix, `owned` required link ==
+    // ONLINE, so this read NONE/AVAILABLE - a disconnected panel would have
+    // been reported to every subscriber as if nobody held the pump, while
+    // the pump was, in fact, still under a live lease.
+    CHECK(strcmp(lease_status, "EXPIRING") == 0);
+    CHECK(strcmp(local_status, "ACTIVE") == 0);
+
+    // Once the deadline genuinely passes and tick() expires the lease, NONE
+    // becomes the truthful answer - the distinction this fix exists to draw
+    // is disconnected-but-unexpired versus actually-expired, not
+    // connected-versus-not.
+    CHECK(argus_mqtt_session_tick(&core, 100U + ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS));
+    authority_status_from_core(&core, P_ALONE, false,
+                               100U + ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS,
+                               lease_status, sizeof(lease_status),
+                               local_status, sizeof(local_status));
+    CHECK(strcmp(lease_status, "EXPIRED") == 0);
+    CHECK(strcmp(local_status, "AVAILABLE") == 0);
     return ESP_OK;
 }
