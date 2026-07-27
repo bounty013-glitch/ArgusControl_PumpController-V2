@@ -7,6 +7,166 @@
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+## 0. Independent-review correction order (2026-07-27)
+
+**Commit:** `215eeae` (code and tests). This document's own update is a
+separate, later commit, per this document's established practice of citing
+already-landed work rather than a commit describing itself.
+
+An independent review of this pass, after §1–§11 above were believed
+complete, found the §9 seam tests real but insufficient proof of certain
+claims, and found several production defects the §9 seam had not yet been
+built wide enough to catch. This section records what that review found and
+what was corrected in response — the corrections are code-level facts,
+verified by a clean build; the hardware suite run that proves them on target
+is Shawn's, and is recorded separately once it lands (§2.3), not fabricated
+here.
+
+**1. `event/core/authority_result` did not exist.** A2.1/A2.4 define this as
+the authority result channel. The implementation instead published every
+authority outcome onto `event/pump1/command_result` — the PUMP's result
+channel. Added the topic (`argus_mqtt_contract.h/.c`), added
+`event`/`state`/`status`/`telemetry`-style category matching for it in
+`argus_mqtt_security.c` so an HMI can subscribe (previously only an exact
+literal match to `command_result` worked — `event/#` and a direct
+subscription to the new topic both failed closed), and moved all
+publication onto it.
+
+**2. The result was missing `core_lease_status` and `local_control_status`.**
+A2.4's schema requires both. Added; both are computed by the same pure
+function the retained snapshot uses (see #6), so the result message and the
+retained snapshot can never disagree.
+
+**3. `transfer_unsupported_running` did not exist.** A2.8 requires an
+ArgusCore transfer from `LOCAL_HMI`/`SERVICE_TOOL` to be refused while the
+pump is actively driving the motor (`STARTING`/`RUNNING`/`DECELERATING`
+— `HOLDING` has step generation stopped and is not gated). Nothing consulted
+machine state before this pass; a running-transfer request would have been
+GRANTED. Added `argus_mqtt_session_request_authority_with_state()`, an
+additive wrapper around the existing pure core function (chosen over
+modifying the base function's signature, which ~30 existing tests call
+directly and have no notion of machine state) that peeks the same
+held/preempt facts and refuses before ever calling the mutating base
+function.
+
+**4. `denied_machine_state` (A2.3's release-side machine-state gate) is
+NOT implemented.** The contract lists it as a possible release outcome
+("machine-state and profile policy admit it") but defines no concrete rule
+for what machine state should block a release, anywhere in the contract or
+the governing decision documents this repository has. A2.8's running-transfer
+rule is well-specified and is #3 above; nothing analogous exists for
+release. Inventing a rule here was judged a bigger risk than leaving it
+unimplemented — release is documented as never stopping the pump or
+disturbing anything but ownership, and a wrong invented gate could make a
+legitimate release fail for a reason nobody decided. **Reported, not guessed
+at. Needs Shawn's decision**, same disposition as the KDF iteration-budget
+finding in §11.
+
+**5. The duplicate-request cache was single-slot.** A2.6 requires idempotent
+replay per `(session, request_id)`. The single-slot cache could only
+remember the ONE most recently seen key; two requests interleaved on the
+wire — A, then B, then a redelivery of A — would have B silently evict A's
+remembered result, so the redelivery of A would be re-arbitrated instead of
+replayed. Replaced with a bounded 8-entry, FIFO-evicted cache
+(`ARGUS_MQTT_AUTH_DUP_CACHE_SIZE`). Eviction is explicit and documented in
+source: the oldest entry is displaced regardless of whether it is still "in
+flight"; a redelivery arriving after 8 other distinct requests is
+re-arbitrated rather than replayed, which is safe (full admission runs
+again) even though it is not the A2.6-idempotent path. Memory cost is fixed
+at ~7.7 KB regardless of traffic (confirmed in the link map:
+`.bss.s_auth_dup_cache = 0x1e00`).
+
+**6. Published ownership was untruthful while disconnected.** A2.11:
+"published ownership must remain truthful even while the link is offline."
+The retained-snapshot path required `link == ONLINE` to consider a lease
+"owned" at all, so `status/core/control_owner` and
+`status/core/local_control_status` reported `NONE`/`AVAILABLE` for a lease
+that was merely disconnected but not expired — while the pump was, in fact,
+still under a live lease. Fixed: ownership is `lease_machine_id[0] != '\0'`
+alone, matching what the pure core already guarantees (disconnect preserves
+that field; only expiry clears it). The lease-status/local-status
+computation was factored into one pure function
+(`authority_status_from_core()`, exported for direct testing) used by both
+the retained snapshot and the per-request result, so they cannot drift
+apart again.
+
+**7. Three of the six listed transitions never republished the snapshot.**
+§4's list is acquisition, release, disconnect, rebind, lease expiry,
+fallback. Acquisition and release already republished. Disconnect, lease
+expiry, and the ArgusCore acquisition window closing with nobody having
+acquired (fallback) did not — nothing touched the six A2.10 topics on any of
+those paths, so a subscriber could see a stale snapshot indefinitely after
+any of them. All three fixed: disconnect and expiry each call
+`publish_authority_state()` on their own event; the window-close case has no
+discrete triggering event (it is a pure function of elapsed time), so it is
+polled once per `argus_mqtt_runtime_tick()`, comparing this tick's
+window-open state to last tick's. Rebind (reconnect within the lease term)
+was also added, gated on the link actually transitioning from non-ONLINE
+back to ONLINE, so a healthy heartbeat cadence does not turn into a steady
+stream of redundant republishes.
+
+**8. The decoder accepted a trailing comma.**
+`{"schema":1,...,"authority_epoch":1,}` decoded `OK`. Not a hole — every
+field was still bounded, typed, and validated — but not strict JSON, and the
+contract's stated strictness ("trailing content is rejected") gives no
+exception for it. Fixed in all three decoders sharing this parsing shape
+(heartbeat, command, authority request) for consistency, since the defect
+was structural to the shared parsing pattern, not specific to one decoder.
+Trailing whitespace AFTER the closing brace remains explicitly permitted —
+a different thing from a comma inside the object, and never confusable with
+content.
+
+**9. `schema_unsupported` and `invalid_request_id` did not exist as distinct
+reasons.** Both fell through to the generic `invalid_value`. A2.5 gives them
+their own wire vocabulary. Added two decode-result values used only by the
+authority-request decoder; every other field's failure still falls through
+to `invalid_value` as before.
+
+**10. `intent` accepted any string.** A2.2 restricts it to
+`OPERATOR_INTENT`/`SUPERVISORY_START`/`SERVICE`/`FALLBACK` when present.
+Unsupported values are now refused (`invalid_value`) rather than silently
+accepted and recorded.
+
+**11. The §9 seam tests mirrored `handle_authority_request`'s gate order
+instead of calling it.** Correct in what they modelled, but a rename or
+reorder inside the real handler could have drifted from the test silently.
+Extracted the handler's logic (from the point broker-level admission and
+the `REQUEST_AUTHORITY` capability check complete — both still the caller's
+job, unchanged) into `argus_mqtt_authority_admit()`, taking the session core
+and message as explicit parameters instead of reading the module's global
+runtime state. Both the production runtime task and every §9 seam test now
+call this exact function. 24 new tests exercise it directly: the running-
+transfer rule, the bounded duplicate cache under real interleaving (A, B,
+redelivery of A), FIFO eviction, the `authority_result` topic and full
+schema, and the disconnected-truthful-ownership fix. The two gates outside
+`argus_mqtt_authority_admit()` by design (broker publish admission, the
+capability check) are still transcribed in the test harness, each calling
+the real production function for that gate — documented in source as the
+one place a future gate reorder at that specific boundary would not be
+caught automatically.
+
+**Wire-vocabulary correction found along the way:** the published rejection
+reason for a profile denial was `denied_by_commissioned_profile`, which was
+never valid A2.5 surface (the contract specifies `denied_by_profile`).
+Corrected. Also consolidated two independent reason-string mappings (one for
+the audit log, one — bounds-clamped by array index — for the published
+result) into one `switch`-based function used by both, so adding
+`TRANSFER_UNSUPPORTED_RUNNING` did not silently fall through a stale bounds
+check the way the old array pattern would have.
+
+**Not addressed by this pass, stated precisely:**
+- #4 above (`denied_machine_state` release gate) — no rule to implement.
+- §5.10 of the HMI Phase 3 plan (audit): authority events are logged, not
+  yet routed to the persistent security audit log the way MQTT connect/policy
+  events already are.
+- The two broker-level gates still transcribed in the seam test harness
+  (#11 above) rather than called through a single production entry point —
+  would need `argus_mqtt_runtime`'s broker callback wiring itself refactored,
+  a larger and more deliberate change than this pass's scope.
+- No authority request has ever traversed the real authenticated broker path
+  end to end — deferred to HMI issue #67, per Shawn, unchanged from §9's own
+  disposition below.
+
 ## 1. Sections complete
 
 | § | Subject | Commit |
@@ -19,7 +179,7 @@ Evidence for the correction pass ordered after the
 | 6 | `core_lease_status` + `authority_reason` published | `165577c` |
 | 7 | Acquisition window anchored to service readiness | `10945a0` |
 | 8 | Bounded provisioning body read (HMI) | `e5a5dde` |
-| 9 | Seam-level integration tests | `<pending — this commit>` |
+| 9 | Seam-level integration tests | `e9ad8a8` |
 | 11 | KDF timing measured; iteration-budget inconsistency flagged | `1af6e8e` |
 | 5* | Two lease defects found by the first suite run | `497e22a` |
 
@@ -133,6 +293,19 @@ test, rebuilt on entry to each one so no state carries between tests.
 Confirmed in the link map: `.bss.topics` is a single 0x1a88-byte (6,792 byte)
 symbol, not thirteen. The run recorded above is against the corrected build.
 
+### 2.3 Independent-review correction order — hardware run PENDING
+
+The eleven corrections in §0 above are code-level facts: the build is clean
+with zero warnings, and the link map confirms the `.bss` figures cited
+there. **They are not yet proven on hardware.** Per this document's own
+established practice (§2.2's third run was recorded only after it actually
+happened, not written in advance), the on-target suite run — distinct test
+count, execution/pass/fail totals, isolation proof, and updated diagnostic
+task stack high-water — will be recorded here as a follow-up entry once
+Shawn has run it. Flashed and boot-verified as far as this side can confirm
+without the interactive console (see §3); the console itself still requires
+Shawn to press `t`.
+
 ## 3. §10 hardware items 1–4, 9–10
 
 | Item | Result |
@@ -154,48 +327,48 @@ No motion command was issued and the motor was not energised at any point.
 
 ## 4. Remaining uncertainty — stated precisely
 
-**Implemented and unit-tested:** all of §1–§9 and §11, at the pure-core level,
-plus — as of §9 — the composed seam from authenticated principal through topic
+**Implemented and unit-tested:** all of §1–§9 and §11, at the pure-core
+level, the composed seam from authenticated principal through topic
 classification, scope authorization, permission lookup, broker admission,
-strict decoding, session/epoch validation, and arbitration.
+strict decoding, session/epoch validation, and arbitration — and, as of the
+§0 independent-review correction order, the machine-state-aware transfer
+rule, the bounded duplicate cache under real interleaving, the
+`event/core/authority_result` schema and topic, and the
+disconnected-but-unexpired truthful-ownership fix.
 
-**What §9 closes, precisely:** 24 tests compose the real production functions
-— `argus_mqtt_topics_classify`, `argus_mqtt_security_publish_allowed`,
-`argus_mqtt_security_required_permission`,
-`argus_mqtt_decode_authority_request`, `argus_mqtt_session_request_authority`,
-`argus_mqtt_session_release_authority` — against a synthetic
-`argus_mqtt_broker_message_t` and `argus_machine_principal_t`, in the gate
-order transcribed from `argus_mqtt_runtime.c`
-(`broker_publish_authorize_cb` → `broker_policy_cb` → `handle_message` →
-`handle_authority_request`). Every function called is the real one; nothing
-is stubbed. §3's rejection matrix — previously validated by inspection and
-compilation only — now has ~60 negative-payload cases, each asserted against
-its specific decode result, run through the full seam against a controller
+**What the seam closes, precisely:** the production admission path is now a
+directly callable function, `argus_mqtt_authority_admit()` — not a
+transcription of `handle_authority_request`'s gate order, but the function
+`handle_authority_request` itself calls. Both the runtime task and every §9
+test call it. §3's rejection matrix — previously validated by inspection and
+compilation only — has ~60 negative-payload cases, each asserted against its
+specific decode result, run through the full seam against a controller
 holding a live lease and an accepted command, with the session core asserted
 byte-identical (`memcmp`) after every one.
 
-**What §9 does NOT close, precisely — the gate order is MIRRORED, not
-EXECUTED:** `handle_authority_request` is `static` and requires the broker, a
-FreeRTOS queue, and a mutex, so it is not the function under test; the seam
-tests reproduce its gate sequence rather than calling it. **If the gate order
-in `argus_mqtt_runtime.c` is ever changed, these tests will not detect it.**
-Closing that residual risk needs `argus_mqtt_runtime` refactored to expose the
-handler as a directly callable, dependency-injected function — a deliberate
-change, not a hurried one. Also not modelled: A2.6 duplicate/replay
-suppression, which lives in runtime file-scope statics; reimplementing it in
-the test would only prove the test agrees with itself, so it is left
-uncovered rather than faked. Real socket disconnect, rebind, and
-different-principal inheritance across a live TCP drop remain covered only at
-the §5 core level, not through this seam.
+**What still is NOT closed, precisely:** two gates remain outside
+`argus_mqtt_authority_admit()` by design — broker publish admission and the
+`REQUEST_AUTHORITY` capability check, both still the caller's documented
+responsibility — and the test harness still transcribes those two,
+calling the real production function for each rather than reaching them
+through one production entry point. **If those two specific gates are ever
+reordered relative to each other, or relative to what calls into
+`argus_mqtt_authority_admit()`, the test will not detect it.** Closing that
+residual risk would need `argus_mqtt_runtime`'s broker callback wiring
+itself refactored — a larger, more deliberate change than this pass's scope.
+Also not modelled: real socket disconnect, rebind, and different-principal
+inheritance across a live TCP drop, which remain covered only at the §5 core
+level, not through this seam — reaching further needs the same broker-wiring
+refactor.
 
-**One decoder finding surfaced and pinned, not fixed:** the "strict" decoder
-accepts a trailing comma before an authority request's closing brace, and
-trailing whitespace after it (`{"schema":1,...,"authority_epoch":1,}` decodes
-`ARGUS_MQTT_DECODE_OK`). Every field is still bounded, typed, and validated —
-nothing unintended gets through — but it is not strict JSON. Left as current
-behaviour and pinned in `test_4c_seam_decode_documented_laxness` rather than
-changed, since tightening it is a §3-shaped decision, not a §9 one. Shawn's
-call whether the contract should be made exact.
+**The decoder finding from the prior evidence entry is now fixed, not just
+pinned:** the trailing-comma laxness reported there
+(`{"schema":1,...,"authority_epoch":1,}` decoding `OK`) has been corrected —
+see §0 item 8. Trailing whitespace after the closing brace remains
+explicitly, deliberately permitted; that was never the defect.
+
+**`denied_machine_state` (A2.3's release-side machine-state gate) remains
+unimplemented** — see §0 item 4. Not guessed at; needs Shawn's decision.
 
 **NOT proven through the real authenticated broker:** no authority request has
 ever traversed the actual network path — broker socket, TLS/plaintext framing,
@@ -209,15 +382,13 @@ has moved a motor and nothing should until Phase 5.
 
 ## 5. Watch item
 
-Diagnostic task stack high-water across the three runs of this pass:
-3904 → 2652 → **1988** bytes free of a 12 KB stack. Still falling, now under
-2 KB free, though it held steady within the §9 run itself (1988 before and
-after). §9's own tests were built to minimize their footprint on this stack —
-the largest structure (`argus_mqtt_topics_t`, ~6.8 KB) is a single shared
-file-scope table, not a per-test stack local — so the drop from 2652 to 1988
-is attributable to the volume of new test code executing on the diagnostic
-task, not to the §9 fixtures being heavy. No further correction-order work is
-scheduled to add tests to this suite, so the trend has no known next input,
-but 1988 bytes is closer to a real problem than "not yet a problem" and
-`ARGUS_DIAGNOSTIC_TASK_STACK` (currently 12288) should be raised before
-anything else adds to this suite.
+Diagnostic task stack high-water across the three runs recorded so far:
+3904 → 2652 → **1988** bytes free of a 12 KB stack, holding steady within
+the third run (1988 before and after). The independent-review correction
+order adds roughly a dozen more test functions to this same suite; its own
+effect on this number is **not yet measured** — see §2.3. The new
+duplicate-request cache (~7.7 KB) is `.bss`, not stack, and does not bear on
+this figure directly, but the additional test bodies executing on the
+diagnostic task might. `ARGUS_DIAGNOSTIC_TASK_STACK` (currently 12288) was
+already flagged as due for a raise before this pass; that recommendation
+stands and has not gotten less urgent.
