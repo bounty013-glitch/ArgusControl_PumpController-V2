@@ -218,6 +218,74 @@ static bool add_permission_names(cJSON *item, argus_permission_set_t set)
 }
 
 static bool permission_array(
+    const cJSON *array, argus_permission_set_t *out);
+static bool object_keys(
+    const cJSON *object, const char *const *names, size_t count);
+static bool string_field(
+    const cJSON *object, const char *name, const char **out,
+    size_t max_length, bool allow_empty);
+
+argus_security_http_machine_body_t argus_security_http_machine_action_body(
+    const struct cJSON *root_opaque,
+    const char **out_identifier, const char **out_action,
+    bool *out_set_permissions, argus_permission_set_t *out_permissions)
+{
+    const cJSON *root = (const cJSON *)root_opaque;
+    if (out_identifier) *out_identifier = NULL;
+    if (out_action) *out_action = NULL;
+    if (out_set_permissions) *out_set_permissions = false;
+    if (out_permissions) *out_permissions = 0U;
+    if (root == NULL) return ARGUS_MACHINE_ACTION_BODY_INVALID;
+
+    // The accepted key set is per-action, and every action still requires an
+    // EXACT match - an unknown, extra or duplicated key is refused rather
+    // than ignored.
+    //
+    // set_permissions was unreachable for want of exactly this: it needs a
+    // third field, the two-key check rejected the only body that could carry
+    // one, and no test submitted a complete body through this decision. The
+    // endpoint could not have worked at all.
+    static const char *const KEYS[] = {"id", "action"};
+    static const char *const KEYS_WITH_PERMISSIONS[] = {
+        "id", "action", "permissions"};
+
+    // The action is read before the key set is chosen, and is trusted for
+    // nothing else - the exact-key check still has to pass afterwards, so a
+    // body claiming set_permissions without the field is still refused.
+    const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
+    bool wants_permissions =
+        cJSON_IsString(action_item) && action_item->valuestring != NULL &&
+        strcmp(action_item->valuestring, "set_permissions") == 0;
+
+    const char *identifier = NULL;
+    const char *action = NULL;
+    if (!(wants_permissions ? object_keys(root, KEYS_WITH_PERMISSIONS, 3U)
+                            : object_keys(root, KEYS, 2U)) ||
+        !string_field(root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) ||
+        !string_field(root, "action", &action, 16U, false)) {
+        return ARGUS_MACHINE_ACTION_BODY_INVALID;
+    }
+
+    if (wants_permissions) {
+        argus_permission_set_t permissions = 0U;
+        // An unrecognised or duplicated permission name fails the WHOLE
+        // request rather than granting a subset. A partial grant that looked
+        // like a success is the failure this endpoint must not have.
+        if (!permission_array(
+                cJSON_GetObjectItemCaseSensitive(root, "permissions"),
+                &permissions)) {
+            return ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS;
+        }
+        if (out_permissions) *out_permissions = permissions;
+    }
+
+    if (out_identifier) *out_identifier = identifier;
+    if (out_action) *out_action = action;
+    if (out_set_permissions) *out_set_permissions = wants_permissions;
+    return ARGUS_MACHINE_ACTION_BODY_OK;
+}
+
+static bool permission_array(
     const cJSON *array, argus_permission_set_t *out)
 {
     if (!cJSON_IsArray(array) || out == NULL ||
@@ -1515,28 +1583,23 @@ static esp_err_t machine_action_post(httpd_req_t *req)
         return ESP_OK;
     }
     cJSON *root = receive_object(req);
-    static const char *const KEYS[] = {"id", "action"};
     const char *identifier = NULL;
     const char *action = NULL;
-    bool valid = root != NULL && object_keys(root, KEYS, 2U) &&
-        string_field(
-            root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) &&
-        string_field(root, "action", &action, 16U, false);
-    bool rotation = valid && strcmp(action, "rotate") == 0;
-    bool set_permissions = valid && strcmp(action, "set_permissions") == 0;
+    bool set_permissions = false;
     argus_permission_set_t requested_permissions = 0U;
-    if (set_permissions &&
-        !permission_array(cJSON_GetObjectItemCaseSensitive(root, "permissions"),
-                          &requested_permissions)) {
-        // An unrecognised or duplicated permission name fails the WHOLE
-        // request rather than granting a subset. A partial grant that looked
-        // like a success is the failure this endpoint must not have.
+    argus_security_http_machine_body_t body =
+        argus_security_http_machine_action_body(
+            (const struct cJSON *)root, &identifier, &action,
+            &set_permissions, &requested_permissions);
+    if (body == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS) {
         cJSON_Delete(root);
         memset(&security, 0, sizeof(security));
         return send_json(
             req, "400 Bad Request",
             "{\"ok\":false,\"error\":\"invalid_permissions\"}");
     }
+    bool valid = body == ARGUS_MACHINE_ACTION_BODY_OK;
+    bool rotation = valid && strcmp(action, "rotate") == 0;
     // Recent re-authentication is required for BOTH minting a secret and
     // changing what a machine may do. For rotation the reason is that a
     // credential is being issued. For a permission change the reason Shawn

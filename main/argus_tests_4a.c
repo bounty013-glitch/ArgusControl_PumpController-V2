@@ -5641,6 +5641,7 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d4_iface_ambiguity_fails_closed);
     RUN_TEST(test_4d4_kdf_global_bound_is_source_independent);
     RUN_TEST(test_4d4_admission_budgets_are_self_consistent);
+    RUN_TEST(test_4d4_permission_edit_body_shape);
     RUN_TEST(test_4d4_permission_edit_cannot_escalate);
     RUN_TEST(test_4d4_permission_edit_invalidates_live_sessions);
     RUN_TEST(test_4d4_proven_source_reservation_bounds_the_flood);

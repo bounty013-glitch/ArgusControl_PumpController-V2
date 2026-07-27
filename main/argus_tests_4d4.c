@@ -1,4 +1,4 @@
-#include "argus_tests_4d4.h"
+﻿#include "argus_tests_4d4.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +16,7 @@
 #include "argus_mqtt_security.h"
 #include "argus_password_verifier.h"
 #include "argus_security_http.h"
+#include "cJSON.h"
 
 #define CHECK(value) do { \
     if (!(value)) { \
@@ -960,6 +961,129 @@ esp_err_t test_4d4_proven_source_reservation_bounds_the_flood(void)
     CHECK(status.global_refusals == 0U);
 
     argus_machine_service_clear_proven_sources_for_test();
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_permission_edit_body_shape(void)
+{
+    /* Drives the REAL body decision the HTTP handler calls - exact key set,
+     * field bounds, permission-array validation - from complete JSON bodies.
+     *
+     * This test exists because its absence hid a total failure: set_permissions
+     * needs three fields, the handler's key check accepted exactly two, and
+     * nothing ever submitted a complete body through the path. The endpoint
+     * could not have worked, and every test around it passed. */
+    const char *id = NULL;
+    const char *action = NULL;
+    bool is_set = false;
+    argus_permission_set_t permissions = 0U;
+
+    #define BODY(json) cJSON_Parse(json)
+    #define DECIDE(root) argus_security_http_machine_action_body( \
+        (const struct cJSON *)(root), &id, &action, &is_set, &permissions)
+
+    /* 1. The complete, correct three-field shape is ACCEPTED and yields the
+     *    permission set. This is the case that could not previously pass. */
+    cJSON *root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                       "\"permissions\":[\"view_status\",\"motion\"]}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_OK);
+    CHECK(is_set);
+    CHECK(strcmp(action, "set_permissions") == 0);
+    CHECK(strcmp(id, "m-panel") == 0);
+    CHECK(permissions ==
+          (ARGUS_PERMISSION_VIEW_STATUS | ARGUS_PERMISSION_MOTION));
+    cJSON_Delete(root);
+
+    /* 2. MISSING permissions on a set_permissions body: refused by the exact
+     *    key check, not silently treated as an empty grant. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\"}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID);
+    cJSON_Delete(root);
+
+    /* 3. EXTRA key alongside a valid three-field body: refused. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":[\"view_status\"],\"scope\":\"site\"}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID);
+    cJSON_Delete(root);
+
+    /* 4. DUPLICATE permission entries: refused as a whole rather than
+     *    de-duplicated into a grant nobody asked for. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":[\"motion\",\"motion\"]}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS);
+    cJSON_Delete(root);
+
+    /* 5. UNKNOWN permission name: the whole request fails. A typo must never
+     *    yield a partial grant that looks like a success. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":[\"view_status\",\"motionn\"]}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS);
+    cJSON_Delete(root);
+
+    /* 6. MALFORMED permissions - not an array, and array of non-strings. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":\"motion\"}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS);
+    cJSON_Delete(root);
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":[1,2]}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS);
+    cJSON_Delete(root);
+
+    /* 7. An EMPTY array is a legitimate request to remove every capability.
+     *    Refusing it would make removal inexpressible. */
+    root = BODY("{\"id\":\"m-panel\",\"action\":\"set_permissions\","
+                "\"permissions\":[]}");
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_OK);
+    CHECK(permissions == 0U);
+    cJSON_Delete(root);
+
+    /* 8. EVERY OTHER ACTION keeps its exact two-key set - the new field must
+     *    not have loosened them. */
+    const char *const two_key_actions[] = {
+        "rotate", "enable", "disable", "revoke", "delete"};
+    for (size_t i = 0U;
+         i < sizeof(two_key_actions) / sizeof(two_key_actions[0]); ++i) {
+        char good[128];
+        char extra[192];
+        snprintf(good, sizeof(good), "{\"id\":\"m-panel\",\"action\":\"%s\"}",
+                 two_key_actions[i]);
+        snprintf(extra, sizeof(extra),
+                 "{\"id\":\"m-panel\",\"action\":\"%s\","
+                 "\"permissions\":[\"motion\"]}", two_key_actions[i]);
+        root = BODY(good);
+        CHECK(root != NULL);
+        CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_OK);
+        CHECK(!is_set);
+        cJSON_Delete(root);
+        /* A permissions field smuggled onto another action is refused - it
+         * must not become a back door that skips the re-authentication gate
+         * set_permissions carries. */
+        root = BODY(extra);
+        CHECK(root != NULL);
+        CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID);
+        cJSON_Delete(root);
+    }
+
+    /* 9. Structural rubbish and a NULL root fail closed. */
+    root = BODY("{\"action\":\"set_permissions\",\"permissions\":[]}"); /* no id */
+    CHECK(root != NULL);
+    CHECK(DECIDE(root) == ARGUS_MACHINE_ACTION_BODY_INVALID);
+    cJSON_Delete(root);
+    CHECK(argus_security_http_machine_action_body(
+              NULL, &id, &action, &is_set, &permissions) ==
+          ARGUS_MACHINE_ACTION_BODY_INVALID);
+
+    #undef BODY
+    #undef DECIDE
     return ESP_OK;
 }
 

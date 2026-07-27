@@ -60,7 +60,16 @@ Motor connected, **no pump head, no tubing, nothing in the flow path.**
    audible cogging step, applied RPM tracking commanded.
 3. STOP from 72 RPM. Record the deceleration time and compare against the
    configured ramp.
-4. UNLOCK and confirm the shaft releases.
+4. UNLOCK, and confirm the shaft turns freely by hand.
+
+   **Why this step is here.** STOP leaves the driver energised and holding
+   position — the motor is still powered and resisting rotation. UNLOCK is
+   the separate action that de-energises it. The two are distinct machine
+   states (`HOLDING` versus `UNLOCKED`) and the panel reports them
+   differently, so this confirms the difference is real on the shaft and not
+   only in the state word. It also leaves the bench in the safe state for
+   fitting the pump head in S2-D: a coupling should never be fitted to a
+   motor that is holding torque.
 
 **What is being tuned here:** trajectory ramp acceleration against real
 inertia. The current value has only ever been exercised against a simulated
@@ -100,9 +109,25 @@ Pump running at 72 RPM under panel control, water flowing.
    the lease expired and the supervisor link OFFLINE. **The pump is still
    running.**
 3. Restore the network. Expect: the panel reconnects, re-acquires control,
-   and the pump has never stopped. The panel should read
-   `ARGUS OFFLINE - LOCAL CONTROL ACTIVE` during the outage and return to
-   `LOCAL CONTROL ACTIVE` after.
+   and the pump has never stopped.
+
+   **What the panel shows during the outage — corrected.** An earlier draft
+   of this plan expected `ARGUS OFFLINE - LOCAL CONTROL ACTIVE` on the glass
+   while the network was pulled. That is impossible and would have been
+   scored as a failure wrongly: pulling the controller's network also cuts
+   the panel's own link, so the panel cannot receive the authority state that
+   wording is derived from. It goes `DATA_STALE` and then `DISCONNECTED`,
+   showing its last known values clearly marked stale — which is the correct
+   and truthful behaviour.
+
+   `ARGUS OFFLINE - LOCAL CONTROL ACTIVE` is what the panel shows when it can
+   still see the controller and the controller reports ArgusCore's lease as
+   expired. That is a different scenario, and it is the one exercised by
+   step 4 below rather than by a network pull.
+
+   **What to check here instead:** the pump keeps running, the controller's
+   telemetry never shows a setpoint change or a driver disable, and the panel
+   marks its data stale rather than inventing a value.
 4. Repeat with the **panel** powered off instead of the network. Same
    expectation: the controller keeps pumping.
 
