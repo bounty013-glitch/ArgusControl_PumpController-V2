@@ -41,3 +41,31 @@ esp_err_t test_4c_sequence_stale_and_wrap(void);
 esp_err_t test_4c_session_restart_invalidates_prior_envelope(void);
 esp_err_t test_4c_session_generation_contract(void);
 esp_err_t test_4c_retained_capacity_covers_baseline(void);
+
+// Section 9 - seam-level tests: authenticated principal through topic
+// classification, scope authorization, permission lookup, broker admission,
+// strict decoding, session and epoch validation, and arbitration.
+esp_err_t test_4c_seam_authority_topic_permission_map(void);
+esp_err_t test_4c_seam_publish_admission_requires_topic_scope(void);
+esp_err_t test_4c_seam_publish_admission_requires_capability(void);
+esp_err_t test_4c_seam_authority_and_motion_are_separate_capabilities(void);
+esp_err_t test_4c_seam_controller_owned_topics_reject_external_publish(void);
+esp_err_t test_4c_seam_retained_request_refused_before_arbitration(void);
+esp_err_t test_4c_seam_malformed_transport_refused_at_broker(void);
+esp_err_t test_4c_seam_unauthorized_principal_never_reaches_arbitration(void);
+esp_err_t test_4c_seam_qos_zero_request_refused(void);
+esp_err_t test_4c_seam_decode_rejects_structure(void);
+esp_err_t test_4c_seam_decode_documented_laxness(void);
+esp_err_t test_4c_seam_decode_rejects_unknown_and_duplicate_fields(void);
+esp_err_t test_4c_seam_decode_rejects_missing_fields(void);
+esp_err_t test_4c_seam_decode_rejects_invalid_values(void);
+esp_err_t test_4c_seam_decode_bounds_and_arguments(void);
+esp_err_t test_4c_seam_release_requires_named_epoch(void);
+esp_err_t test_4c_seam_rejection_matrix_never_mutates_arbitration(void);
+esp_err_t test_4c_seam_session_mismatch_rejected_before_arbitration(void);
+esp_err_t test_4c_seam_release_stale_epoch_preserves_owner(void);
+esp_err_t test_4c_seam_release_by_non_owner_refused(void);
+esp_err_t test_4c_seam_request_granted_end_to_end(void);
+esp_err_t test_4c_seam_core_preempts_panel_end_to_end(void);
+esp_err_t test_4c_seam_panel_cannot_preempt_core_end_to_end(void);
+esp_err_t test_4c_seam_denied_paths_preserve_operation(void);
