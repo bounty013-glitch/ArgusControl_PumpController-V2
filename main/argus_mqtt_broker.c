@@ -33,12 +33,12 @@ static const char *TAG = "argus_mqtt_broker";
  * unrelated allocations failing elsewhere rather than as a clean refusal.
  * That is exactly how the 4D.4 machine-directory tests started failing.
  *
- * 4 is derived, not chosen optimistically: production (no diagnostic task,
- * no test fixtures - see CONFIG_ARGUS_DIAGNOSTIC_MODE) frees ~25 KB, giving
- * ~58 KB free at one client; 3 further clients at 13.0 KB each leaves ~19 KB
- * for HTTP, Wi-Fi bursts and transient allocation. The real deployment needs
- * 2 (rotary HMI + ArgusCore) with headroom for a service tool and one
- * reconnect overlapping its own stale slot.
+ * 3 is the measured, budgeted authenticated-client limit. Production (no
+ * diagnostic task or test fixtures - see CONFIG_ARGUS_DIAGNOSTIC_MODE) has
+ * sufficient measured heap for the normal rotary HMI + ArgusCore roles and
+ * one service client while preserving HTTP, Wi-Fi, and transient-allocation
+ * headroom. No overlapping reconnect slot is reserved or claimed; stale
+ * authenticated sessions are recovered by MQTT keep-alive enforcement.
  *
  * NOTE, recorded because it constrains acceptance testing: the DIAGNOSTIC
  * build carries the test fixtures and the 16 KB diagnostic task, and the
