@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "mbedtls/sha256.h"
+
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -566,12 +568,25 @@ static void authority_status_snapshot(char *lease_status_out, size_t lease_statu
 // (session, request_id), each entry tagged with a monotonic admission
 // ordinal.
 //
+// Payload identity is held as (length, SHA-256) rather than the payload
+// bytes themselves. The A2.6 semantic is unchanged - an identical repeat
+// replays, a conflicting reuse is refused - but the entry shrinks from ~968
+// to ~490 bytes, which matters directly: the first cut of the 32-entry cache
+// stored full payloads (~31 KB of .bss), and that consumed exactly the heap
+// margin the 4D.4 machine-directory tests' multi-KB calloc()s lived in -
+// six of them began failing allocation on hardware. Length plus SHA-256 is
+// byte-identity for every practical purpose here: the comparison only
+// disambiguates replay-vs-conflict among authenticated, capability-checked
+// principals, and constructing a same-length SHA-256 collision is not a
+// capability this threat model contains.
+#define AUTH_DUP_HASH_LEN 32U
+
 typedef struct {
     bool in_use;
     uint32_t ordinal;
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     char request_id[ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX + 1U];
-    char payload[ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX + 1U];
+    uint8_t payload_hash[AUTH_DUP_HASH_LEN];
     size_t payload_len;
     char result[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
 } auth_dup_entry_t;
@@ -638,6 +653,17 @@ static auth_dup_entry_t *auth_dup_find(const char *session, const char *request_
 // outcomes is dangerous to re-arbitrate. See
 // argus_mqtt_session_request_authority_with_state()'s own comment for the
 // full argument.
+static void auth_dup_hash(const char *payload, size_t payload_len,
+                          uint8_t out[AUTH_DUP_HASH_LEN])
+{
+    // 0 = SHA-256 (not SHA-224). One-shot; failure cannot occur for RAM
+    // input on this target, but zero the digest defensively so a failure
+    // could never alias another entry's stored hash.
+    if (mbedtls_sha256((const unsigned char *)payload, payload_len, out, 0) != 0) {
+        memset(out, 0, AUTH_DUP_HASH_LEN);
+    }
+}
+
 static void auth_dup_store(const char *session, const char *request_id,
                            const char *payload, size_t payload_len,
                            const char *result)
@@ -648,10 +674,8 @@ static void auth_dup_store(const char *session, const char *request_id,
     slot->ordinal = s_auth_dup_ordinal_next++;
     strlcpy(slot->session, session, sizeof(slot->session));
     strlcpy(slot->request_id, request_id, sizeof(slot->request_id));
-    if (payload_len < sizeof(slot->payload)) {
-        memcpy(slot->payload, payload, payload_len);
-        slot->payload_len = payload_len;
-    }
+    auth_dup_hash(payload, payload_len, slot->payload_hash);
+    slot->payload_len = payload_len;
     strlcpy(slot->result, result, sizeof(slot->result));
     slot->in_use = true;
 }
@@ -748,8 +772,11 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
     // A2.6 duplicate handling, before any arbitration.
     auth_dup_entry_t *existing = auth_dup_find(req.session, req.request_id);
     if (existing != NULL) {
+        uint8_t incoming_hash[AUTH_DUP_HASH_LEN];
+        auth_dup_hash(message->payload, message->payload_len, incoming_hash);
         if (existing->payload_len == message->payload_len &&
-            memcmp(existing->payload, message->payload, message->payload_len) == 0) {
+            memcmp(existing->payload_hash, incoming_hash,
+                   AUTH_DUP_HASH_LEN) == 0) {
             out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY;
             strlcpy(out.result_json, existing->result, sizeof(out.result_json));
             out.published = true;

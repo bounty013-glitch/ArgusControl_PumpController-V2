@@ -88,10 +88,94 @@ described as a connection-created/heartbeat-created lease; heartbeat is
 lease maintenance only. A2.2/A2.3/A2.6/A2.8 revised as above; HMI frozen
 snapshot re-refreshed with provenance; this record updated.
 
-### -1.1 Hardware evidence — PENDING
+### -1.1 Hardware evidence — three runs, one real regression found and fixed
 
-Recorded after Shawn runs the suite (`t` at the COM5 console), per this
-document's standing practice of never writing results before they exist.
+#### First run (commit `c43784d`, run by Shawn): 17 failures — a real regression
+
+```
+Distinct Tests : 331   Repeat Passes : 3
+Total Executed : 993   Passed : 976   Failed : 17
+PHASE 4D.4 PURE UNIT TEST SUITE: FAILED
+Diagnostic task stack high-water: before=14120 after=4456 bytes
+```
+
+Six `test_4d4_machine_directory_*` tests failed (one of them on only 2 of 3
+passes — the signature of a resource margin, not a logic error). Every
+failing assertion was a `CHECK(... != NULL)` on a multi-kilobyte `calloc`;
+the one machine-directory test that allocates nothing passed. Root cause:
+this pass's 32-entry duplicate cache stored full 513-byte payloads —
+`.bss.s_auth_dup_cache = 0x7900` (30,976 B), boot heap 176 → 153 KiB — and
+that consumed exactly the heap margin those tests' allocations lived in.
+**A regression introduced by this correction pass, found by the suite on
+hardware.** The isolation-proof MUTATED/CHANGED entries in this run
+(task 23→24, broker clients 0→1) were the HMI reconnecting mid-run, as in
+§2.3.1 — outside activity, not test mutation.
+
+#### Fix: payload identity by digest, not by copy
+
+The cache now stores `(payload_len, SHA-256)` instead of the payload bytes.
+The A2.6 semantic is unchanged — identical repeat replays, conflicting reuse
+refused — and length-plus-SHA-256 is byte-identity for every purpose this
+comparison serves (it disambiguates replay-vs-conflict among authenticated,
+capability-checked principals; same-length collision construction is not in
+this threat model). Entry ~968 → ~490 bytes;
+`.bss.s_auth_dup_cache = 0x3d00` (15,616 B); boot heap recovered to
+168 KiB. Zero-warning build.
+
+#### Console made deterministically scriptable (Shawn's direct instruction)
+
+Investigated why scripted serial input never reached the menu while a human
+terminal worked: every `linenoise()` prompt emits `ESC[6n` (twice) and then
+blocks reading the terminal's cursor-position reply via the USB-Serial/JTAG
+VFS with `portMAX_DELAY` — forever, no timeout. A human terminal
+auto-replies; a scripted client hangs the prompt and has its keystrokes
+silently consumed as reply bytes. Fixed in
+`argus_console_transport_init()`: `linenoiseSetDumbMode(1)` unconditionally
+— no escape queries ever emitted, no reply parsing on the input path,
+identical behavior for an operator terminal and a scripted acceptance run.
+(IDF's own REPL uses probe-then-dumb; unconditional was chosen because the
+probe's outcome depends on whether a terminal is attached during a 500 ms
+boot window — nondeterministic console behavior on a field device, and this
+menu takes one character per line so line editing buys nothing.) The suite
+still runs only on an explicit `t`; no boot-time automatic test path was
+restored. OPEN OBSERVATION, recorded honestly: during earlier scripted
+probing, sending a cursor-position reply at an unexpected time crashed the
+firmware once (LoadProhibited, EXCVADDR `0xa5a5a5e9` — the FreeRTOS
+stack-fill pattern, i.e. a load through never-written stack memory).
+Source inspection of linenoise's reply parser found it bounded and
+initialized throughout, so the defect is likely elsewhere in the console
+path and remains un-root-caused. Dumb mode makes the triggering path
+unreachable; the observation stands as a finding, not a fix.
+
+#### Final run (this build, driven end-to-end over scripted serial): CLEAN
+
+```
+Distinct Tests : 331   Repeat Passes : 3
+Total Executed : 993   Passed : 993   Failed : 0
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 3)
+  Network State         : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State     : MUTATED (RUNNING)      <- HMI reconnect mid-run,
+  Task Count            : MUTATED (24 tasks)        attributed by the suite's
+  Broker Clients        : CHANGED (0 -> 1)          own outside-activity note
+  Machine State         : UNCHANGED (UNLOCKED)
+  AP Stations           : STEADY (1 -> 1)
+
+PHASE 4D.4 PURE UNIT TEST SUITE: PASSED
+Diagnostic task stack high-water: before=14124 after=4268 bytes
+```
+
+All six previously-failing machine-directory tests pass; all nine
+`test_4c_ffp_*` tests pass on hardware. **The stack raise is vindicated by
+measurement, not assumption:** worst-case consumption is ~12.1 KB
+(16,384 − 4,268), which sits above the previous 12,288-byte allocation —
+the old stack was at or past its edge, and the pre-raise 1028-byte
+high-water was the same fact seen from the other side. Boot path with the
+final build: heap 168 KiB main region, Wi-Fi sta+softAP, DHCP, HTTP,
+broker, STA association all clean; 4× `Hash of data verified` on flash;
+COM5 identity `9&26DB8A4B` verified before every flash. No motor connected,
+none energized, no motion command issued at any point.
 
 ## 0. Independent-review correction order (2026-07-27)
 
