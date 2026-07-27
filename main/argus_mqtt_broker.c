@@ -18,11 +18,59 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "argus_mqtt_invalidation.h"
+#include "argus_net_mgr.h"
 
 static const char *TAG = "argus_mqtt_broker";
 
-#define ARGUS_MQTT_MAX_CLIENTS 10
-#define ARGUS_MQTT_MAX_SUBS_PER_CLIENT 20
+/* Simultaneous AUTHENTICATED MQTT clients, from measured hardware capacity.
+ *
+ * The previous value of 10 was never supported. Measured on target (ESP32-S3,
+ * this firmware): each accepted client costs ~13.0 KB of heap - 8192 B of
+ * task stack plus ~4.9 KB of lwIP socket state and TCB - taken from a free
+ * heap that measures ~46 KB with no clients in the diagnostic build. Ten
+ * clients would have required ~130 KB that does not exist; the accept loop
+ * degraded gracefully by failing xTaskCreate, so the shortfall surfaced as
+ * unrelated allocations failing elsewhere rather than as a clean refusal.
+ * That is exactly how the 4D.4 machine-directory tests started failing.
+ *
+ * 4 is derived, not chosen optimistically: production (no diagnostic task,
+ * no test fixtures - see CONFIG_ARGUS_DIAGNOSTIC_MODE) frees ~25 KB, giving
+ * ~58 KB free at one client; 3 further clients at 13.0 KB each leaves ~19 KB
+ * for HTTP, Wi-Fi bursts and transient allocation. The real deployment needs
+ * 2 (rotary HMI + ArgusCore) with headroom for a service tool and one
+ * reconnect overlapping its own stale slot.
+ *
+ * NOTE, recorded because it constrains acceptance testing: the DIAGNOSTIC
+ * build carries the test fixtures and the 16 KB diagnostic task, and the
+ * 4D.4 directory tests need ~13 KB CONTIGUOUS. That suite is therefore only
+ * safe to run with at most ONE connected client. It is not a production
+ * limit. */
+#define ARGUS_MQTT_MAX_CLIENTS 4
+
+/* Sockets accepted but not yet authenticated, bounded SEPARATELY from the
+ * authenticated pool above. Previously a pre-CONNECT socket consumed one of
+ * the same slots an authenticated client needed, so ten silent sockets
+ * denied MQTT to the real HMI for the whole grace period at zero cost to the
+ * attacker. Keeping the pools separate means unauthenticated load can never
+ * consume authenticated capacity. */
+#define ARGUS_MQTT_MAX_PRECONNECT 4
+
+/* Per-source cap on PRE-CONNECT sockets, so one address cannot occupy the
+ * pre-connect pool on its own. Two allows a legitimate client to retry while
+ * its previous socket is still closing; it does not allow a flood. */
+#define ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE 2
+
+#define ARGUS_MQTT_MAX_SUBS_PER_CLIENT 8
+
+/* The header mirrors these for the suite; they must never drift apart. */
+_Static_assert(ARGUS_MQTT_MAX_CLIENTS == ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED,
+               "declared client budget out of sync with implementation");
+_Static_assert(ARGUS_MQTT_MAX_PRECONNECT ==
+                   ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED,
+               "declared pre-connect budget out of sync with implementation");
+_Static_assert(ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE ==
+                   ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED,
+               "declared per-source budget out of sync with implementation");
 #define ARGUS_MQTT_MAX_RETAINED ARGUS_MQTT_BROKER_RETAINED_CAPACITY
 #define ARGUS_MQTT_MAX_TOPIC_LEN ARGUS_MQTT_BROKER_TOPIC_CAP
 #define ARGUS_MQTT_MAX_PAYLOAD_LEN ARGUS_MQTT_BROKER_PAYLOAD_CAP
@@ -33,8 +81,15 @@ static const char *TAG = "argus_mqtt_broker";
 #define ARGUS_MQTT_RECV_POLL_S 2
 
 /* Deadline for a freshly accepted socket to send CONNECT. Without it, a peer
- * that opens a socket and says nothing holds a client slot indefinitely. */
-#define ARGUS_MQTT_CONNECT_GRACE_US UINT64_C(30000000)
+ * that opens a socket and says nothing holds a slot indefinitely.
+ *
+ * Tightened 30 s -> 3 s. A real client sends CONNECT immediately after the
+ * TCP handshake - 3 s is already two orders of magnitude more than the
+ * observed latency on this LAN - while 30 s meant each silent socket cost
+ * the attacker nothing and denied service for half a minute. Combined with
+ * the separate pre-connect pool and the per-source cap, a flood now costs a
+ * refused connection every 3 s instead of a held slot. */
+#define ARGUS_MQTT_CONNECT_GRACE_US UINT64_C(3000000)
 #define ARGUS_MQTT_CLIENT_TASK_STACK 8192
 #define ARGUS_MQTT_SERVER_TASK_STACK 4096
 
@@ -1098,9 +1153,47 @@ done:
  * Client slot allocation  (hardened: atomic count tracking)
  * =========================================================================*/
 
+/* Admission for a freshly accepted, NOT-yet-authenticated socket.
+ *
+ * Two separate bounds, both required:
+ *   - the pre-connect pool itself, so unauthenticated load can never consume
+ *     the authenticated capacity sized above;
+ *   - a per-source cap, so one address cannot occupy the pre-connect pool by
+ *     itself.
+ *
+ * A client that completes CONNECT is promoted out of the pre-connect count
+ * (argus_mqtt_promote_authenticated_locked), freeing its pre-connect slot for
+ * the next arrival. Called under client_lock. */
+static bool argus_mqtt_preconnect_admit_locked(uint32_t peer_key)
+{
+    size_t pending = 0U;
+    size_t pending_from_source = 0U;
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        const argus_mqtt_client_t *c = &s_broker.clients[i];
+        if (!c->in_use || c->connected) continue;
+        pending++;
+        if (c->peer_key == peer_key) pending_from_source++;
+    }
+    if (pending >= ARGUS_MQTT_MAX_PRECONNECT) {
+        ESP_LOGW(TAG, "refusing MQTT socket: pre-connect pool full (%u)",
+                 (unsigned)pending);
+        return false;
+    }
+    if (pending_from_source >= ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE) {
+        ESP_LOGW(TAG,
+                 "refusing MQTT socket: source already holds %u pre-connect sockets",
+                 (unsigned)pending_from_source);
+        return false;
+    }
+    return true;
+}
+
 static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(
     int sock, uint32_t peer_key, uint8_t receiving_interface)
 {
+    if (!argus_mqtt_preconnect_admit_locked(peer_key)) {
+        return NULL;
+    }
     for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
         if (!s_broker.clients[i].in_use) {
             argus_mqtt_client_t *client = &s_broker.clients[i];
@@ -1124,19 +1217,37 @@ static uint8_t argus_mqtt_receiving_interface(int sock)
         local.sin_family != AF_INET) {
         return 0U;
     }
+    /* Fail-closed classification via the single shared decision point. The
+     * old code checked AP first and returned immediately, so an address
+     * matching BOTH netifs resolved to SOFTAP - the more privileged answer.
+     * AMBIGUOUS and UNKNOWN both yield 0, which
+     * argus_machine_service_authenticate() rejects as an invalid interface,
+     * so a SOFTAP-only machine record cannot authenticate from an ambiguous
+     * socket. */
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    esp_netif_ip_info_t ip = {0};
-    if (ap != NULL && esp_netif_get_ip_info(ap, &ip) == ESP_OK &&
-        ip.ip.addr != 0U && local.sin_addr.s_addr == ip.ip.addr) {
+    esp_netif_ip_info_t ap_ip = {0};
+    esp_netif_ip_info_t sta_ip = {0};
+    bool ap_valid = ap != NULL &&
+                    esp_netif_get_ip_info(ap, &ap_ip) == ESP_OK;
+    bool sta_valid = sta != NULL &&
+                     esp_netif_get_ip_info(sta, &sta_ip) == ESP_OK;
+
+    switch (argus_net_mgr_classify_interface(
+                local.sin_addr.s_addr, ap_valid, ap_ip.ip.addr,
+                sta_valid, sta_ip.ip.addr)) {
+    case ARGUS_NET_IFACE_SOFTAP:
         return ARGUS_MACHINE_INTERFACE_SOFTAP;
-    }
-    memset(&ip, 0, sizeof(ip));
-    if (sta != NULL && esp_netif_get_ip_info(sta, &ip) == ESP_OK &&
-        ip.ip.addr != 0U && local.sin_addr.s_addr == ip.ip.addr) {
+    case ARGUS_NET_IFACE_STA:
         return ARGUS_MACHINE_INTERFACE_STA;
+    case ARGUS_NET_IFACE_AMBIGUOUS:
+        ESP_LOGE(TAG,
+                 "MQTT socket interface AMBIGUOUS (AP/STA address overlap); "
+                 "refusing interface-scoped admission");
+        return 0U;
+    default:
+        return 0U;
     }
-    return 0U;
 }
 
 /* ===========================================================================

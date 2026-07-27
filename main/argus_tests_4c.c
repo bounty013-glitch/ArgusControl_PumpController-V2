@@ -386,8 +386,14 @@ esp_err_t test_4c_authority_startup_window_blocks_early_hmi(void)
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
 
+    // DENIED_WINDOW_OPEN, not DENIED_PROFILE: under ARGUSCORE_PREFERRED the
+    // commissioned profile PERMITS the panel - it is the local fallback once
+    // the window closes - so the refusal is "not yet", and the operator
+    // remedy is to wait a few seconds rather than to recommission a
+    // correctly-commissioned controller. The BEHAVIOUR under test is
+    // unchanged: a faster boot still never converts into control.
     CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
-              P_CORE, true, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
+              P_CORE, true, 100U) == ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN);
     CHECK(core.lease_machine_id[0] == '\0');
     CHECK(core.authority_epoch == 0U);
 
@@ -2344,8 +2350,10 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
     CHECK(seam_unchanged(&before, &standalone));
     CHECK(seam_assert_operational_state(&standalone) == ESP_OK);
 
-    // DENIED_PROFILE again - a panel during ArgusCore's bounded window. A
-    // faster boot must never convert into control.
+    // DENIED_WINDOW_OPEN - a panel during ArgusCore's bounded window. A
+    // faster boot must never convert into control. Distinct from the
+    // profile denial above: this one resolves itself when the window
+    // closes, that one needs recommissioning.
     argus_mqtt_session_core_t windowed;
     argus_mqtt_session_core_init(&windowed, SESSION);
     seam_load_operational_state(&windowed);
@@ -2362,7 +2370,7 @@ esp_err_t test_4c_seam_denied_paths_preserve_operation(void)
 
     before = seam_capture(&windowed);
     out = seam_run(&topics, &windowed, &panel_request, P_CORE, true, false, 100U);
-    CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_PROFILE);
+    CHECK(out.arbitration == ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN);
     CHECK(seam_unchanged(&before, &windowed));
     CHECK(windowed.authority_epoch == 0U);
     CHECK(seam_assert_operational_state(&windowed) == ESP_OK);

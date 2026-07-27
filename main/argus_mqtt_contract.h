@@ -179,6 +179,14 @@ typedef enum {
     // ordinary stale-epoch check. See argus_mqtt_runtime.c's duplicate-cache
     // documentation for the full argument.
     ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED,
+    // The commissioned profile PERMITS this requester, but only after the
+    // bounded ArgusCore acquisition window closes. Distinct from
+    // DENIED_PROFILE because the operator remedy is completely different:
+    // this one resolves itself within seconds, whereas a profile denial
+    // requires recommissioning the unit. Reporting the two identically told
+    // an operator watching an HMI wait out ArgusCore's startup window to go
+    // recommission a correctly-commissioned controller.
+    ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN,
 } argus_mqtt_authority_result_t;
 
 typedef struct {

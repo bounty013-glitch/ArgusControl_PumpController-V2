@@ -8,6 +8,8 @@
 #include "argus_machine_directory.h"
 #include "argus_machine_service.h"
 #include "argus_mqtt_broker.h"
+#include "argus_mqtt_runtime.h"
+#include "argus_net_mgr.h"
 #include "argus_mqtt_contract.h"
 #include "argus_mqtt_security.h"
 #include "argus_password_verifier.h"
@@ -713,5 +715,118 @@ esp_err_t test_4d4_invalidated_connection_is_inert(void)
     CHECK(subscriptions == 0U && publishes == 0U);
     CHECK(heartbeats == 0U && sequences == 0U);
     CHECK(authority_lookups == 0U && dispatches == 0U);
+    return ESP_OK;
+}
+
+/* ===========================================================================
+ * Network admission and resource-budget closure (work order 2026-07-27).
+ * Each test drives the PRODUCTION decision function, not a restatement of it.
+ * =========================================================================*/
+
+esp_err_t test_4d4_iface_ambiguity_fails_closed(void)
+{
+    /* The AP is the ESP-IDF default 192.168.4.1; a rogue DHCP lease can put
+     * the STA interface on the same address. The old code checked AP first
+     * and returned immediately, so that overlap resolved to SOFTAP - the MORE
+     * privileged answer - unlocking AP-only browser routes and SOFTAP-only
+     * machine records to the plant network. Ambiguity must resolve the other
+     * way. */
+    const uint32_t ap = 0x0104A8C0U;    /* 192.168.4.1  */
+    const uint32_t sta = 0x3A32A8C0U;   /* 192.168.50.58 */
+
+    argus_net_mgr_clear_interface_conflict();
+
+    /* Unambiguous cases still classify. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_SOFTAP);
+    CHECK(argus_net_mgr_classify_interface(sta, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+
+    /* Both interfaces on the same address: every socket is ambiguous. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, ap) ==
+          ARGUS_NET_IFACE_AMBIGUOUS);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+
+    /* The conflict latch is sticky - anything admitted while it held stays
+     * suspect until an operator clears it. */
+    argus_net_mgr_clear_interface_conflict();
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+
+    /* A local address matching neither interface is UNKNOWN, not SOFTAP. */
+    CHECK(argus_net_mgr_classify_interface(0x0202A8C0U, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    /* No usable local address at all. */
+    CHECK(argus_net_mgr_classify_interface(0U, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    /* AP address unknown (netif down): an STA socket still classifies, and
+     * nothing can classify as SOFTAP. */
+    CHECK(argus_net_mgr_classify_interface(sta, false, 0U, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(argus_net_mgr_classify_interface(ap, false, 0U, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_kdf_global_bound_is_source_independent(void)
+{
+    /* The per-source buckets cannot bound total authentication work: there
+     * are only 8, they evict LRU, and a BLOCKED bucket is the stalest so it
+     * is evicted first - an attacker clears its own cooldown by connecting
+     * from a few other addresses. This global bucket is the bound that
+     * cannot be escaped, because it never looks at the address. */
+    uint32_t retry = 0U;
+    const uint64_t t0 = UINT64_C(1000000);
+
+    argus_machine_service_kdf_global_reset_for_test();
+
+    /* The burst is admitted... */
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(t0, &retry));
+    }
+    /* ...and the very next one is refused, with a usable retry hint. No
+     * source address was ever supplied, so no amount of address cycling
+     * changes this. */
+    retry = 0U;
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(t0, &retry));
+    CHECK(retry > 0U);
+
+    /* Still refused later in the same window. */
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+              t0 + ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US - 1U, &retry));
+
+    /* The window rolls, and legitimate work proceeds - the bound delays a
+     * reconnect during a flood, it does not deny it indefinitely. */
+    CHECK(argus_machine_service_kdf_global_admit_for_test(
+              t0 + ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US, &retry));
+
+    argus_machine_service_kdf_global_reset_for_test();
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_admission_budgets_are_self_consistent(void)
+{
+    /* These constants are load-bearing and were previously fictional: the
+     * broker advertised 10 client slots costing ~13 KB of heap each, against
+     * a heap that could not fund them, so the shortfall surfaced as unrelated
+     * allocations failing. Pin the relationships that must hold. */
+
+    /* Unauthenticated load must never be able to consume the authenticated
+     * capacity: the pre-connect pool cannot exceed the client pool. */
+    CHECK(ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED >= 1U);
+    CHECK(ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED <=
+          ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED);
+    /* One source must not be able to fill the pre-connect pool alone. */
+    CHECK(ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED <
+          ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED);
+
+    /* The replay cache is sized from the enrollment ceiling - one slot per
+     * machine that can have a request in flight - not from a traffic guess. */
+    CHECK(ARGUS_MQTT_AUTH_DUP_CACHE_SIZE == ARGUS_SECURITY_MAX_MACHINES);
+
+    /* Concurrent machine KDF admission must leave the depth-1 worker queue
+     * free for the human/recovery path. */
+    CHECK(ARGUS_MACHINE_AUTH_KDF_ADMISSION_MAX == 1U);
     return ESP_OK;
 }

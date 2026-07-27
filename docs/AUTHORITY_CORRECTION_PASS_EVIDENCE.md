@@ -7,6 +7,144 @@
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+## -3. Network admission and resource-budget closure (2026-07-27)
+
+Shawn's work order, acting on the §-2.2 findings. Six items; all implemented,
+built in BOTH configurations with zero warnings, and verified on hardware
+under load.
+
+### Design decisions and implemented limits
+
+**1. Authentication flood.** A global token bucket — 8 machine-auth KDF
+derivations per 10 s — is now consulted BEFORE any per-source decision. It
+is the bound that cannot be escaped by cycling source addresses, because it
+never looks at the address; the 8 per-source buckets remain, but they were
+never a bound (only 8 of them, LRU-evicted, and a BLOCKED bucket is the
+stalest so it was evicted first — an attacker cleared its own cooldown by
+moving address). Concurrent machine KDF admission dropped 2 → 1 so the
+depth-1 worker queue always has a slot for the browser/recovery path, which
+shares the worker. Sizing rationale: a legitimate reconnect storm is small
+and rare; 8/10 s covers it with margin while capping an attacker at ~16 s of
+worker time per 10 s instead of a 100% duty cycle. **Stated honestly: during
+an active flood a legitimate reconnect may be delayed up to one window. It
+is bounded delay, not indefinite denial** — and the browser recovery path
+stays available throughout.
+
+**2. Pre-CONNECT exhaustion.** Unauthenticated sockets are now bounded
+SEPARATELY from authenticated clients (`ARGUS_MQTT_MAX_PRECONNECT` = 4) with
+a per-source cap of 2, so unauthenticated load can never consume
+authenticated capacity and one address cannot fill the pool alone. The
+CONNECT grace deadline dropped 30 s → 3 s.
+
+**3. Client capacity — measured, not chosen.** `ARGUS_MQTT_MAX_CLIENTS`
+10 → **4**. Each accepted client measured **~13.0 KB of heap** (8192 B task
+stack plus ~4.9 KB lwIP/TCB), from this document's own instrumentation:
+free heap 45,984 B at 0 clients vs 32,932 B at 1. Ten clients would have
+needed ~130 KB that does not exist; the shortfall surfaced as unrelated
+allocations failing, which is how the 4D.4 directory tests began failing.
+Subscriptions per client 20 → 8 (the contract defines a 5-filter budget), so
+`s_broker` fell **54,536 → 25,592 bytes**.
+
+**4. AP/STA ambiguity.** One shared classifier
+(`argus_net_mgr_classify_interface`) replaces two independent
+implementations. A local address matching BOTH interfaces — or neither —
+returns `ARGUS_NET_IFACE_AMBIGUOUS`, never `SOFTAP`. The old MQTT path
+checked AP first and returned immediately, so an overlap resolved to the MORE
+privileged answer. Ambiguity now denies AP-only HTTP routes and yields
+interface 0 for MQTT, which `argus_machine_service_authenticate()` rejects,
+so a SOFTAP-only machine record cannot authenticate from an ambiguous socket.
+The conflict is latched and readable
+(`argus_net_mgr_interface_conflict_detected`) so the refusal is explainable
+rather than an unexplained lockout.
+
+**5. Contract reconciliations.** All six closed in
+`docs/PHASE_4C_MQTT_CONTRACT.md`: replay bound `2 × MAX_MACHINES` →
+`MAX_MACHINES` (16, matching code); A2.2 payload ceiling 512 → **384**, the
+value actually enforced by `ARGUS_MQTT_BROKER_PAYLOAD_CAP` before any
+callback runs; `retain_forbidden` documented as **reserved and unreachable**
+(broker policy drops retained command publishes before the application sees
+them — the refusal was always real, the reporting never existed); QoS 0 now
+**publishes** a `qos_1_required` result instead of silently logging; a new
+`denied_window_open` reason distinguishes "the profile permits you, wait for
+ArgusCore's window" from "the profile forbids you, recommission the unit";
+and A2.4 now states explicitly that a replayed result carries the values AS
+OF THE ORIGINAL DECISION, with A2.6 governing.
+
+**6. Production build gate.** `CONFIG_ARGUS_DIAGNOSTIC_MODE=n` now excludes
+every `argus_tests_*.c` translation unit from the link (main/CMakeLists.txt)
+and the test headers from `app_main.c`, so fixtures are absent from the
+image rather than merely unreachable. Built via
+`sdkconfig.production.defaults`; the generated `sdkconfig.production` and
+`build_production/` are gitignored because they inherit the credential-bearing
+sdkconfig chain.
+
+### Build proof — production excludes diagnostics
+
+| | `.bss` | `.data` | image |
+|---|---|---|---|
+| Diagnostic | 79,104 | 20,156 | 1,275,280 |
+| Production | **69,864** | 19,852 | **1,049,936** |
+
+`argus_tests` symbol references in the link map: **diagnostic 2,180,
+production 0**. `argus_tests_4a_run_all`: 6 vs 0. The duplicate 6,952-byte
+`bss.topics` fixture: present vs **absent**. Both configurations compile with
+zero warnings.
+
+### Hardware verification — three runs, HMI connected throughout
+
+| Run | Executed | Passed | Failed | Heap before | Largest block | Stack free |
+|---|---|---|---|---|---|---|
+| 1 | 1014 | 1014 | 0 | 63,312 | 31,744 | 4,248 |
+| 2 | 1014 | 1014 | 0 | 63,248 | 31,744 | 4,096 |
+| 3 | 1014 | 1014 | 0 | 61,700 | 31,744 | 4,240 |
+
+338 distinct tests × 3 repeat passes, per run. Every run: `Broker Clients
+STEADY (1 -> 1)`, `Task Count UNCHANGED (24)`, all isolation fields
+UNCHANGED/STEADY. Free heap under HMI load rose **32,932 → ~63,000** and
+largest contiguous block **21,504 → 31,744** versus the previous pass — the
+budget work returned ~30 KB, which is what makes 4 clients supportable
+rather than aspirational.
+
+**A first run failed 6/1014 and is recorded rather than hidden:**
+`test_4c_authority_startup_window_blocks_early_hmi` and
+`test_4c_seam_denied_paths_preserve_operation` asserted `DENIED_PROFILE` for
+the acquisition-window case, which item 5 deliberately changed to
+`DENIED_WINDOW_OPEN`. The tests caught an intended semantic change, which is
+what asserting the reason code is for. Expectations corrected; behaviour
+under test (a faster boot never converts into control) is unchanged.
+
+### Network admission probes — against the live broker
+
+Non-motion probes only: sockets and MQTT CONNECT packets. **No PUBLISH of any
+kind was sent, so no command could reach the controller.**
+
+| Probe | Observed | Meaning |
+|---|---|---|
+| Silent socket | closed by broker after **4.6 s** | 3 s deadline + 2 s liveness poll. Was 30 s. |
+| 12 sockets from one source | **10 closed by broker**, 2 held | per-source pre-connect cap of 2, exactly |
+| 25 bogus-credential CONNECTs | **20 fast refusals, 5 KDF-paced**, 0 errors | global bucket capping work; only the budgeted few reach PBKDF2 |
+
+After the probes the controller was healthy — no panic, no `NO_MEM`, Wi-Fi /
+AP / network manager / broker / HTTP all up — and **the HMI re-authenticated**
+(`authenticated machine connected`), which is the "flooding must not
+indefinitely deny legitimate HMI reconnection" requirement demonstrated
+rather than asserted.
+
+### Not verified, stated plainly
+
+- **Maximum declared client load (4 authenticated clients) was NOT exercised.**
+  Doing so requires four enrolled machine credentials; Shawn holds the machine
+  secret and only the rotary HMI is enrolled on this bench. The 4-client figure
+  is derived from measured per-client cost (~13.0 KB) against measured free
+  heap, not from observing four simultaneous authenticated clients. **This is
+  the one verification item in the work order I could not complete.**
+- The AP/STA ambiguity guard is verified through the production classifier
+  seam (`test_4d4_iface_ambiguity_fails_closed`, all branches including the
+  latch), not by staging a rogue DHCP server on the plant network.
+- The production image was built and its exclusions proven from the link map;
+  it was **not flashed**. COM5 continues to run the diagnostic build, which is
+  what acceptance testing requires.
+
 ## -2. Adversarial audit pass (2026-07-27)
 
 Four independent adversarial audits were run over the whole codebase

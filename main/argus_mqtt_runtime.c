@@ -474,6 +474,8 @@ static const char *authority_result_reason(argus_mqtt_authority_result_t r)
     case ARGUS_MQTT_AUTHORITY_DENIED_PROFILE: return "denied_by_profile";
     case ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING:
         return "transfer_unsupported_running";
+    case ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN:
+        return "denied_window_open";
     case ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED:
         // Reuses the existing "stale_epoch" wire reason rather than minting
         // new contract surface: from the requester's point of view this IS
@@ -849,6 +851,17 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
     }
     if (message->qos != 1U) {
         out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_QOS_REFUSED;
+        // A2.5 places qos_1_required in the decode/envelope group, which
+        // publishes a result. This previously returned with published=false,
+        // so a client that used the wrong QoS got silence and no way to
+        // diagnose it - the exact failure mode A2 was written to remove.
+        // The request_id is not yet decoded at this point (decode happens
+        // below, deliberately, so a malformed payload cannot be parsed
+        // before the envelope is accepted), so the result carries an empty
+        // request_id, same as a decode rejection.
+        emit_authority_result(&out, NULL, message, core, authority_profile,
+                              core_window_open, now_ms, "REJECTED",
+                              "qos_1_required", release, false);
         return out;
     }
 

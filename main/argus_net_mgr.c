@@ -1426,6 +1426,49 @@ static esp_err_t prod_verify_broker_stopped(void *ctx) {
     return argus_mqtt_broker_verify_stopped_converged(&ops, 41, 50);
 }
 
+/* Latched on the first observation of an overlapping AP/STA configuration.
+ * Sticky by design: the overlap may be transient (a rogue lease that is later
+ * replaced), but anything admitted while it held must stay suspect until an
+ * operator clears it. */
+static _Atomic bool s_iface_conflict;
+
+argus_net_iface_t argus_net_mgr_classify_interface(
+    uint32_t local_addr,
+    bool ap_valid, uint32_t ap_addr,
+    bool sta_valid, uint32_t sta_addr)
+{
+    if (local_addr == 0U) {
+        return ARGUS_NET_IFACE_UNKNOWN;
+    }
+    /* A configuration where both interfaces claim the SAME address is
+     * inherently ambiguous for every socket, not just this one - latch it
+     * even if this particular socket matches neither. */
+    if (ap_valid && sta_valid && ap_addr == sta_addr && ap_addr != 0U) {
+        atomic_store(&s_iface_conflict, true);
+        return ARGUS_NET_IFACE_AMBIGUOUS;
+    }
+    bool matches_ap = ap_valid && ap_addr != 0U && local_addr == ap_addr;
+    bool matches_sta = sta_valid && sta_addr != 0U && local_addr == sta_addr;
+    if (matches_ap && matches_sta) {
+        /* The case the old AP-first ordering silently resolved to SOFTAP. */
+        atomic_store(&s_iface_conflict, true);
+        return ARGUS_NET_IFACE_AMBIGUOUS;
+    }
+    if (matches_ap) return ARGUS_NET_IFACE_SOFTAP;
+    if (matches_sta) return ARGUS_NET_IFACE_STA;
+    return ARGUS_NET_IFACE_UNKNOWN;
+}
+
+bool argus_net_mgr_interface_conflict_detected(void)
+{
+    return atomic_load(&s_iface_conflict);
+}
+
+void argus_net_mgr_clear_interface_conflict(void)
+{
+    atomic_store(&s_iface_conflict, false);
+}
+
 esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed)
 {
     if (!out_disconnect_needed) return ESP_ERR_INVALID_ARG;

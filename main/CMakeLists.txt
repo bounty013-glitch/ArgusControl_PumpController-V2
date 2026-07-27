@@ -1,3 +1,30 @@
+# Diagnostic test translation units are compiled ONLY into a diagnostic
+# build. In a production build they are absent from the image entirely -
+# not merely unreachable - so their fixtures (~9 KB of .bss, including a
+# duplicate 6,952-byte topic table) and their code cost nothing, and the
+# 16 KB diagnostic task that exists to run them is never created.
+#
+# CONFIG_ARGUS_DIAGNOSTIC_MODE remains the single switch: app_main guards the
+# diagnostic task and menu on it, and this list keeps the test objects
+# themselves out of the link. Both builds must compile with zero warnings.
+if(CONFIG_ARGUS_DIAGNOSTIC_MODE)
+    set(ARGUS_DIAGNOSTIC_SRCS
+        "argus_tests_4a.c"
+        "argus_tests_4b4.c"
+        "argus_tests_4b4_step2.c"
+        "argus_tests_4b5.c"
+        "argus_tests_4b6.c"
+        "argus_tests_4c.c"
+        "argus_tests_4d2.c"
+        "argus_tests_4d3.c"
+        "argus_tests_4d3a.c"
+        "argus_tests_4d4.c"
+        "argus_tests.c"
+    )
+else()
+    set(ARGUS_DIAGNOSTIC_SRCS "")
+endif()
+
 idf_component_register(
     SRCS
         "app_main.c"
@@ -44,17 +71,7 @@ idf_component_register(
         "argus_security_admin.c"
         "argus_security_transition.c"
         "argus_security_http.c"
-        "argus_tests_4a.c"
-        "argus_tests_4b4.c"
-        "argus_tests_4b4_step2.c"
-        "argus_tests_4b5.c"
-        "argus_tests_4b6.c"
-        "argus_tests_4c.c"
-        "argus_tests_4d2.c"
-        "argus_tests_4d3.c"
-        "argus_tests_4d3a.c"
-        "argus_tests_4d4.c"
-        "argus_tests.c"
+        ${ARGUS_DIAGNOSTIC_SRCS}
     INCLUDE_DIRS "."
     EMBED_TXTFILES
         "argus_controls.html"

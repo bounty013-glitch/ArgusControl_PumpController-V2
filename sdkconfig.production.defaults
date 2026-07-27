@@ -1,0 +1,25 @@
+# Production build overlay.
+#
+# Applied on top of sdkconfig.defaults to produce a PRODUCTION image:
+#
+#   idf.py -B build_production \
+#          -DSDKCONFIG=sdkconfig.production \
+#          -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.production.defaults" \
+#          build
+#
+# Turning ARGUS_DIAGNOSTIC_MODE off does two things that must stay in step:
+#   - app_main does not create the diagnostic task (16 KB of heap) and does
+#     not compile the diagnostic menu or the test headers;
+#   - main/CMakeLists.txt excludes every argus_tests_*.c translation unit
+#     from the link, so the fixtures (~9 KB of .bss, including a duplicate
+#     6,952-byte topic table) are absent from the image rather than merely
+#     unreachable.
+#
+# The diagnostic build remains the default (sdkconfig.defaults) and is what
+# acceptance testing runs on COM5. This overlay exists so the production
+# image can be built and its exclusions PROVEN, not asserted.
+#
+# Deliberately contains no credentials. Wi-Fi passphrase and machine secret
+# are set through menuconfig into the gitignored sdkconfig and are never
+# committed.
+CONFIG_ARGUS_DIAGNOSTIC_MODE=n

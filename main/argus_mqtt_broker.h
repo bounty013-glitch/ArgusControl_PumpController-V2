@@ -14,6 +14,15 @@
 #define ARGUS_MQTT_BROKER_TOPIC_CAP 160U
 #define ARGUS_MQTT_BROKER_PAYLOAD_CAP 385U
 #define ARGUS_MQTT_BROKER_RETAINED_CAPACITY 32U
+
+/* Admission budgets, declared here so the suite can assert the relationships
+ * between them rather than restating the numbers. The authoritative
+ * definitions and the measurement they derive from live in
+ * argus_mqtt_broker.c; these mirror them and are checked against the
+ * implementation by a compile-time assertion there. */
+#define ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED 4U
+#define ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED 4U
+#define ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED 2U
 #define ARGUS_MQTT_BROKER_USERNAME_CAP (ARGUS_SECURITY_ID_MAX + 1U)
 #define ARGUS_MQTT_BROKER_PASSWORD_CAP 129U
 

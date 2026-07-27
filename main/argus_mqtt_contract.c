@@ -568,6 +568,18 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
         return ARGUS_MQTT_AUTHORITY_DENIED_INVALID;
     }
     if (!profile_permits(authority_profile, client_type, core_window_open)) {
+        // Distinguish "the profile forbids you" from "the profile permits
+        // you, but ArgusCore's bounded startup window is still open". Only
+        // the local-fallback client types can be in the second case, and
+        // only under ARGUSCORE_PREFERRED - an ArgusCore request refused on a
+        // STANDALONE_HMI unit is a true profile denial in every machine
+        // state and every window state.
+        if (core_window_open &&
+            authority_profile == ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED &&
+            (client_type == ARGUS_MACHINE_CLIENT_HMI ||
+             client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL)) {
+            return ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN;
+        }
         return ARGUS_MQTT_AUTHORITY_DENIED_PROFILE;
     }
 

@@ -543,6 +543,54 @@ const char *argus_net_mgr_get_wifi_driver_mode_name(void);
  */
 esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed);
 
+/**
+ * @brief Which local interface a socket was accepted on, decided FAIL-CLOSED.
+ *
+ * Both the MQTT broker and the HTTP server must answer "is this an AP-local
+ * peer?" to enforce AP-only routes and SOFTAP-only machine records. Both
+ * previously did it by comparing the socket's local address against the AP
+ * netif, and the MQTT side checked AP first and returned immediately - so an
+ * address matching BOTH netifs resolved to SOFTAP, the MORE privileged
+ * answer. The AP is the ESP-IDF default 192.168.4.1/24 and the STA is a DHCP
+ * client, so a rogue DHCP server that places the STA interface in
+ * 192.168.4.0/24 could make plant-network peers classify as AP-local,
+ * defeating the AP-only boundary the security contract asserts.
+ *
+ * This helper is the single decision point, and it is deliberately ordered
+ * the other way: a local address that matches BOTH interfaces, or that
+ * matches neither, is AMBIGUOUS and yields ARGUS_NET_IFACE_AMBIGUOUS - never
+ * SOFTAP. Callers must treat ambiguous as "deny AP-only".
+ */
+typedef enum {
+    ARGUS_NET_IFACE_UNKNOWN = 0,   /**< No usable local address. Deny AP-only. */
+    ARGUS_NET_IFACE_SOFTAP,        /**< Unambiguously the SoftAP interface. */
+    ARGUS_NET_IFACE_STA,           /**< Unambiguously the station interface. */
+    ARGUS_NET_IFACE_AMBIGUOUS,     /**< Matches both, or netif config overlaps. Deny AP-only. */
+} argus_net_iface_t;
+
+/**
+ * @brief Pure classifier: decide the interface from explicit addresses.
+ *
+ * Separated from any socket/netif lookup so the ambiguity rule itself is
+ * directly testable without hardware. @p ap_valid / @p sta_valid say whether
+ * that netif currently has a usable address.
+ */
+argus_net_iface_t argus_net_mgr_classify_interface(
+    uint32_t local_addr,
+    bool ap_valid, uint32_t ap_addr,
+    bool sta_valid, uint32_t sta_addr);
+
+/**
+ * @brief True when the AP and STA interfaces currently overlap.
+ *
+ * Latched by the classifier whenever it observes an overlapping
+ * configuration, and published as a configuration fault so an operator can
+ * see WHY AP-only access is being refused rather than experiencing it as an
+ * unexplained lockout.
+ */
+bool argus_net_mgr_interface_conflict_detected(void);
+void argus_net_mgr_clear_interface_conflict(void);
+
 #ifdef __cplusplus
 }
 #endif

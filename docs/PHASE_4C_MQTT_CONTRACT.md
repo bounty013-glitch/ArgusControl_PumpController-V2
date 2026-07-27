@@ -323,9 +323,20 @@ All topics are relative to the dynamic root `argus/<client_id>/<unit_id>`.
 | `status/core/core_lease_status` | controller → clients | 1 | **true (snapshot)** |
 | `status/core/authority_reason` | controller → clients | 1 | **true (snapshot)** |
 
-A retained request is rejected with `retain_forbidden`. A retained command
-topic would let a broker replay an acquisition after a session change, which
-is precisely the class of thing this contract exists to prevent.
+A retained request is **dropped at the broker**, before authentication,
+policy, or any application callback: a retained command topic would let a
+broker replay an acquisition after a session change, which is precisely the
+class of thing this contract exists to prevent.
+
+*(Revised 2026-07-27.* This said the request "is rejected with
+`retain_forbidden`", implying an `event/core/authority_result` naming that
+reason. No such result was ever published and none can be: broker topic
+policy refuses a retained publish to a command topic outright, so the
+application layer never sees it. The refusal is real and fail-closed - it is
+the reporting that did not exist. `retain_forbidden` is retained in the A2.5
+vocabulary as **reserved**; a client must not expect to receive it. The
+handler retains a redundant retain check as defence in depth for the case
+where broker policy is ever loosened.*)*
 
 **Subscription budget.** The result topic is deliberately placed under
 `event/` so an existing subscriber can widen its fifth filter from
@@ -334,8 +345,15 @@ stays at 5 and the per-client subscription limit is not raised.
 
 ## A2.2 Request schema — `command/core/request_authority`
 
-Maximum payload: **512 bytes**. Larger is rejected `payload_too_large`
-without parsing.
+Maximum payload: **384 bytes**. Larger is rejected without parsing.
+
+*(Revised 2026-07-27. This said 512, which never existed: the broker rejects
+any PUBLISH whose payload reaches `ARGUS_MQTT_BROKER_PAYLOAD_CAP` = 385 bytes
+before authentication, policy, or any application callback runs, so the
+effective ceiling was always 384 and `payload_too_large` could never be
+reported on the wire for a 385-512 byte request - the peer simply saw its
+packet dropped. A valid maximal request is ~130 bytes, so nothing legitimate
+is affected. The contract now states the limit that is actually enforced.)*
 
 ```json
 {
@@ -430,6 +448,18 @@ This satisfies the minimum observability requirement: the requester can
 determine `request_id`, accepted/rejected, reason, current owner, current
 epoch, and controller session from a single message.
 
+**On a duplicate replay, these fields are the values AS OF THE ORIGINAL
+DECISION, not current state** (clarified 2026-07-27). A2.6 requires an
+identical repeat to republish the cached result, so `control_owner`,
+`authority_epoch`, `core_lease_status` and `local_control_status` in a
+replayed result describe the moment the request was first decided and may
+since have moved. The two clauses appeared to conflict; A2.6 governs, and
+this is deliberate - re-deriving them would make a redelivery report a
+different outcome than the original, which is exactly what idempotent
+replay exists to prevent. A client that needs current authority state must
+read the retained `status/core/*` topics, which are always current, rather
+than inferring it from a result that may be a replay.
+
 ## A2.5 Stable rejection-reason vocabulary
 
 These strings are contract surface. They may be added to; existing values
@@ -444,8 +474,17 @@ must not be renamed or repurposed.
 **Authorization** (broker boundary; no result published):
 `topic_scope_denied`, `not_permitted`
 
-**Admission:** `denied_by_profile`, `denied_held_by_other`,
-`denied_machine_state`, `not_owner`, `transfer_unsupported_running`
+**Admission:** `denied_by_profile`, `denied_window_open`,
+`denied_held_by_other`, `denied_machine_state`, `not_owner`,
+`transfer_unsupported_running`
+
+`denied_window_open` (added 2026-07-27) is returned when the commissioned
+profile PERMITS the requester but ArgusCore's bounded startup window has not
+yet closed. It is deliberately distinct from `denied_by_profile`: the remedy
+for this one is to wait a few seconds, whereas a profile denial requires
+recommissioning the unit. Reporting both as `denied_by_profile` sent an
+operator whose panel was simply waiting out the window off to recommission a
+correctly-commissioned controller.
 
 **Success:** `granted`, `already_held`, `released`
 
@@ -466,11 +505,15 @@ The duplicate record is scoped to the controller session and is discarded on
 session change.
 
 **The replay window is bounded, and its bound is a protocol property.** The
-response cache holds `2 × MAX_MACHINES` (currently 32) entries, evicted
+response cache holds `MAX_MACHINES` (currently 16) entries, evicted
 strictly FIFO. The bound derives from the broker's own admission rules — at
 most one live connection per enrolled machine (§5 duplicate-client-ID
 rejection) against a fixed enrollment ceiling — not from an estimate of
-traffic. Rollover is deterministic: the oldest entry is displaced, the same
+traffic. *(Revised 2026-07-27 from `2 × MAX_MACHINES`. The doubling was
+speculative padding for "a request and its follow-up", not a protocol
+property, and it cost heap that unrelated allocations needed; a machine's
+follow-up is only sent after its first is answered, and cache residency
+carries no safety burden — the A2.2 epoch rules do.)* Rollover is deterministic: the oldest entry is displaced, the same
 rule at every wrap.
 
 **Outside the window, safety does not depend on the cache.** An opaque

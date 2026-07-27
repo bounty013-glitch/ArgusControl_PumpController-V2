@@ -501,6 +501,42 @@ static auth_bucket_t *bucket_for(uint32_t peer_key, uint64_t now_us)
     return oldest;
 }
 
+// Global machine-auth KDF token bucket. See the sizing rationale on
+// ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST. Called under s_mutex.
+static uint64_t s_kdf_global_window_us;
+static uint32_t s_kdf_global_spent;
+
+static bool kdf_global_admit(uint64_t now_us, uint32_t *retry_after_s)
+{
+    if (s_kdf_global_window_us == 0U ||
+        now_us - s_kdf_global_window_us >= ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US) {
+        s_kdf_global_window_us = now_us;
+        s_kdf_global_spent = 0U;
+    }
+    if (s_kdf_global_spent >= ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST) {
+        uint64_t remaining = ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US -
+                             (now_us - s_kdf_global_window_us);
+        *retry_after_s = (uint32_t)((remaining + 999999U) / 1000000U);
+        return false;
+    }
+    s_kdf_global_spent++;
+    return true;
+}
+
+// Exposed for the pure suite: the bound must be testable without a broker.
+bool argus_machine_service_kdf_global_admit_for_test(
+    uint64_t now_us, uint32_t *retry_after_s)
+{
+    uint32_t scratch = 0U;
+    return kdf_global_admit(now_us, retry_after_s != NULL ? retry_after_s : &scratch);
+}
+
+void argus_machine_service_kdf_global_reset_for_test(void)
+{
+    s_kdf_global_window_us = 0U;
+    s_kdf_global_spent = 0U;
+}
+
 static bool throttle_admit(uint32_t peer_key, uint64_t now_us,
                            uint32_t *retry_after_s)
 {
@@ -584,6 +620,14 @@ argus_machine_auth_outcome_t argus_machine_service_authenticate(
     uint64_t now_us = (uint64_t)esp_timer_get_time();
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (!throttle_admit(peer_key, now_us, &outcome.retry_after_s)) {
+        outcome.result = ARGUS_MACHINE_AUTH_THROTTLED;
+        xSemaphoreGive(s_mutex);
+        return outcome;
+    }
+    // GLOBAL bound first: this is the one an attacker cannot escape by
+    // cycling source addresses, so it must be consulted before any
+    // per-source decision can matter.
+    if (!kdf_global_admit(now_us, &outcome.retry_after_s)) {
         outcome.result = ARGUS_MACHINE_AUTH_THROTTLED;
         xSemaphoreGive(s_mutex);
         return outcome;

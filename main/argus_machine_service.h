@@ -20,7 +20,44 @@ extern "C" {
 #define ARGUS_MACHINE_AUTH_FAILURE_LIMIT 5U
 #define ARGUS_MACHINE_AUTH_WINDOW_US UINT64_C(60000000)
 #define ARGUS_MACHINE_AUTH_COOLDOWN_US UINT64_C(30000000)
-#define ARGUS_MACHINE_AUTH_KDF_ADMISSION_MAX 2U
+// Concurrent machine-auth derivations admitted to the KDF worker.
+//
+// Lowered 2 -> 1. The worker is serialised with a depth-1 queue, so at 2 an
+// attacker could keep one derivation RUNNING and a second QUEUED
+// continuously, leaving no queue slot for the browser login path that shares
+// the worker: a human trying to recover the controller waited the full
+// ARGUS_KDF_SUBMIT_WAIT_MS and then failed closed with 503. At 1, a machine
+// request is either running or rejected outright, so the queue slot is
+// always available to the human/recovery path.
+#define ARGUS_MACHINE_AUTH_KDF_ADMISSION_MAX 1U
+
+// GLOBAL rate bound on machine-auth KDF work, deliberately NOT keyed on
+// source address.
+//
+// The per-source buckets below cannot bound total work: there are only
+// ARGUS_MACHINE_AUTH_BUCKETS of them, they are evicted LRU, and a BLOCKED
+// bucket is the stalest so it is evicted first - an attacker clears its own
+// cooldown simply by connecting from a few other addresses. Since every
+// CONNECT with a well-formed username reaches the KDF (deliberately, so an
+// unknown identity is indistinguishable from a wrong password), that made
+// ~2 s of PBKDF2 per TCP connection reachable by an unauthenticated peer,
+// and authentication as a whole - MQTT and browser - could be denied
+// indefinitely.
+//
+// This budget is a plain global token bucket: at most _BURST derivations may
+// start within any _WINDOW_US, whoever asks. It cannot be bypassed by
+// cycling addresses because it does not look at the address at all.
+//
+// Sizing: a legitimate reconnect storm is small and rare - the HMI, at most
+// a couple of service tools, each retrying every few seconds. 8 per 10 s
+// covers that with margin while capping an attacker at 8 derivations
+// (~16 s of worker time) per 10 s instead of a continuous 100% duty cycle.
+// A refused request costs the caller nothing and is retried; the bound
+// delays a legitimate reconnect during an active flood, it does not deny it
+// indefinitely, and the browser recovery path stays available throughout via
+// the reserved queue slot described above.
+#define ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST 8U
+#define ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US UINT64_C(10000000)
 
 typedef struct {
     char display_name[ARGUS_SECURITY_DISPLAY_MAX + 1U];
@@ -100,6 +137,13 @@ argus_machine_auth_outcome_t argus_machine_service_authenticate(
 esp_err_t argus_machine_service_revalidate(
     const argus_machine_principal_t *principal,
     uint8_t receiving_interface);
+
+// Global machine-auth KDF token bucket, exposed so the pure suite can prove
+// the bound holds independently of source address. Not part of the
+// production call path beyond authenticate()'s own use.
+bool argus_machine_service_kdf_global_admit_for_test(
+    uint64_t now_us, uint32_t *retry_after_s);
+void argus_machine_service_kdf_global_reset_for_test(void);
 
 bool argus_machine_service_scope_contains(
     const char *actor_scope, const char *target_scope);

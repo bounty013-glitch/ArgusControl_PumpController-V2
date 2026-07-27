@@ -48,8 +48,14 @@
 #include "argus_auth_service.h"
 #include "argus_security_audit.h"
 #include "argus_security_http.h"
+// Test headers only exist for a diagnostic build - the test translation
+// units are excluded from a production link entirely (see main/CMakeLists.txt),
+// so including their declarations would advertise symbols that are not in
+// the image. Every call site is already inside CONFIG_ARGUS_DIAGNOSTIC_MODE.
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
 #include "argus_tests_4a.h"
 #include "argus_tests.h"
+#endif
 
 #define MQTT_BROKER_PORT      1883U
 
