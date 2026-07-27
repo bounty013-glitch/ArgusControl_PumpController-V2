@@ -21,6 +21,7 @@
 #include "esp_netif.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -938,7 +939,30 @@ static esp_err_t populate_service_ap_config(bool factory,
     memcpy(out_config->ap.password, secret, secret_len);
     out_config->ap.password[secret_len] = 0U;
     out_config->ap.ssid_len = strlen(identity->service_ssid);
-    out_config->ap.max_connection = 1;
+    // Service AP client capacity. Raised from 1 to 4 on 2026-07-26 (see
+    // docs/PHASE_4B_IMPLEMENTATION_PLAN.md Q5 amendment).
+    //
+    // The original value of 1 was a deliberate hardening choice made when the
+    // AP had no per-client authentication and "a single phone" was the only
+    // expected client. That assumption stopped holding once the rotary HMI
+    // became a PERMANENT resident of this AP: the panel occupied the single
+    // slot, and every other station - including the browser console used for
+    // commissioning, machine enrollment and setting authority_profile - was
+    // deauthenticated with "max connection, deauth!". A commissioned pump was
+    // effectively un-administerable without powering down the panel.
+    //
+    // The control that the limit of 1 was standing in for now lives somewhere
+    // stronger: since Phase 4D.4 every machine authenticates with an
+    // independently revocable credential and allowed_interfaces scopes who may
+    // use SoftAP at all. Client count is a capacity limit, not a security
+    // boundary.
+    //
+    // 4 is chosen to match HTTP_MAX_CONNECTIONS (argus_http_server.c) so that
+    // a station can never associate and then fail confusingly at the HTTP
+    // layer. Everything above this is already sized for it or beyond: the
+    // session manager holds 8 sessions (2 per principal) and the MQTT broker
+    // holds 10 clients.
+    out_config->ap.max_connection = 4;
     out_config->ap.authmode = WIFI_AUTH_WPA2_PSK;
     argus_password_zeroize(secret, sizeof(secret));
     return ESP_OK;
@@ -1401,6 +1425,124 @@ static esp_err_t prod_verify_broker_stopped(void *ctx) {
     (void)ctx;
     argus_mqtt_broker_convergence_ops_t ops = broker_convergence_ops();
     return argus_mqtt_broker_verify_stopped_converged(&ops, 41, 50);
+}
+
+/* AP/STA address-conflict fault.
+ *
+ * Asserted on any observation of an overlapping configuration. It is not
+ * merely an internal flag any more: it is published on the authoritative
+ * status path (status/network_fault) with the corrective action, because an
+ * operator whose AP-only access has been refused needs to be told WHY rather
+ * than experiencing an unexplained lockout.
+ *
+ * CLEARING RULE, deterministic and positive-evidence only: the fault clears
+ * when a classification observes BOTH interfaces valid and NOT overlapping -
+ * that is, the configuration has actually been seen healthy again - or when
+ * an operator clears it explicitly. It never clears on a timer, and never
+ * because an interface simply went away. It re-asserts on the very next
+ * overlapping observation.
+ *
+ * Nothing suspect survives a cleared fault: while it holds, ambiguous sockets
+ * are refused admission, so there is no session admitted under ambiguity to
+ * keep distrusting afterwards. */
+static _Atomic bool s_iface_conflict;
+static _Atomic uint32_t s_iface_conflict_observations;
+static _Atomic uint64_t s_iface_conflict_first_us;
+static _Atomic uint64_t s_iface_conflict_last_us;
+static _Atomic uint64_t s_iface_conflict_last_log_us;
+
+/* Log at most this often. A hostile or misconfigured network can produce an
+ * ambiguous socket per connection attempt; the fault is a state, not an
+ * event, and the state is already published. */
+#define ARGUS_NET_IFACE_CONFLICT_LOG_INTERVAL_US UINT64_C(60000000)
+
+static void iface_conflict_assert(void)
+{
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    if (!atomic_exchange(&s_iface_conflict, true)) {
+        atomic_store(&s_iface_conflict_first_us, now_us);
+        atomic_store(&s_iface_conflict_last_log_us, 0U);
+    }
+    atomic_store(&s_iface_conflict_last_us, now_us);
+    atomic_fetch_add(&s_iface_conflict_observations, 1U);
+}
+
+argus_net_iface_t argus_net_mgr_classify_interface(
+    uint32_t local_addr,
+    bool ap_valid, uint32_t ap_addr,
+    bool sta_valid, uint32_t sta_addr)
+{
+    /* Positive evidence of a healthy configuration clears a standing fault.
+     * Evaluated before the local-address checks so that even a classification
+     * with no usable local address still counts as an observation of the
+     * interface configuration itself. */
+    if (ap_valid && sta_valid && ap_addr != 0U && sta_addr != 0U &&
+        ap_addr != sta_addr) {
+        atomic_store(&s_iface_conflict, false);
+    }
+    if (local_addr == 0U) {
+        return ARGUS_NET_IFACE_UNKNOWN;
+    }
+    /* A configuration where both interfaces claim the SAME address is
+     * inherently ambiguous for every socket, not just this one - latch it
+     * even if this particular socket matches neither. */
+    if (ap_valid && sta_valid && ap_addr == sta_addr && ap_addr != 0U) {
+        iface_conflict_assert();
+        return ARGUS_NET_IFACE_AMBIGUOUS;
+    }
+    bool matches_ap = ap_valid && ap_addr != 0U && local_addr == ap_addr;
+    bool matches_sta = sta_valid && sta_addr != 0U && local_addr == sta_addr;
+    if (matches_ap && matches_sta) {
+        /* The case the old AP-first ordering silently resolved to SOFTAP.
+         * Unreachable given the equal-address branch above, kept because it
+         * is the property being asserted, not an optimisation. */
+        iface_conflict_assert();
+        return ARGUS_NET_IFACE_AMBIGUOUS;
+    }
+    if (matches_ap) return ARGUS_NET_IFACE_SOFTAP;
+    if (matches_sta) return ARGUS_NET_IFACE_STA;
+    return ARGUS_NET_IFACE_UNKNOWN;
+}
+
+bool argus_net_mgr_interface_conflict_detected(void)
+{
+    return atomic_load(&s_iface_conflict);
+}
+
+void argus_net_mgr_clear_interface_conflict(void)
+{
+    atomic_store(&s_iface_conflict, false);
+}
+
+void argus_net_mgr_get_interface_conflict(
+    argus_net_iface_conflict_status_t *out)
+{
+    if (out == NULL) return;
+    out->active = atomic_load(&s_iface_conflict);
+    out->observations = atomic_load(&s_iface_conflict_observations);
+    out->first_observed_us = atomic_load(&s_iface_conflict_first_us);
+    out->last_observed_us = atomic_load(&s_iface_conflict_last_us);
+}
+
+bool argus_net_mgr_interface_conflict_log_due(void)
+{
+    if (!atomic_load(&s_iface_conflict)) return false;
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    uint64_t last = atomic_load(&s_iface_conflict_last_log_us);
+    if (last != 0U &&
+        now_us - last < ARGUS_NET_IFACE_CONFLICT_LOG_INTERVAL_US) {
+        return false;
+    }
+    return atomic_compare_exchange_strong(
+        &s_iface_conflict_last_log_us, &last, now_us);
+}
+
+const char *argus_net_mgr_interface_conflict_action(void)
+{
+    return "AP and station interfaces report the same IP address. AP-only "
+           "access and SoftAP-scoped credentials are refused until this is "
+           "corrected. Change the plant DHCP scope or the controller SoftAP "
+           "subnet so they do not overlap, then reconnect.";
 }
 
 esp_err_t argus_net_mgr_eval_sta_disconnect_req(wifi_mode_t wifi_mode, esp_err_t wifi_mode_err, bool sta_started, bool sta_connected, bool sta_ip_acquired, bool *out_disconnect_needed)

@@ -1,3 +1,30 @@
+# Diagnostic test translation units are compiled ONLY into a diagnostic
+# build. In a production build they are absent from the image entirely -
+# not merely unreachable - so their fixtures (~9 KB of .bss, including a
+# duplicate 6,952-byte topic table) and their code cost nothing, and the
+# 16 KB diagnostic task that exists to run them is never created.
+#
+# CONFIG_ARGUS_DIAGNOSTIC_MODE remains the single switch: app_main guards the
+# diagnostic task and menu on it, and this list keeps the test objects
+# themselves out of the link. Both builds must compile with zero warnings.
+if(CONFIG_ARGUS_DIAGNOSTIC_MODE)
+    set(ARGUS_DIAGNOSTIC_SRCS
+        "argus_tests_4a.c"
+        "argus_tests_4b4.c"
+        "argus_tests_4b4_step2.c"
+        "argus_tests_4b5.c"
+        "argus_tests_4b6.c"
+        "argus_tests_4c.c"
+        "argus_tests_4d2.c"
+        "argus_tests_4d3.c"
+        "argus_tests_4d3a.c"
+        "argus_tests_4d4.c"
+        "argus_tests.c"
+    )
+else()
+    set(ARGUS_DIAGNOSTIC_SRCS "")
+endif()
+
 idf_component_register(
     SRCS
         "app_main.c"
@@ -44,17 +71,7 @@ idf_component_register(
         "argus_security_admin.c"
         "argus_security_transition.c"
         "argus_security_http.c"
-        "argus_tests_4a.c"
-        "argus_tests_4b4.c"
-        "argus_tests_4b4_step2.c"
-        "argus_tests_4b5.c"
-        "argus_tests_4b6.c"
-        "argus_tests_4c.c"
-        "argus_tests_4d2.c"
-        "argus_tests_4d3.c"
-        "argus_tests_4d3a.c"
-        "argus_tests_4d4.c"
-        "argus_tests.c"
+        ${ARGUS_DIAGNOSTIC_SRCS}
     INCLUDE_DIRS "."
     EMBED_TXTFILES
         "argus_controls.html"
@@ -79,8 +96,20 @@ idf_component_register(
         json
 )
 
+# Frame-size guard. Extended beyond argus_machine_directory.c after an audit
+# found a ~4.4 KB stack frame in argus_security_directory.c's commit_locked()
+# - a compound-literal assignment that materialised a whole directory slot on
+# the stack - reached from app_main's first-boot path where the main task has
+# only CONFIG_ESP_MAIN_TASK_STACK_SIZE (3584) bytes. The guard was on the one
+# module that was already correct and not on the one that was broken, so the
+# defect compiled cleanly for its whole life. These are the modules that
+# handle whole-directory / whole-payload structures and are therefore where
+# this class of mistake actually lands.
 set_source_files_properties(
     "argus_machine_directory.c"
+    "argus_security_directory.c"
+    "argus_security_store.c"
+    "argus_mqtt_runtime.c"
     PROPERTIES COMPILE_OPTIONS
         "-Wframe-larger-than=2048;-Werror=frame-larger-than=2048"
 )

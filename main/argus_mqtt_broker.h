@@ -13,7 +13,34 @@
 #define ARGUS_MQTT_BROKER_CLIENT_ID_CAP 33U
 #define ARGUS_MQTT_BROKER_TOPIC_CAP 160U
 #define ARGUS_MQTT_BROKER_PAYLOAD_CAP 385U
-#define ARGUS_MQTT_BROKER_RETAINED_CAPACITY 32U
+/* Retained-value store, sized from the CONTRACT rather than a round number.
+ *
+ * At 32 it was already only one slot clear of the 31 retained topics the
+ * runtime publishes, and the two admission-condition topics added in this
+ * pass pushed it over: the broker correctly refused to evict authoritative
+ * state and the network_fault_action and auth_throttle values simply never
+ * became retained, so a client subscribing later would not have learned about
+ * a live fault. Found on hardware under load, not in review.
+ *
+ * ARGUS_MQTT_RETAINED_TOPICS_REQUIRED counts what the contract publishes with
+ * retain=true; a static assertion in argus_mqtt_contract.c ties the two
+ * together, and the live occupancy is reported by
+ * argus_mqtt_broker_get_capacity() so a future overflow is visible rather
+ * than silent. */
+#define ARGUS_MQTT_BROKER_RETAINED_CAPACITY 40U
+
+/* Admission budgets, declared here so the suite can assert the relationships
+ * between them rather than restating the numbers. The authoritative
+ * definitions and the measurement they derive from live in
+ * argus_mqtt_broker.c; these mirror them and are checked against the
+ * implementation by a compile-time assertion there. */
+#define ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED 3U
+#define ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED 3U
+#define ARGUS_MQTT_BROKER_MAX_PRECONNECT_UNPROVEN_DECLARED 2U
+#define ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED 1U
+#define ARGUS_MQTT_BROKER_MAX_CONNECTIONS_DECLARED \
+    (ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED + \
+     ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED)
 #define ARGUS_MQTT_BROKER_USERNAME_CAP (ARGUS_SECURITY_ID_MAX + 1U)
 #define ARGUS_MQTT_BROKER_PASSWORD_CAP 129U
 
@@ -99,6 +126,69 @@ esp_err_t argus_mqtt_broker_init(void);
 esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config);
 esp_err_t argus_mqtt_broker_stop(void);
 esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool retain);
+
+/**
+ * @brief Live admission occupancy and the physical costs behind the limits.
+ *
+ * Exists so the declared client budget can be DEMONSTRATED rather than
+ * derived. Pending and authenticated occupancy are reported separately
+ * because they are separate resources; the refusal counters say which bound
+ * actually fired; the stack low-water is the measurement the per-connection
+ * heap cost is dominated by. Read-only and safe in both builds.
+ */
+typedef struct {
+    uint16_t max_connections;
+    uint16_t max_authenticated;
+    uint16_t max_pending;
+    uint16_t max_pending_unproven;
+    uint16_t max_pending_per_source;
+    uint16_t pending;
+    uint16_t authenticated;
+    uint16_t peak_pending;
+    uint16_t peak_authenticated;
+    uint32_t refused_pending_pool;
+    uint32_t refused_pending_source;
+    uint32_t refused_pending_reserved;
+    uint32_t refused_session_pool;
+    uint32_t client_task_stack_bytes;
+    uint32_t client_stack_min_free_bytes;
+    uint32_t connection_record_bytes;
+    uint32_t session_record_bytes;
+    uint32_t broker_static_bytes;
+    uint16_t retained_used;
+    uint16_t retained_capacity;
+} argus_mqtt_broker_capacity_t;
+
+esp_err_t argus_mqtt_broker_get_capacity(argus_mqtt_broker_capacity_t *out);
+
+/**
+ * @brief Read back a retained value, so that "it is published" is checkable.
+ *
+ * A condition that is computed correctly but never reaches the retained store
+ * is not published, and that failure is silent - it happened in this pass.
+ * Read-only.
+ *
+ * @return ESP_OK, or ESP_ERR_NOT_FOUND when nothing is retained on @p topic.
+ */
+esp_err_t argus_mqtt_broker_get_retained(
+    const char *topic, char *out, size_t out_size);
+
+/**
+ * @brief The pre-connect admission decision itself, as a pure function.
+ *
+ * Production calls exactly this after counting occupancy, so a test that
+ * drives it is testing the shipped rule rather than a transcription of it.
+ * Kept out of the diagnostic gate because it is the rule, not a fixture.
+ */
+typedef enum {
+    ARGUS_MQTT_PRECONNECT_ADMIT = 0,
+    ARGUS_MQTT_PRECONNECT_REFUSE_POOL,
+    ARGUS_MQTT_PRECONNECT_REFUSE_RESERVED,
+    ARGUS_MQTT_PRECONNECT_REFUSE_SOURCE,
+} argus_mqtt_preconnect_decision_t;
+
+argus_mqtt_preconnect_decision_t argus_mqtt_broker_preconnect_decide(
+    size_t pending, size_t pending_from_source, bool source_proven);
 esp_err_t argus_mqtt_broker_fence_machine_authentication(
     const char *identifier);
 esp_err_t argus_mqtt_broker_disconnect_machine(const char *identifier);

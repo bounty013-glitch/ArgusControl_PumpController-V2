@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /**
  * @file argus_tests_4a.c
  * @brief Phase 4A Pure Non-Motion Unit Test Suite Implementation (100% Stack-Local Isolation)
@@ -923,6 +924,17 @@ typedef struct {
     UBaseType_t task_count;
     argus_mqtt_broker_lifecycle_obs_t broker_obs;
     esp_err_t broker_obs_status;
+    // Environment discriminator. task_count and broker.active_client_count
+    // move when a station associates with the Service AP - an event the test
+    // suite neither causes nor controls. Without a way to tell "the suite
+    // mutated production state" apart from "the world changed mid-run", a
+    // laptop joining the AP reported as PHASE 4D.4 SUITE: FAILED with zero
+    // failing tests, which is a false alarm that costs real diagnostic time.
+    // Recording the associated-station count lets the verdict distinguish
+    // them without weakening the check: if the station count held steady and
+    // task_count still grew, that is a genuine leak and it still fails.
+    uint8_t ap_station_count;
+    esp_err_t ap_station_status;
 } argus_prod_snapshot_t;
 
 static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
@@ -952,12 +964,36 @@ static esp_err_t capture_prod_snapshot(argus_prod_snapshot_t *out)
     }
 
     out->task_count = uxTaskGetNumberOfTasks();
+
+    // Not fatal if unavailable (AP not started): recorded as a status and
+    // treated as "no environment evidence", which keeps the verdict strict
+    // rather than silently lenient.
+    wifi_sta_list_t sta_list;
+    memset(&sta_list, 0, sizeof(sta_list));
+    out->ap_station_status = esp_wifi_ap_get_sta_list(&sta_list);
+    out->ap_station_count =
+        (out->ap_station_status == ESP_OK) ? (uint8_t)sta_list.num : 0U;
+
     return ESP_OK;
 }
 
-static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a)
+// `out_env_match` reports separately on the fields an associating station can
+// move (task_count, broker.active_client_count). The return value covers
+// everything else - authority, machine state, network mode, NVS, broker
+// lifecycle - and a false there is always a genuine failure.
+static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const argus_prod_snapshot_t *a,
+                                        bool *out_env_match)
 {
     bool match = true;
+    bool env_match = true;
+
+#define CHECK_DIFF_ENV_INT(field_name, val_b, val_a) \
+    do { \
+        if ((val_b) != (val_a)) { \
+            printf("\nField  : %s\nBefore : %ld\nAfter  : %ld\n", (field_name), (long)(val_b), (long)(val_a)); \
+            env_match = false; \
+        } \
+    } while(0)
 
 #define CHECK_DIFF_INT(field_name, val_b, val_a) \
     do { \
@@ -1049,11 +1085,14 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
         CHECK_DIFF_MEM("slot_b.payload", &b->nvs_obs.slot_b.payload, &a->nvs_obs.slot_b.payload, sizeof(argus_config_payload_t));
     }
 
-    CHECK_DIFF_INT("30. task_count", b->task_count, a->task_count);
+    // Environment-attributable. Routed to env_match, not match: a station
+    // joining the AP moves these without the suite touching anything. The
+    // verdict correlates them against ap_station_count before excusing them.
+    CHECK_DIFF_ENV_INT("30. task_count", b->task_count, a->task_count);
 
     CHECK_DIFF_INT("31. broker_obs_status", b->broker_obs_status, a->broker_obs_status);
     CHECK_DIFF_INT("32. broker.state", b->broker_obs.state, a->broker_obs.state);
-    CHECK_DIFF_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
+    CHECK_DIFF_ENV_INT("33. broker.active_client_count", b->broker_obs.active_client_count, a->broker_obs.active_client_count);
     CHECK_DIFF_INT("34. broker.has_server_task", b->broker_obs.has_server_task, a->broker_obs.has_server_task);
     CHECK_DIFF_INT("35. broker.has_listener", b->broker_obs.has_listener, a->broker_obs.has_listener);
     CHECK_DIFF_INT("35a. broker.running", b->broker_obs.running, a->broker_obs.running);
@@ -1062,6 +1101,8 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
 #undef CHECK_DIFF_INT
 #undef CHECK_DIFF_UINT64
 #undef CHECK_DIFF_MEM
+#undef CHECK_DIFF_ENV_INT
+    if (out_env_match != NULL) *out_env_match = env_match;
     return match;
 }
 
@@ -1744,6 +1785,95 @@ static esp_err_t test_schema_v1_migration(void)
     TEST_ASSERT(strcmp(readback.sta_ssid, "LegacyWiFi") == 0, "V1 sta_ssid lost");
     TEST_ASSERT(readback.provisioned_flags == 0,
                 "V1 migration should set provisioned_flags to 0 (editable)");
+    return ESP_OK;
+}
+
+// Test 34b: V2 to V3 schema migration - authority_profile defaults to
+// STANDALONE_HMI, and provisioned_flags MUST survive.
+//
+// The preservation half is the one that matters. provisioned_flags carries
+// ARGUS_CFG_PROVISIONED_IDENTITY, the bit that locks a commissioned unit's
+// identity against further edits. A migration that reset it would silently
+// unlock every already-commissioned controller in the field.
+static esp_err_t test_schema_v2_migration(void)
+{
+    mock_nvs_store_t store = {0};
+    argus_nvs_driver_t driver;
+    make_mock_driver(&driver, &store);
+
+    argus_config_payload_t v2_cfg = {0};
+    snprintf(v2_cfg.client_id, sizeof(v2_cfg.client_id), "v2_co");
+    snprintf(v2_cfg.unit_id, sizeof(v2_cfg.unit_id), "v2_unit");
+    snprintf(v2_cfg.device_name, sizeof(v2_cfg.device_name), "V2 Pump");
+    snprintf(v2_cfg.sta_ssid, sizeof(v2_cfg.sta_ssid), "V2WiFi");
+    snprintf(v2_cfg.sta_pass, sizeof(v2_cfg.sta_pass), "V2Pass9999");
+    v2_cfg.provisioned_flags = ARGUS_CFG_PROVISIONED_IDENTITY;  /* locked */
+    v2_cfg.authority_profile = 0xEE;  /* garbage; must be overwritten */
+
+    /* CRC over only the V2 portion (229 bytes, no authority_profile) */
+    const uint8_t *raw = (const uint8_t *)&v2_cfg;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < ARGUS_CONFIG_PAYLOAD_V2_SIZE; i++) {
+        crc ^= raw[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320U;
+            else         crc = (crc >> 1);
+        }
+    }
+    uint32_t v2_only_crc = ~crc;
+
+    argus_cfg_slot_t v2_slot = {0};
+    v2_slot.schema_version = ARGUS_CONFIG_SCHEMA_V2;
+    v2_slot.config_generation = 9;
+    v2_slot.payload_length = ARGUS_CONFIG_PAYLOAD_V2_SIZE;
+    v2_slot.crc32 = v2_only_crc;
+    v2_slot.valid_marker = ARGUS_CONFIG_VALID_MARKER;
+    memcpy(&v2_slot.payload, &v2_cfg, sizeof(argus_config_payload_t));
+
+    store.slot_a = v2_slot;
+    store.has_slot_a = true;
+    store.has_slot_b = false;
+    store.selector = 0;
+    store.has_selector = true;
+
+    argus_nvs_core_t core;
+    TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "V2 migration init failed");
+    TEST_ASSERT(core.has_valid_config, "V2 config not recognized after migration");
+
+    argus_config_payload_t readback;
+    TEST_ASSERT(argus_nvs_core_get(&core, &readback) == ESP_OK, "V2 readback failed");
+    TEST_ASSERT(strcmp(readback.client_id, "v2_co") == 0, "V2 client_id lost");
+    TEST_ASSERT(strcmp(readback.sta_ssid, "V2WiFi") == 0, "V2 sta_ssid lost");
+    TEST_ASSERT(readback.provisioned_flags == ARGUS_CFG_PROVISIONED_IDENTITY,
+                "V2 migration must preserve the identity lock");
+    TEST_ASSERT(readback.authority_profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI,
+                "V2 migration must default authority_profile to STANDALONE_HMI");
+    return ESP_OK;
+}
+
+// Test 34c: an out-of-range authority_profile is not a usable configuration.
+// Coercing it to a default would let a corrupt or downgraded record decide
+// who is allowed to command the pump.
+static esp_err_t test_authority_profile_range_rejected(void)
+{
+    argus_config_payload_t cfg = {0};
+    snprintf(cfg.client_id, sizeof(cfg.client_id), "rng_co");
+    snprintf(cfg.unit_id, sizeof(cfg.unit_id), "rng_unit");
+    snprintf(cfg.device_name, sizeof(cfg.device_name), "Range Pump");
+    snprintf(cfg.sta_ssid, sizeof(cfg.sta_ssid), "RangeWiFi");
+    snprintf(cfg.sta_pass, sizeof(cfg.sta_pass), "RangePass99");
+
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_OK, "STANDALONE_HMI must validate");
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_OK, "ARGUSCORE_PREFERRED must validate");
+
+    cfg.authority_profile = ARGUS_AUTHORITY_PROFILE_MAX + 1;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_ERR_INVALID_ARG,
+                "out-of-range authority_profile must be rejected");
+    cfg.authority_profile = 0xFF;
+    TEST_ASSERT(argus_nvs_config_validate(&cfg) == ESP_ERR_INVALID_ARG,
+                "0xFF authority_profile must be rejected");
     return ESP_OK;
 }
 
@@ -5204,6 +5334,8 @@ esp_err_t argus_tests_4a_run_all(void)
         RUN_TEST(test_restart_transaction_success);
         RUN_TEST(test_new_ssid_without_password_rejected);
         RUN_TEST(test_schema_v1_migration);
+        RUN_TEST(test_schema_v2_migration);
+        RUN_TEST(test_authority_profile_range_rejected);
         RUN_TEST(test_restart_transaction_preflight_failure);
         RUN_TEST(test_restart_transaction_final_safety_failure);
         RUN_TEST(test_overlay_identity_sets_lock);
@@ -5350,6 +5482,8 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_topic_component_rejections);
     RUN_TEST(test_4c_topic_ownership_policy);
     RUN_TEST(test_4c_command_decoder_all_actions);
+    RUN_TEST(test_4c_command_requires_authority_epoch);
+    RUN_TEST(test_4c_epoch_advances_across_loss_and_regain);
     RUN_TEST(test_4c_command_decoder_strict_structure);
     RUN_TEST(test_4c_command_decoder_value_contract);
     RUN_TEST(test_4c_command_decoder_identity_fields);
@@ -5359,13 +5493,76 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_serial_number_arithmetic);
     RUN_TEST(test_4c_heartbeat_lease_binding);
     RUN_TEST(test_4c_heartbeat_expiry_is_observability_only);
+    RUN_TEST(test_4c_authority_standalone_profile);
+    RUN_TEST(test_4c_authority_startup_window_blocks_early_hmi);
+    RUN_TEST(test_4c_authority_hmi_is_fallback_after_window);
+    RUN_TEST(test_4c_authority_transfer_is_asymmetric);
+    RUN_TEST(test_4c_authority_reacquire_by_self_keeps_epoch);
+    RUN_TEST(test_4c_authority_release_rules);
+    RUN_TEST(test_4c_authority_epoch_never_reads_unowned);
+    RUN_TEST(test_4c_authority_rejects_malformed_requests);
+    RUN_TEST(test_4c_authority_lease_expiry_ends_epoch);
+    RUN_TEST(test_4c_fail_operational_lease_expiry_preserves_operation);
+    RUN_TEST(test_4c_fail_operational_disconnect_preserves_operation);
+    RUN_TEST(test_4c_fail_operational_epoch_survives_reconnect_blip);
+    RUN_TEST(test_4c_lease_follows_identity_across_reconnect);
+    RUN_TEST(test_4c_lease_rejects_other_identities);
+    RUN_TEST(test_4c_lease_identity_cleared_on_release);
     RUN_TEST(test_4c_disconnect_releases_matching_lease);
+    RUN_TEST(test_4c_disconnect_then_rebind_preserves_epoch);
+    RUN_TEST(test_4c_disconnect_without_renewal_still_expires);
     RUN_TEST(test_4c_sequence_first_and_newer);
     RUN_TEST(test_4c_sequence_duplicate_and_conflict);
     RUN_TEST(test_4c_sequence_stale_and_wrap);
     RUN_TEST(test_4c_session_restart_invalidates_prior_envelope);
     RUN_TEST(test_4c_session_generation_contract);
     RUN_TEST(test_4c_retained_capacity_covers_baseline);
+    RUN_TEST(test_4c_seam_authority_topic_permission_map);
+    RUN_TEST(test_4c_seam_publish_admission_requires_topic_scope);
+    RUN_TEST(test_4c_seam_publish_admission_requires_capability);
+    RUN_TEST(test_4c_seam_authority_and_motion_are_separate_capabilities);
+    RUN_TEST(test_4c_seam_controller_owned_topics_reject_external_publish);
+    RUN_TEST(test_4c_seam_retained_request_refused_before_arbitration);
+    RUN_TEST(test_4c_seam_malformed_transport_refused_at_broker);
+    RUN_TEST(test_4c_seam_unauthorized_principal_never_reaches_arbitration);
+    RUN_TEST(test_4c_seam_qos_zero_request_refused);
+    RUN_TEST(test_4c_seam_decode_rejects_structure);
+    RUN_TEST(test_4c_seam_decode_trailing_comma_now_rejected);
+    RUN_TEST(test_4c_seam_decode_schema_and_request_id_reasons);
+    RUN_TEST(test_4c_seam_decode_intent_enum);
+    RUN_TEST(test_4c_seam_decode_rejects_unknown_and_duplicate_fields);
+    RUN_TEST(test_4c_seam_decode_rejects_missing_fields);
+    RUN_TEST(test_4c_seam_decode_rejects_invalid_values);
+    RUN_TEST(test_4c_seam_decode_bounds_and_arguments);
+    RUN_TEST(test_4c_seam_release_requires_named_epoch);
+    RUN_TEST(test_4c_seam_rejection_matrix_never_mutates_arbitration);
+    RUN_TEST(test_4c_seam_session_mismatch_rejected_before_arbitration);
+    RUN_TEST(test_4c_seam_release_stale_epoch_preserves_owner);
+    RUN_TEST(test_4c_seam_release_by_non_owner_refused);
+    RUN_TEST(test_4c_seam_request_granted_end_to_end);
+    RUN_TEST(test_4c_seam_core_preempts_panel_end_to_end);
+    RUN_TEST(test_4c_seam_panel_cannot_preempt_core_end_to_end);
+    RUN_TEST(test_4c_seam_denied_paths_preserve_operation);
+    RUN_TEST(test_4c_seam_transfer_unsupported_running_end_to_end);
+    RUN_TEST(test_4c_seam_transfer_unsupported_running_only_gates_the_running_transfer_case);
+    RUN_TEST(test_4c_seam_duplicate_cache_replays_across_interleaving);
+    RUN_TEST(test_4c_seam_duplicate_cache_conflict_vs_replay);
+    RUN_TEST(test_4c_seam_duplicate_cache_is_bounded_and_evicts_fifo);
+    RUN_TEST(test_4c_seam_authority_result_topic_and_schema);
+    RUN_TEST(test_4c_seam_disconnected_lease_reports_truthful_ownership);
+    RUN_TEST(test_4c_ffp_acquisition_epoch_semantics);
+    RUN_TEST(test_4c_ffp_stale_acquisition_across_owner_states);
+    RUN_TEST(test_4c_ffp_disconnect_rebind_restores_command_admission);
+    RUN_TEST(test_4c_ffp_disconnect_variants);
+    RUN_TEST(test_4c_ffp_authority_reason_rules);
+    RUN_TEST(test_4c_ffp_policy_profile_precedes_running);
+    RUN_TEST(test_4c_ffp_release_policy_matrix);
+    RUN_TEST(test_4c_ffp_evicted_replay_cannot_mutate);
+    RUN_TEST(test_4c_ffp_duplicate_conflict_single_canonical_record);
+    RUN_TEST(test_4c_audit_command_epoch_and_session_gates);
+    RUN_TEST(test_4c_audit_acquire_and_release_ids_do_not_collide);
+    RUN_TEST(test_4c_audit_session_mismatch_does_not_evict);
+    RUN_TEST(test_4c_audit_reacquire_keeps_replay_guard);
     /* Phase 4D.2 security storage, verifier, and local recovery foundation */
     RUN_TEST(test_4d2_permission_ceiling_metadata);
     RUN_TEST(test_4d2_record_schema_validation);
@@ -5441,6 +5638,12 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d4_bind_before_invalidation);
     RUN_TEST(test_4d4_audit_failure_still_disconnects);
     RUN_TEST(test_4d4_invalidated_connection_is_inert);
+    RUN_TEST(test_4d4_iface_ambiguity_fails_closed);
+    RUN_TEST(test_4d4_kdf_global_bound_is_source_independent);
+    RUN_TEST(test_4d4_admission_budgets_are_self_consistent);
+    RUN_TEST(test_4d4_proven_source_reservation_bounds_the_flood);
+    RUN_TEST(test_4d4_pending_pool_cannot_starve_authenticated);
+    RUN_TEST(test_4d4_authenticated_pool_refuses_beyond_limit);
     }
 
     int total_executions = passed_executions + failed_executions;
@@ -5480,7 +5683,8 @@ esp_err_t argus_tests_4a_run_all(void)
         }
         return ESP_FAIL;
     }
-    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after);
+    bool env_non_mutated = true;
+    bool non_mutated = check_full_state_invariance(&snap_before, &snap_after, &env_non_mutated);
 
     printf("\nPhase 4A+4B.1+4B.2+4B.3+4B.3a+4B.4+4B.5+4B.6+4C+4D.1+4D.2+4D.3+4D.3a+4D.4 Pure Tests:\n");
     printf("  Distinct Test Cases : %d\n", distinct_test_cases);
@@ -5522,12 +5726,81 @@ esp_err_t argus_tests_4a_run_all(void)
            (snap_before.task_count == snap_after.task_count) ? "UNCHANGED" : "MUTATED",
            (unsigned)snap_after.task_count);
 
-    bool overall_pass = (failed_executions == 0 && non_mutated && snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
+    // Did the environment move under us? Only an actual change in associated
+    // stations excuses a delta in the environment-attributable fields. If the
+    // station count held steady and those fields still moved, the suite is
+    // the only remaining explanation and it fails.
+    bool station_count_observed =
+        (snap_before.ap_station_status == ESP_OK && snap_after.ap_station_status == ESP_OK);
+
+    // Magnitude of environment activity during the run. A broker client delta
+    // is environmental BY CONSTRUCTION: this is a pure suite with no network
+    // path, so it cannot open or close an MQTT connection - only an outside
+    // client can. An earlier version of this check required the AP station
+    // count to move before excusing anything, and got a real case wrong: a
+    // station that had already associated brought its MQTT client up mid-run,
+    // so the client count and task count moved while the station count held
+    // steady at 1. Counting the client delta as evidence fixes that.
+    long station_delta = station_count_observed
+        ? labs((long)snap_after.ap_station_count - (long)snap_before.ap_station_count) : 0;
+    long client_delta =
+        labs((long)snap_after.broker_obs.active_client_count -
+             (long)snap_before.broker_obs.active_client_count);
+    long task_delta = labs((long)snap_after.task_count - (long)snap_before.task_count);
+    long env_evidence = station_delta + client_delta;
+
+    // Explained only if there IS outside activity and the task delta is no
+    // larger than it accounts for - the broker spawns roughly a task per
+    // client. Tasks appearing beyond that are not explained away.
+    bool env_delta_explained =
+        !env_non_mutated && env_evidence > 0 && task_delta <= env_evidence;
+
+    printf("  AP Stations           : %s (%u -> %u)%s\n",
+           station_count_observed ? (station_delta != 0 ? "CHANGED" : "STEADY") : "UNOBSERVABLE",
+           (unsigned)snap_before.ap_station_count, (unsigned)snap_after.ap_station_count,
+           station_count_observed ? "" : " [AP not started]");
+    printf("  Broker Clients        : %s (%u -> %u)\n",
+           client_delta != 0 ? "CHANGED" : "STEADY",
+           (unsigned)snap_before.broker_obs.active_client_count,
+           (unsigned)snap_after.broker_obs.active_client_count);
+
+    bool broker_status_ok =
+        (snap_before.broker_obs_status == ESP_OK && snap_after.broker_obs_status == ESP_OK);
+    bool core_ok = (failed_executions == 0 && non_mutated && broker_status_ok);
+    bool overall_pass = core_ok && env_non_mutated;
+    bool inconclusive = core_ok && !env_non_mutated && env_delta_explained;
+
+    if (inconclusive) {
+        printf("\n  NOTE: task_count and/or broker.active_client_count changed, and outside\n");
+        printf("        activity accounts for it (stations %ld, broker clients %ld,\n",
+               station_delta, client_delta);
+        printf("        tasks %ld). A station joined or left the AP, or an already\n", task_delta);
+        printf("        associated station brought its MQTT client up or down. That is an\n");
+        printf("        external event, not a test side effect - this suite has no network\n");
+        printf("        path and cannot open an MQTT connection. Every field the suite could\n");
+        printf("        actually mutate - authority, machine state, network mode, NVS,\n");
+        printf("        broker lifecycle - is UNCHANGED. Re-run with the network quiet for a\n");
+        printf("        clean isolation proof.\n");
+    } else if (core_ok && !env_non_mutated) {
+        printf("\n  WARNING: task_count and/or broker.active_client_count changed and the\n");
+        printf("           observed outside activity does not account for it (stations %ld,\n",
+               station_delta);
+        printf("           broker clients %ld, tasks %ld). The suite is the remaining\n",
+               client_delta, task_delta);
+        printf("           explanation - most likely a test leaking a task or a broker\n");
+        printf("           client.\n");
+    }
 
     printf("\n===================================================\n");
     printf("PHASE 4D.4 PURE UNIT TEST SUITE: %s\n",
-           overall_pass ? "PASSED" : "FAILED");
+           overall_pass ? "PASSED" : (inconclusive ? "PASSED (ISOLATION INCONCLUSIVE)" : "FAILED"));
     printf("===================================================\n\n");
 
-    return overall_pass ? ESP_OK : ESP_FAIL;
+    // Inconclusive isolation is not a pass of the isolation proof, but it is
+    // also not a test failure. Returning ESP_OK here would erase the
+    // distinction the caller needs; returning ESP_FAIL would repeat the false
+    // alarm this change exists to remove. ESP_ERR_INVALID_STATE says
+    // "tests passed, isolation unproven" and is distinguishable from both.
+    if (overall_pass) return ESP_OK;
+    return inconclusive ? ESP_ERR_INVALID_STATE : ESP_FAIL;
 }

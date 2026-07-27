@@ -358,9 +358,10 @@ The V2 pump controller's accepted Phase 4C implementation is a strict deployment
 
 - Its root is built from commissioned identity as `argus/<client_id>/<unit_id>`; the accepted controller is `argus/paladin/pump_001`.
 - External publishers may write only the seven exact `command/pump1/...` topics and `status/supervisor/heartbeat`. Metadata, state, status, telemetry, events, alarms, and configuration are controller-owned.
-- Commands require QoS 1, RETAIN false, a current broker-lifecycle session, a connection-bound fresh heartbeat lease, a newer nonzero uint32 sequence, a bounded command ID, and a strict topic-specific value.
-- PUBACK means transport receipt only. `event/pump1/command_result` reports the application decision, while retained controller state remains authoritative.
-- Heartbeats are sent every two seconds; after six seconds the lease becomes stale. Communication loss changes link observability only and does not stop or otherwise mutate motion.
+- Commands require QoS 1, RETAIN false, a current broker-lifecycle session, an explicitly acquired authority lease bound to the sender's authenticated identity and live connection, the current authority epoch, a newer nonzero uint32 sequence, a bounded command ID, and a strict topic-specific value.
+- Operational authority is never created by connecting and never created by heartbeating (Amendment A1/A2 to the Phase 4C contract). It is acquired only through an explicit, validated `command/core/request_authority` request adjudicated under the commissioned authority profile. Connection proves presence; the heartbeat is lease maintenance and presence evidence for an already-granted lease, nothing more.
+- PUBACK means transport receipt only. `event/pump1/command_result` reports operational-command decisions and `event/core/authority_result` reports authority decisions, while retained controller state remains authoritative.
+- Heartbeats are sent every two seconds; after six seconds without a valid renewal the lease expires and the authority epoch advances. A transport disconnect alone does not end an unexpired lease and does not move authority. Communication loss changes link observability only and does not stop or otherwise mutate motion.
 - Telemetry distinguishes configured target, trajectory target, applied output, generated rate, and generated step count. `feedback_available=false` is published until a real feedback provider exists; no `actual_rpm` is fabricated.
 - The legacy `argus/peristaltic/cmd/...` interface is not a compatibility path and cannot dispatch commands.
 

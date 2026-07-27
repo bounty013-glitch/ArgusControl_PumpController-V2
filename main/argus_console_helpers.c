@@ -25,6 +25,26 @@ esp_err_t argus_console_transport_init(void)
     linenoiseSetMultiLine(0);
     linenoiseAllowEmpty(false);
 
+    // Dumb mode, unconditionally. Without it, EVERY linenoise() prompt emits
+    // ESC[6n (twice - linenoise.c getColumns) and then blocks reading the
+    // terminal's cursor-position reply with portMAX_DELAY - forever, no
+    // timeout (usb_serial_jtag_vfs driver read). A human terminal
+    // auto-replies so Shawn never saw it; any scripted or non-terminal
+    // client hangs the prompt and has its keystrokes silently consumed as
+    // reply bytes. IDF's own REPL mitigates with probe-then-dumb
+    // (esp_console_common.c linenoiseProbe -> linenoiseSetDumbMode), but the
+    // probe's outcome depends on whether a terminal happens to be attached
+    // in its 500 ms window at boot - nondeterministic console behavior on a
+    // field device. This menu takes one character per line; line editing and
+    // history buy nothing here, so the deterministic, fail-closed choice is
+    // dumb mode always: no escape queries ever emitted, no reply parsing on
+    // the input path, identical behavior for an operator terminal and a
+    // scripted acceptance run. Line endings are unaffected - the VFS maps
+    // incoming CR to LF (CONFIG_LIBC_STDIN_LINE_ENDING_CR) below linenoise.
+    // The suite still runs only on an explicit 't': nothing here restores
+    // any boot-time automatic test path.
+    linenoiseSetDumbMode(1);
+
     int line_len_result = linenoiseSetMaxLineLen(96);
     if (line_len_result != 0) {
         return ESP_FAIL;

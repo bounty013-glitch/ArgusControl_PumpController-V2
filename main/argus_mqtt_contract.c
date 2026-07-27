@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "argus_identity.h"
+#include "argus_nvs_config.h"   // ARGUS_AUTHORITY_PROFILE_*
 
 typedef struct {
     const char *p;
@@ -49,6 +50,15 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(command_reset_e_stop, "command/pump1/reset_e_stop");
     MAKE_TOPIC(command_recover, "command/pump1/recover");
     MAKE_TOPIC(heartbeat, "status/supervisor/heartbeat");
+    MAKE_TOPIC(command_request_authority, "command/core/request_authority");
+    MAKE_TOPIC(command_release_authority, "command/core/release_authority");
+    MAKE_TOPIC(event_authority_result, "event/core/authority_result");
+    MAKE_TOPIC(status_control_owner, "status/core/control_owner");
+    MAKE_TOPIC(status_authority_epoch, "status/core/authority_epoch");
+    MAKE_TOPIC(status_authority_profile, "status/core/authority_profile");
+    MAKE_TOPIC(status_local_control, "status/core/local_control_status");
+    MAKE_TOPIC(status_core_lease_status, "status/core/core_lease_status");
+    MAKE_TOPIC(status_authority_reason, "status/core/authority_reason");
     MAKE_TOPIC(metadata_device_name, "metadata/core/device_name");
     MAKE_TOPIC(metadata_model, "metadata/core/model");
     MAKE_TOPIC(metadata_firmware_version, "metadata/core/firmware_version");
@@ -68,6 +78,18 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(status_uptime_s, "status/core/uptime_s");
     MAKE_TOPIC(status_command_session, "status/core/command_session");
     MAKE_TOPIC(status_last_accepted_sequence, "status/core/last_accepted_sequence");
+    /* Admission conditions an operator has to be able to SEE. Both were
+     * previously internal-only, so a refused AP-only login or a reconnect
+     * blocked by the authentication throttle looked like an unexplained
+     * failure of the controller. */
+    _Static_assert(ARGUS_MQTT_BROKER_RETAINED_CAPACITY >=
+                       ARGUS_MQTT_RETAINED_TOPICS_REQUIRED,
+                   "retained store cannot hold every retained contract topic; "
+                   "the broker will correctly refuse to evict authoritative "
+                   "state and the excess topics will never be retained");
+    MAKE_TOPIC(status_network_fault, "status/core/network_fault");
+    MAKE_TOPIC(status_network_fault_action, "status/core/network_fault_action");
+    MAKE_TOPIC(status_auth_throttle, "status/core/auth_throttle");
     MAKE_TOPIC(telemetry_configured_target, "telemetry/pump1/configured_target_rpm_milli");
     MAKE_TOPIC(telemetry_trajectory_target, "telemetry/pump1/trajectory_target_rpm_milli");
     MAKE_TOPIC(telemetry_applied, "telemetry/pump1/applied_rpm_milli");
@@ -92,6 +114,8 @@ argus_mqtt_action_t argus_mqtt_topics_classify(
     if (strcmp(topic, topics->command_reset_e_stop) == 0) return ARGUS_MQTT_ACTION_RESET_E_STOP;
     if (strcmp(topic, topics->command_recover) == 0) return ARGUS_MQTT_ACTION_RECOVER;
     if (strcmp(topic, topics->heartbeat) == 0) return ARGUS_MQTT_ACTION_HEARTBEAT;
+    if (strcmp(topic, topics->command_request_authority) == 0) return ARGUS_MQTT_ACTION_REQUEST_AUTHORITY;
+    if (strcmp(topic, topics->command_release_authority) == 0) return ARGUS_MQTT_ACTION_RELEASE_AUTHORITY;
     return ARGUS_MQTT_ACTION_NONE;
 }
 
@@ -116,6 +140,8 @@ const char *argus_mqtt_action_name(argus_mqtt_action_t action)
     case ARGUS_MQTT_ACTION_RESET_E_STOP: return "reset_e_stop";
     case ARGUS_MQTT_ACTION_RECOVER: return "recover";
     case ARGUS_MQTT_ACTION_HEARTBEAT: return "heartbeat";
+    case ARGUS_MQTT_ACTION_REQUEST_AUTHORITY: return "request_authority";
+    case ARGUS_MQTT_ACTION_RELEASE_AUTHORITY: return "release_authority";
     default: return "unknown";
     }
 }
@@ -231,9 +257,17 @@ argus_mqtt_decode_result_t argus_mqtt_decode_heartbeat(
     json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
     if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
     uint8_t fields = 0;
+    // Set only immediately after consuming a comma. A '}' seen while this is
+    // true is a trailing comma, which the contract's "trailing content is
+    // rejected" strictness excludes even though it is not itself trailing -
+    // it is inside the object, but names no field.
+    bool after_comma = false;
     while (true) {
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
         char key[24];
         if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) return ARGUS_MQTT_DECODE_MALFORMED;
         uint8_t bit = 0;
@@ -250,8 +284,9 @@ argus_mqtt_decode_result_t argus_mqtt_decode_heartbeat(
         if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
         if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
         fields |= bit;
+        after_comma = false;
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
         if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
         return ARGUS_MQTT_DECODE_MALFORMED;
     }
@@ -277,9 +312,13 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
     json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
     if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
     uint8_t fields = 0;
+    bool after_comma = false;
     while (true) {
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
         char key[24];
         if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) return ARGUS_MQTT_DECODE_MALFORMED;
         uint8_t bit = 0;
@@ -302,20 +341,135 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
             } else {
                 valid = parse_true(&cursor);
             }
+        } else if (strcmp(key, "authority_epoch") == 0) {
+            // A2.9: required on every operational command. 0 decodes fine but
+            // can never match a live epoch, so a client cannot opt out of
+            // admission by sending 0.
+            bit = 16U;
+            valid = parse_u32(&cursor, &decoded.authority_epoch);
         } else {
             return ARGUS_MQTT_DECODE_UNKNOWN_FIELD;
         }
         if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
         if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
         fields |= bit;
+        after_comma = false;
         skip_ws(&cursor);
-        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
         if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
         return ARGUS_MQTT_DECODE_MALFORMED;
     }
     skip_ws(&cursor);
     if (cursor.p != cursor.end) return ARGUS_MQTT_DECODE_MALFORMED;
-    if (fields != 15U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
+    // 31 = session|sequence|command_id|value|authority_epoch, all required.
+    if (fields != 31U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
+    *out = decoded;
+    return ARGUS_MQTT_DECODE_OK;
+}
+
+static bool valid_request_id(const char *id)
+{
+    size_t len = strlen(id);
+    if (len == 0U || len > ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX) return false;
+    for (size_t i = 0; i < len; ++i) {
+        char ch = id[i];
+        bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// A2.2: intent is advisory and never affects admission, but an UNSUPPORTED
+// value is still refused rather than silently accepted-and-ignored - a
+// client that misspells or invents an intent should learn that at request
+// time, not discover its audit trail says something it never asked for.
+static bool valid_intent(const char *intent)
+{
+    return strcmp(intent, "OPERATOR_INTENT") == 0 ||
+           strcmp(intent, "SUPERVISORY_START") == 0 ||
+           strcmp(intent, "SERVICE") == 0 ||
+           strcmp(intent, "FALLBACK") == 0;
+}
+
+argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
+    const char *payload, size_t payload_len, bool is_release,
+    argus_mqtt_authority_request_t *out)
+{
+    if (out == NULL) return ARGUS_MQTT_DECODE_INVALID_ARGUMENT;
+    if (payload_len > ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX) {
+        return ARGUS_MQTT_DECODE_TOO_LARGE;
+    }
+    argus_mqtt_authority_request_t decoded = {0};
+    char copy[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+    argus_mqtt_decode_result_t pre =
+        validate_payload(payload, payload_len, copy, sizeof(copy));
+    if (pre != ARGUS_MQTT_DECODE_OK) return pre;
+    json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
+    if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
+    uint8_t fields = 0;
+    bool after_comma = false;
+    while (true) {
+        skip_ws(&cursor);
+        if (cursor.p < cursor.end && *cursor.p == '}') {
+            if (after_comma) return ARGUS_MQTT_DECODE_MALFORMED;
+            cursor.p++; break;
+        }
+        char key[24];
+        if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) {
+            return ARGUS_MQTT_DECODE_MALFORMED;
+        }
+        uint8_t bit = 0;
+        bool valid = false;
+        // A2.5 gives schema and request_id their own rejection reasons,
+        // distinct from the generic invalid_value every other field falls
+        // back to. Defaulted per-field rather than globally so the fallback
+        // stays correct for session/authority_epoch/intent without repeating
+        // this assignment in every branch.
+        argus_mqtt_decode_result_t on_invalid = ARGUS_MQTT_DECODE_INVALID_VALUE;
+        if (strcmp(key, "schema") == 0) {
+            bit = 1U;
+            on_invalid = ARGUS_MQTT_DECODE_SCHEMA_UNSUPPORTED;
+            valid = parse_u32(&cursor, &decoded.schema) && decoded.schema == 1U;
+        } else if (strcmp(key, "request_id") == 0) {
+            bit = 2U;
+            on_invalid = ARGUS_MQTT_DECODE_INVALID_REQUEST_ID;
+            valid = parse_string(&cursor, decoded.request_id,
+                                 sizeof(decoded.request_id)) &&
+                    valid_request_id(decoded.request_id);
+        } else if (strcmp(key, "session") == 0) {
+            bit = 4U;
+            valid = parse_string(&cursor, decoded.session, sizeof(decoded.session)) &&
+                    valid_session(decoded.session);
+        } else if (strcmp(key, "authority_epoch") == 0) {
+            bit = 8U;
+            valid = parse_u32(&cursor, &decoded.authority_epoch);
+        } else if (strcmp(key, "intent") == 0) {
+            bit = 16U;   // optional
+            valid = parse_string(&cursor, decoded.intent, sizeof(decoded.intent)) &&
+                    valid_intent(decoded.intent);
+            decoded.has_intent = valid;
+        } else {
+            return ARGUS_MQTT_DECODE_UNKNOWN_FIELD;
+        }
+        if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
+        if (!valid) return on_invalid;
+        fields |= bit;
+        after_comma = false;
+        skip_ws(&cursor);
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; after_comma = true; continue; }
+        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        return ARGUS_MQTT_DECODE_MALFORMED;
+    }
+    skip_ws(&cursor);
+    if (cursor.p != cursor.end) return ARGUS_MQTT_DECODE_MALFORMED;
+    // 15 = schema|request_id|session|authority_epoch. intent is optional.
+    if ((fields & 15U) != 15U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
+    // A2.3: a release must name the epoch it releases. 0 is "no assumption",
+    // which is meaningless for a release and is refused.
+    if (is_release && decoded.authority_epoch == 0U) {
+        return ARGUS_MQTT_DECODE_INVALID_VALUE;
+    }
     *out = decoded;
     return ARGUS_MQTT_DECODE_OK;
 }
@@ -346,18 +500,264 @@ bool argus_mqtt_session_is_newer(uint32_t candidate, uint32_t reference)
     return delta != 0U && delta < 0x80000000U;
 }
 
+// True when `machine_id` names the principal that currently holds the lease.
+// Requires both sides to carry an identity: a blank stored identity means the
+// lease predates identity tracking and must not match a named claimant, and a
+// blank claimant must never match a named holder. Either way the caller falls
+// back to connection-identity arbitration.
+static bool lease_held_by(const argus_mqtt_session_core_t *core, const char *machine_id)
+{
+    return machine_id != NULL && machine_id[0] != '\0' &&
+           core->lease_machine_id[0] != '\0' &&
+           strcmp(core->lease_machine_id, machine_id) == 0;
+}
+
+static void lease_record_holder(argus_mqtt_session_core_t *core,
+                                const char *machine_id, uint8_t client_type)
+{
+    if (machine_id != NULL && machine_id[0] != '\0') {
+        snprintf(core->lease_machine_id, sizeof(core->lease_machine_id), "%s", machine_id);
+        core->lease_client_type = client_type;
+    } else {
+        core->lease_machine_id[0] = '\0';
+        core->lease_client_type = 0U;
+    }
+}
+
+// Does the commissioned profile permit this client type to hold ordinary
+// command authority at all? This is the rule that makes initial ownership a
+// property of how the installation was commissioned rather than of who
+// happened to connect first.
+static bool profile_permits(uint8_t authority_profile, uint8_t client_type,
+                            bool core_window_open)
+{
+    if (authority_profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI) {
+        // No ArgusCore is assigned to this pump. The panel is the authority,
+        // and a Core that turns up on the network cannot take control without
+        // the unit being recommissioned.
+        return client_type == ARGUS_MACHINE_CLIENT_HMI ||
+               client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL;
+    }
+
+    // ARGUSCORE_PREFERRED.
+    if (client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND) return true;
+    if (client_type == ARGUS_MACHINE_CLIENT_HMI ||
+        client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL) {
+        // The local fallback, but only once ArgusCore has had its bounded
+        // chance. While the window is open the panel stays view-only, so a
+        // shorter boot time never converts into control.
+        return !core_window_open;
+    }
+    return false;
+}
+
+// May `requester` take authority away from `holder`? Deliberately asymmetric,
+// per the governing decision: ArgusCore may request a transfer from the panel
+// and the controller adjudicates it, but the panel may NOT take authority from
+// a healthy ArgusCore lease.
+static bool may_preempt(uint8_t requester_type, uint8_t holder_type)
+{
+    return requester_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND &&
+           (holder_type == ARGUS_MACHINE_CLIENT_HMI ||
+            holder_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL);
+}
+
+static void advance_epoch(argus_mqtt_session_core_t *core)
+{
+    // 0 is reserved for "never owned", so wrap to 1 rather than back to 0.
+    core->authority_epoch++;
+    if (core->authority_epoch == 0U) core->authority_epoch = 1U;
+}
+
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, uint64_t now_ms)
+{
+    if (core == NULL || connection_id == 0U ||
+        machine_id == NULL || machine_id[0] == '\0' ||
+        authority_profile > ARGUS_AUTHORITY_PROFILE_MAX) {
+        return ARGUS_MQTT_AUTHORITY_DENIED_INVALID;
+    }
+    if (!profile_permits(authority_profile, client_type, core_window_open)) {
+        // Distinguish "the profile forbids you" from "the profile permits
+        // you, but ArgusCore's bounded startup window is still open". Only
+        // the local-fallback client types can be in the second case, and
+        // only under ARGUSCORE_PREFERRED - an ArgusCore request refused on a
+        // STANDALONE_HMI unit is a true profile denial in every machine
+        // state and every window state.
+        if (core_window_open &&
+            authority_profile == ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED &&
+            (client_type == ARGUS_MACHINE_CLIENT_HMI ||
+             client_type == ARGUS_MACHINE_CLIENT_SERVICE_TOOL)) {
+            return ARGUS_MQTT_AUTHORITY_DENIED_WINDOW_OPEN;
+        }
+        return ARGUS_MQTT_AUTHORITY_DENIED_PROFILE;
+    }
+
+    // Ownership follows the LEASE, not the transport. Testing link == ONLINE
+    // here meant that once the correction let a lease survive a disconnect, a
+    // DIFFERENT principal could acquire it while the owner was briefly
+    // offline - exactly the inheritance the transport/lease separation exists
+    // to prevent. Caught by test_4c_disconnect_then_rebind_preserves_epoch.
+    //
+    // A lease past its deadline counts as unowned even if the periodic tick
+    // has not run yet, so a legitimate requester never waits on a timer.
+    bool expired =
+        (now_ms - core->last_heartbeat_ms) >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS;
+    bool held = (core->lease_machine_id[0] != '\0') && !expired;
+
+    if (held && strcmp(core->lease_machine_id, machine_id) == 0) {
+        // Already ours. Rebind to the current socket and refresh liveness, but
+        // do NOT advance the epoch - nothing changed hands, and bumping it
+        // would invalidate our own in-flight commands.
+        //
+        // FIX (final-focused-pass item 2): this used to leave `link` and the
+        // heartbeat binding untouched. A principal reacquiring after a
+        // transport disconnect arrives here with link == OFFLINE (disconnect
+        // preserves the lease but not the transport state), and every
+        // subsequent operational command is admitted only when
+        // link == ONLINE - so a legitimately reacquiring owner's very next
+        // command would have been rejected "not_authority_holder" purely
+        // because the OLD connection had gone away, which is exactly the
+        // outcome the transport/lease separation exists to prevent. The
+        // heartbeat binding moves to the new connection for the same
+        // coherence reason, with the counter cleared so the guard's
+        // per-connection scope starts fresh - the same rule
+        // argus_mqtt_session_accept_heartbeat() applies when a holder
+        // reclaims on a new socket.
+        core->lease_connection_id = connection_id;
+        // Reset the replay guard ONLY when the connection actually changed.
+        // §7 scopes counter history to "the connection that produced it", so
+        // a reclaim on a NEW socket legitimately restarts the counter. An
+        // unconditional reset scoped it instead to "the connection, or any
+        // accepted authority request on it": a holder that polled its own
+        // ownership on its existing connection zeroed the guard, after which
+        // a replayed heartbeat from earlier in that same connection's
+        // history was accepted because accept_heartbeat() skips the
+        // is-newer test whenever heartbeat_counter == 0.
+        if (core->heartbeat_connection_id != connection_id) {
+            core->heartbeat_connection_id = connection_id;
+            core->heartbeat_counter = 0U;
+        }
+        core->last_heartbeat_ms = now_ms;
+        core->link = ARGUS_MQTT_LINK_ONLINE;
+        return ARGUS_MQTT_AUTHORITY_ALREADY_HELD;
+    }
+
+    if (held && !may_preempt(client_type, core->lease_client_type)) {
+        return ARGUS_MQTT_AUTHORITY_DENIED_HELD;
+    }
+
+    // Grant: either unowned, or an admissible transfer. Ownership changed, so
+    // the epoch advances and the previous owner's in-flight commands become
+    // invalid immediately.
+    lease_record_holder(core, machine_id, client_type);
+    core->lease_connection_id = connection_id;
+    core->heartbeat_connection_id = connection_id;
+    core->heartbeat_counter = 0U;
+    core->last_heartbeat_ms = now_ms;
+    core->link = ARGUS_MQTT_LINK_ONLINE;
+    advance_epoch(core);
+    return ARGUS_MQTT_AUTHORITY_GRANTED;
+}
+
+argus_mqtt_authority_result_t argus_mqtt_session_request_authority_with_state(
+    argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
+    uint8_t authority_profile, bool core_window_open, bool machine_running,
+    uint32_t supplied_epoch, uint64_t now_ms)
+{
+    // Peeks the same held/preempt facts the base function would compute, and
+    // does so WITHOUT mutating: if this turns out not to be an admissible
+    // transfer situation, control falls through to the base function, which
+    // performs its own complete (and independently tested) admission from
+    // scratch. Duplicating that logic here, rather than reusing
+    // may_preempt(), would let the two definitions of "who may take from
+    // whom" drift apart.
+    //
+    // The expiry check is repeated from the base function deliberately: a
+    // lease past its deadline is unowned there even before tick() has run,
+    // and this peek must agree, or a legitimately unowned lease (deadline
+    // passed, nobody ticked yet) would be misread as a transfer attempt and
+    // refused when the base function would in fact have granted it.
+    bool expired = core != NULL &&
+                   (now_ms - core->last_heartbeat_ms) >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS;
+    bool held_by_other = core != NULL && core->lease_machine_id[0] != '\0' && !expired &&
+                         !lease_held_by(core, machine_id);
+
+    // Item 3 (policy ordering): commissioning-profile permission is decided
+    // FIRST. If the profile forbids this requester type outright, neither
+    // of the checks below applies - falling through reproduces the same
+    // profile check and returns DENIED_PROFILE, which is the true and only
+    // reason, regardless of machine state or epoch.
+    bool profile_would_permit =
+        profile_permits(authority_profile, client_type, core_window_open);
+    bool would_transfer = profile_would_permit && held_by_other &&
+                         may_preempt(client_type, core->lease_client_type);
+
+    if (would_transfer) {
+        // Item 4: a transfer changes who owns the lease, unlike a grant onto
+        // an unowned lease or a same-principal renewal, neither of which
+        // disturbs an existing DIFFERENT owner. "No assumption" (epoch 0) is
+        // therefore not valid for a transfer - the requester must show it
+        // knows the epoch it is transferring from. By the time control
+        // reaches here, admit() has already rejected any NONZERO epoch that
+        // does not match the current one, so the only case left to close is
+        // exactly-zero.
+        if (supplied_epoch == 0U) {
+            return ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED;
+        }
+        if (machine_running) {
+            return ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING;
+        }
+    }
+    return argus_mqtt_session_request_authority(
+        core, connection_id, machine_id, client_type, authority_profile,
+        core_window_open, now_ms);
+}
+
+bool argus_mqtt_session_release_authority(
+    argus_mqtt_session_core_t *core, const char *machine_id)
+{
+    if (core == NULL || !lease_held_by(core, machine_id)) return false;
+    lease_record_holder(core, NULL, 0U);
+    core->lease_connection_id = 0U;
+    core->heartbeat_connection_id = 0U;
+    core->heartbeat_counter = 0U;
+    core->link = ARGUS_MQTT_LINK_OFFLINE;
+    advance_epoch(core);
+    return true;
+}
+
 esp_err_t argus_mqtt_session_accept_heartbeat(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
+    const char *machine_id, uint8_t client_type,
     const argus_mqtt_heartbeat_t *heartbeat, uint64_t now_ms)
 {
     if (core == NULL || heartbeat == NULL || connection_id == 0U ||
         strcmp(core->session, heartbeat->session) != 0) return ESP_ERR_INVALID_ARG;
+
+    // Reconnect continuity. The lease belongs to the authenticated identity,
+    // not to the socket, so the same principal arriving on a new connection
+    // reclaims its own lease immediately instead of being refused until the
+    // 6s heartbeat timeout expires - during which any other client could
+    // have taken it. This does NOT let a different principal preempt; that
+    // is Phase 3 §5.3 and is deliberately not implemented here.
+    bool same_principal = lease_held_by(core, machine_id);
     if (core->lease_connection_id != 0U && core->lease_connection_id != connection_id &&
-        core->link == ARGUS_MQTT_LINK_ONLINE) return ESP_ERR_INVALID_STATE;
+        core->link == ARGUS_MQTT_LINK_ONLINE && !same_principal) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Replay guard applies per connection. A reclaiming principal on a fresh
+    // connection legitimately restarts its counter, so the guard is scoped to
+    // the connection that produced the stored counter, as before.
     if (core->heartbeat_connection_id == connection_id && core->heartbeat_counter != 0U &&
         !argus_mqtt_session_is_newer(heartbeat->counter, core->heartbeat_counter)) {
         return ESP_ERR_INVALID_STATE;
     }
+    lease_record_holder(core, machine_id, client_type);
     core->lease_connection_id = connection_id;
     core->heartbeat_connection_id = connection_id;
     core->heartbeat_counter = heartbeat->counter;
@@ -368,10 +768,30 @@ esp_err_t argus_mqtt_session_accept_heartbeat(
 
 bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms)
 {
-    if (core == NULL || core->link != ARGUS_MQTT_LINK_ONLINE ||
+    // Expiry is driven by the LEASE, not by the transport. Keying this on
+    // link == ONLINE meant a lease could never expire once the socket
+    // dropped, because disconnect had already moved the link to OFFLINE.
+    // A lease exists whenever an owner is recorded; the deadline keeps
+    // running whether or not the owner is currently connected, which is what
+    // makes a genuinely dead supervisor expire on schedule instead of hiding
+    // inside a reconnect loop.
+    // CORRECTION: keying this on lease_machine_id alone was wrong. A lease
+    // established without a recorded identity - the legacy path this contract
+    // still supports - could then never expire, and would have held authority
+    // forever. A lease exists if an identity is recorded OR the link is live.
+    bool lease_exists = (core != NULL) &&
+                        (core->lease_machine_id[0] != '\0' ||
+                         core->link == ARGUS_MQTT_LINK_ONLINE);
+    if (!lease_exists ||
         now_ms - core->last_heartbeat_ms < ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS) return false;
     core->link = ARGUS_MQTT_LINK_STALE;
     core->lease_connection_id = 0U;
+    lease_record_holder(core, NULL, 0U);
+    // Lease loss ends the authority epoch, so any command still in flight from
+    // the expired owner is rejected rather than applied late. This does NOT
+    // touch machine state, motion, RUN intent or the accepted setpoint - see
+    // the fail-operational rule in the contract's section 1.
+    advance_epoch(core);
     return true;
 }
 
@@ -381,6 +801,24 @@ bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,
     if (core == NULL || connection_id == 0U ||
         (core->lease_connection_id != connection_id &&
          core->heartbeat_connection_id != connection_id)) return false;
+
+    // A transport disconnect invalidates the CONNECTION BINDING only. It does
+    // not destroy an otherwise unexpired lease and does not advance the
+    // epoch.
+    //
+    // This previously cleared the owner and bumped the epoch, which meant a
+    // momentary TCP drop handed authority away - the exact opposite of the
+    // accepted decision that a comms event must not move authority. It also
+    // silently invalidated the departing owner's in-flight commands. The
+    // heartbeat deadline keeps running from last_heartbeat_ms, so if the
+    // owner does not come back and renew in time, argus_mqtt_session_tick()
+    // expires the lease and advances the epoch there instead - one place,
+    // driven by the deadline rather than by socket noise.
+    //
+    // The same authenticated principal may rebind to a new connection while
+    // the lease is unexpired, preserving owner and epoch. Commands from the
+    // departed connection stop being accepted immediately because
+    // lease_connection_id no longer matches it.
     core->lease_connection_id = 0U;
     core->heartbeat_connection_id = 0U;
     core->heartbeat_counter = 0U;

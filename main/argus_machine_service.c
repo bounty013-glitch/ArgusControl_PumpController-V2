@@ -501,6 +501,209 @@ static auth_bucket_t *bucket_for(uint32_t peer_key, uint64_t now_us)
     return oldest;
 }
 
+// Proven-source table. Separate from s_buckets on purpose: those are LRU, and
+// an attacker cycling addresses evicts whatever it likes - including, if the
+// reservation lived there, the very entry it is not supposed to be able to
+// touch. Only a successful authentication writes here. Called under s_mutex.
+typedef struct {
+    uint32_t peer_key;
+    uint64_t last_success_us;
+    bool in_use;
+} proven_source_t;
+
+static proven_source_t s_proven[ARGUS_MACHINE_AUTH_PROVEN_SOURCES];
+
+static bool proven_entry_live(const proven_source_t *entry, uint64_t now_us)
+{
+    return entry->in_use &&
+           now_us - entry->last_success_us < ARGUS_MACHINE_AUTH_PROVEN_TTL_US;
+}
+
+static bool source_is_proven_locked(uint32_t peer_key, uint64_t now_us)
+{
+    for (size_t i = 0U; i < ARGUS_MACHINE_AUTH_PROVEN_SOURCES; ++i) {
+        if (s_proven[i].peer_key == peer_key &&
+            proven_entry_live(&s_proven[i], now_us)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mark_source_proven_locked(uint32_t peer_key, uint64_t now_us)
+{
+    proven_source_t *target = NULL;
+    for (size_t i = 0U; i < ARGUS_MACHINE_AUTH_PROVEN_SOURCES; ++i) {
+        if (s_proven[i].in_use && s_proven[i].peer_key == peer_key) {
+            target = &s_proven[i];
+            break;
+        }
+    }
+    if (target == NULL) {
+        // Prefer a free or expired entry; otherwise evict the oldest. Only
+        // successful authentications compete for these, so eviction is
+        // contention between real machines, not an attacker lever.
+        target = &s_proven[0];
+        for (size_t i = 0U; i < ARGUS_MACHINE_AUTH_PROVEN_SOURCES; ++i) {
+            if (!proven_entry_live(&s_proven[i], now_us)) {
+                target = &s_proven[i];
+                break;
+            }
+            if (s_proven[i].last_success_us < target->last_success_us) {
+                target = &s_proven[i];
+            }
+        }
+    }
+    target->in_use = true;
+    target->peer_key = peer_key;
+    target->last_success_us = now_us;
+}
+
+// Global machine-auth KDF token bucket. See the sizing rationale on
+// ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST, and the reservation rationale - with
+// its stated limits - on ARGUS_MACHINE_AUTH_PROVEN_SOURCES. Under s_mutex.
+static uint64_t s_kdf_global_window_us;
+static uint32_t s_kdf_global_spent;
+static uint32_t s_kdf_global_refusals;
+/* Refusals inside the CURRENT window. The published condition keys on this
+ * rather than on the budget merely being spent: five legitimate reconnects
+ * exhaust the unproven share without anything being denied, and a condition
+ * that asserted there would cry wolf on an ordinary power-up storm. Observed
+ * on the production image - the first assertion of the run read "THROTTLED:
+ * 0 refusals", which is not a throttle. */
+static uint32_t s_kdf_window_refusals;
+/* Every THROTTLED outcome, whatever refused it. Published, so a flood is a
+ * reported condition rather than an unexplained inability to connect. */
+static uint32_t s_throttle_refusals;
+
+static bool kdf_global_admit(uint32_t peer_key, uint64_t now_us,
+                             uint32_t *retry_after_s)
+{
+    if (s_kdf_global_window_us == 0U ||
+        now_us - s_kdf_global_window_us >= ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US) {
+        s_kdf_global_window_us = now_us;
+        s_kdf_global_spent = 0U;
+        s_kdf_window_refusals = 0U;
+    }
+    // Unproven sources cannot spend the reserved tail of the budget. The
+    // absolute burst still bounds everyone, proven included, so this reserves
+    // capacity without raising the ceiling on total KDF work.
+    uint32_t allowance = source_is_proven_locked(peer_key, now_us)
+                             ? ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST
+                             : ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST;
+    if (s_kdf_global_spent >= allowance) {
+        uint64_t remaining = ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US -
+                             (now_us - s_kdf_global_window_us);
+        *retry_after_s = (uint32_t)((remaining + 999999U) / 1000000U);
+        s_kdf_global_refusals++;
+        s_kdf_window_refusals++;
+        return false;
+    }
+    s_kdf_global_spent++;
+    return true;
+}
+
+// Exposed for the pure suite: the bound must be testable without a broker.
+bool argus_machine_service_kdf_global_admit_for_test(
+    uint32_t peer_key, uint64_t now_us, uint32_t *retry_after_s)
+{
+    uint32_t scratch = 0U;
+    return kdf_global_admit(
+        peer_key, now_us, retry_after_s != NULL ? retry_after_s : &scratch);
+}
+
+void argus_machine_service_kdf_global_reset_for_test(void)
+{
+    s_kdf_global_window_us = 0U;
+    s_kdf_global_spent = 0U;
+    s_kdf_global_refusals = 0U;
+    s_kdf_window_refusals = 0U;
+    s_throttle_refusals = 0U;
+}
+
+bool argus_machine_service_source_is_proven(uint32_t peer_key)
+{
+    if (s_mutex == NULL) return false;
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool proven = source_is_proven_locked(peer_key, now_us);
+    xSemaphoreGive(s_mutex);
+    return proven;
+}
+
+void argus_machine_service_mark_source_proven_for_test(
+    uint32_t peer_key, uint64_t now_us)
+{
+    if (s_mutex != NULL) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    mark_source_proven_locked(peer_key, now_us);
+    if (s_mutex != NULL) xSemaphoreGive(s_mutex);
+}
+
+void argus_machine_service_clear_proven_sources_for_test(void)
+{
+    if (s_mutex != NULL) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    memset(s_proven, 0, sizeof(s_proven));
+    if (s_mutex != NULL) xSemaphoreGive(s_mutex);
+}
+
+void argus_machine_service_get_throttle_status(
+    argus_machine_auth_throttle_status_t *out)
+{
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    out->window_burst = ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST;
+    out->unproven_burst = ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST;
+    if (s_mutex == NULL) return;
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint64_t elapsed = s_kdf_global_window_us == 0U
+                           ? ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US
+                           : now_us - s_kdf_global_window_us;
+    bool window_open = elapsed < ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US;
+    out->window_spent = window_open ? s_kdf_global_spent : 0U;
+    out->refusals = s_throttle_refusals;
+    out->global_refusals = s_kdf_global_refusals;
+
+    // The published condition covers EVERY reason machine authentication is
+    // currently being refused, not just the global budget.
+    //
+    // Measured on hardware: against a single-address CONNECT flood the
+    // per-source failure lockout fires long before the global bucket does -
+    // 1803 of 1840 attempts were refused by the lockout and the global bucket
+    // never engaged. A condition wired only to the global bucket would have
+    // stayed CLEAR through a sustained flood, which is precisely the
+    // unexplained-failure experience this topic exists to prevent. The global
+    // bucket is the bound against a DISTRIBUTED flood; the lockout is the one
+    // a single source meets first. An operator needs to see either.
+    uint32_t blocked = 0U;
+    uint64_t longest_block_us = 0U;
+    for (size_t i = 0U; i < ARGUS_MACHINE_AUTH_BUCKETS; ++i) {
+        if (!s_buckets[i].in_use) continue;
+        if (s_buckets[i].blocked_until_us > now_us) {
+            blocked++;
+            uint64_t remaining = s_buckets[i].blocked_until_us - now_us;
+            if (remaining > longest_block_us) longest_block_us = remaining;
+        }
+    }
+    out->blocked_sources = blocked;
+
+    /* Refusals in the current window, not merely a spent budget - see the
+     * note on s_kdf_window_refusals. */
+    bool budget_refusing = window_open && s_kdf_window_refusals > 0U;
+    out->throttle_active = budget_refusing || blocked > 0U;
+    uint64_t clear_in_us = 0U;
+    if (budget_refusing) {
+        clear_in_us = ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US - elapsed;
+    }
+    if (longest_block_us > clear_in_us) clear_in_us = longest_block_us;
+    out->seconds_until_clear =
+        (uint32_t)((clear_in_us + 999999U) / 1000000U);
+    for (size_t i = 0U; i < ARGUS_MACHINE_AUTH_PROVEN_SOURCES; ++i) {
+        if (proven_entry_live(&s_proven[i], now_us)) out->proven_sources++;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
 static bool throttle_admit(uint32_t peer_key, uint64_t now_us,
                            uint32_t *retry_after_s)
 {
@@ -585,6 +788,20 @@ argus_machine_auth_outcome_t argus_machine_service_authenticate(
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (!throttle_admit(peer_key, now_us, &outcome.retry_after_s)) {
         outcome.result = ARGUS_MACHINE_AUTH_THROTTLED;
+        s_throttle_refusals++;
+        xSemaphoreGive(s_mutex);
+        return outcome;
+    }
+    // Order, stated accurately because the previous comment here was not:
+    // the per-source FAILURE lockout runs first (it is a lockout, not a rate
+    // limit - it only fires after ARGUS_MACHINE_AUTH_FAILURE_LIMIT failures,
+    // and an attacker escapes it by cycling addresses), then the GLOBAL
+    // bound, which is the one that actually caps total KDF work and cannot be
+    // escaped by cycling addresses because it does not look at the address
+    // except to decide whether the reserved share is reachable.
+    if (!kdf_global_admit(peer_key, now_us, &outcome.retry_after_s)) {
+        outcome.result = ARGUS_MACHINE_AUTH_THROTTLED;
+        s_throttle_refusals++;
         xSemaphoreGive(s_mutex);
         return outcome;
     }
@@ -627,8 +844,13 @@ argus_machine_auth_outcome_t argus_machine_service_authenticate(
     }
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_kdf_admitted--;
-    record_auth_result(
-        peer_key, now_us, outcome.result == ARGUS_MACHINE_AUTH_SUCCESS);
+    bool succeeded = outcome.result == ARGUS_MACHINE_AUTH_SUCCESS;
+    record_auth_result(peer_key, now_us, succeeded);
+    if (succeeded) {
+        // The ONLY way into the proven table. Recorded after the credential
+        // check, never before it.
+        mark_source_proven_locked(peer_key, now_us);
+    }
     xSemaphoreGive(s_mutex);
     argus_password_zeroize(&record, sizeof(record));
     return outcome;

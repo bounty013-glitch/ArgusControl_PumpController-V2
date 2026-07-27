@@ -29,4 +29,12 @@ esp_err_t test_4d4_bind_before_invalidation(void);
 esp_err_t test_4d4_audit_failure_still_disconnects(void);
 esp_err_t test_4d4_invalidated_connection_is_inert(void);
 
+/* Network admission and resource-budget closure (work order 2026-07-27). */
+esp_err_t test_4d4_iface_ambiguity_fails_closed(void);
+esp_err_t test_4d4_kdf_global_bound_is_source_independent(void);
+esp_err_t test_4d4_admission_budgets_are_self_consistent(void);
+esp_err_t test_4d4_proven_source_reservation_bounds_the_flood(void);
+esp_err_t test_4d4_pending_pool_cannot_starve_authenticated(void);
+esp_err_t test_4d4_authenticated_pool_refuses_beyond_limit(void);
+
 #endif

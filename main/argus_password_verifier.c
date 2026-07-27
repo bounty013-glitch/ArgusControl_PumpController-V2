@@ -1,5 +1,6 @@
 #include "argus_password_verifier.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -18,6 +19,40 @@
 #define ARGUS_KDF_TASK_STACK 6144U
 #define ARGUS_KDF_TASK_PRIORITY 3U
 #define ARGUS_KDF_COOPERATE_INTERVAL 256U
+// How long a caller waits for its turn on the serialized KDF worker before
+// failing closed. Worst case is one in-progress derivation: the queue is
+// depth 1, so a slot frees when the worker finishes the current item and
+// dequeues the waiting one.
+//
+// MEASURED ON TARGET (ESP32-S3 @160MHz, [k] benchmark, 2026-07-26):
+//     10,000 iterations ->   827 ms
+//     25,000 iterations ->  2068 ms
+//     50,000 iterations ->  4130 ms
+//    100,000 iterations ->  8266 ms
+// Linear at ~0.0827 ms/iteration.
+//
+// Every credential this system creates uses ARGUS_PASSWORD_ITERATIONS_DEFAULT
+// (25,000) - machine enrollment, human login, provisioning and migration all
+// pass DEFAULT - so the realistic worst case is 2068 ms. 8000 ms is ~3.9x
+// that, which leaves room for the CPU contention that occurs when a station
+// is associating. Retained on the strength of the measurement rather than
+// changed for its own sake.
+//
+// KNOWN INCONSISTENCY, not fixed here: ARGUS_PASSWORD_ITERATIONS_MAX is
+// 500,000, which extrapolates to ~41 s per derivation - five times this
+// budget. Records carry their own iteration count and are verified at it, so
+// a record stored above ~96,000 iterations would make concurrent
+// authentication fail with exactly the timeout this wait exists to prevent.
+// Nothing creates such a record today. Lowering ITERATIONS_MAX would risk
+// invalidating an existing stored record, so it is reported rather than
+// changed unilaterally. Either bound MAX to what this budget covers, or
+// raise the budget, before any high-iteration record is ever issued.
+#define ARGUS_KDF_SUBMIT_WAIT_MS 8000U
+
+// Above this, one derivation exceeds ARGUS_KDF_SUBMIT_WAIT_MS and a
+// concurrent authentication would be refused. Derived from the measurement
+// above with a 20% safety margin.
+#define ARGUS_KDF_ITERATIONS_WITHIN_BUDGET 80000U
 
 typedef enum {
     ARGUS_KDF_CREATE = 0,
@@ -172,6 +207,17 @@ static esp_err_t verify_record(const uint8_t *password, size_t password_len,
         return ESP_ERR_INVALID_ARG;
     }
     *out_match = false;
+    // Surfaces the known inconsistency at the point it would actually bite:
+    // a record whose iteration count takes longer to derive than another
+    // caller is willing to wait for a queue slot. Warn rather than refuse -
+    // the record is valid and this authentication will succeed; it is
+    // CONCURRENT authentications that would be refused.
+    if (record->iterations > ARGUS_KDF_ITERATIONS_WITHIN_BUDGET) {
+        ESP_LOGW(TAG,
+                 "record uses %" PRIu32 " iterations; one derivation exceeds the "
+                 "%u ms concurrent-auth budget",
+                 record->iterations, (unsigned)ARGUS_KDF_SUBMIT_WAIT_MS);
+    }
     uint8_t candidate[ARGUS_PASSWORD_VERIFIER_SIZE] = {0};
     esp_err_t result = argus_password_pbkdf2_for_test(
         password, password_len, record->salt, record->salt_length,
@@ -273,8 +319,37 @@ static esp_err_t submit(argus_kdf_request_t *request)
         xSemaphoreCreateBinaryStatic(&request->completion_storage);
     if (request->completion == NULL) return ESP_ERR_NO_MEM;
     request->result = ESP_FAIL;
+
+    // The KDF worker is deliberately serialized - one derivation at a time,
+    // so PBKDF2 cannot monopolise the CPU from several tasks at once. The
+    // queue is therefore depth 1, and a caller arriving while another
+    // derivation is queued must WAIT for its turn.
+    //
+    // This previously sent with zero wait and returned ESP_ERR_TIMEOUT
+    // immediately. That turned "someone else is authenticating right now"
+    // into "your credential is rejected": any two overlapping
+    // authentications, and one of them failed. Reproduced repeatedly on
+    // hardware - the HMI associating and authenticating mid-run made
+    // test_4d2_verifier_create_verify fail four runs out of four. Every
+    // caller here is an authentication path (argus_auth_service,
+    // argus_machine_service, security migration and provisioning), so the
+    // symptom in the field is an intermittently refused login or a refused
+    // MQTT CONNECT, with nothing wrong with the credential. Raising the AP
+    // client limit to 4 makes overlapping authentication more likely, not
+    // less.
+    //
+    // Bounded rather than portMAX_DELAY: a caller must never be parked
+    // forever behind a wedged worker. On expiry it still fails closed.
     if (xQueueSend(s_queue, &request, 0U) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+        ESP_LOGW(TAG,
+                 "KDF worker busy (concurrent authentication) - waiting up to %u ms",
+                 (unsigned)ARGUS_KDF_SUBMIT_WAIT_MS);
+        if (xQueueSend(s_queue, &request,
+                       pdMS_TO_TICKS(ARGUS_KDF_SUBMIT_WAIT_MS)) != pdTRUE) {
+            ESP_LOGE(TAG, "KDF submit timed out after %u ms - failing closed",
+                     (unsigned)ARGUS_KDF_SUBMIT_WAIT_MS);
+            return ESP_ERR_TIMEOUT;
+        }
     }
     (void)xSemaphoreTake(request->completion, portMAX_DELAY);
     return request->result;

@@ -16,3 +16,12 @@ sdkconfig.old
 Thumbs.db
 Desktop.ini
 build_old/
+
+# Production-build artifacts. sdkconfig.production is a generated config that
+# inherits everything in the gitignored sdkconfig chain - including the Wi-Fi
+# passphrase and machine secret - so it must never be committed. The overlay
+# that produces it, sdkconfig.production.defaults, IS committed and contains
+# no credentials.
+build_production/
+sdkconfig.production
+sdkconfig.production.old

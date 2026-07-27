@@ -217,15 +217,29 @@ static esp_err_t commit_locked(
         free(readback);
         return ESP_ERR_NO_MEM;
     }
-    *slot = (argus_security_directory_slot_t) {
-        .magic = DIRECTORY_MAGIC,
-        .schema_version = ARGUS_SECURITY_DIRECTORY_SCHEMA_VERSION,
-        .payload_length = sizeof(*payload),
-        .generation = generation,
-        .crc32 = argus_security_directory_crc32(payload),
-        .valid_marker = DIRECTORY_VALID,
-        .payload = *payload,
-    };
+    // Field-by-field + memcpy, NOT a compound literal. Assigning
+    // `*slot = (argus_security_directory_slot_t){ ..., .payload = *payload }`
+    // makes GCC materialise the whole literal - payload included - as a
+    // STACK temporary before copying it to the heap block, which measured
+    // ~4.4 KB of frame in this function. commit_locked() is reached from
+    // argus_security_directory_init() on the first-boot path
+    // (app_main.c, under ESP_ERROR_CHECK) where the main task stack is
+    // CONFIG_ESP_MAIN_TASK_STACK_SIZE = 3584 bytes: the single frame
+    // exceeded the entire stack, so a factory-fresh or post-factory-reset
+    // unit - the exact case where both directory slots are absent and this
+    // path runs - would smash the stack before reaching step-generator
+    // init. The commissioned bench unit never hits it because its slots
+    // already exist, which is why this survived to now.
+    //
+    // argus_machine_directory.c's commit_locked() has always used this
+    // form and measures ~48 bytes of frame for the same work.
+    slot->magic = DIRECTORY_MAGIC;
+    slot->schema_version = ARGUS_SECURITY_DIRECTORY_SCHEMA_VERSION;
+    slot->payload_length = sizeof(*payload);
+    slot->generation = generation;
+    slot->crc32 = argus_security_directory_crc32(payload);
+    slot->valid_marker = DIRECTORY_VALID;
+    memcpy(&slot->payload, payload, sizeof(slot->payload));
     esp_err_t err = write_slot(target, slot);
     if (err == ESP_OK) err = read_slot(target, readback);
     if (err == ESP_OK &&

@@ -3,11 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_timer.h"
+
 #include "argus_http_route_inventory.h"
 #include "argus_http_server.h"
 #include "argus_machine_directory.h"
 #include "argus_machine_service.h"
 #include "argus_mqtt_broker.h"
+#include "argus_mqtt_runtime.h"
+#include "argus_net_mgr.h"
 #include "argus_mqtt_contract.h"
 #include "argus_mqtt_security.h"
 #include "argus_password_verifier.h"
@@ -713,5 +717,412 @@ esp_err_t test_4d4_invalidated_connection_is_inert(void)
     CHECK(subscriptions == 0U && publishes == 0U);
     CHECK(heartbeats == 0U && sequences == 0U);
     CHECK(authority_lookups == 0U && dispatches == 0U);
+    return ESP_OK;
+}
+
+/* ===========================================================================
+ * Network admission and resource-budget closure (work order 2026-07-27).
+ * Each test drives the PRODUCTION decision function, not a restatement of it.
+ * =========================================================================*/
+
+esp_err_t test_4d4_iface_ambiguity_fails_closed(void)
+{
+    /* The AP is the ESP-IDF default 192.168.4.1; a rogue DHCP lease can put
+     * the STA interface on the same address. The old code checked AP first
+     * and returned immediately, so that overlap resolved to SOFTAP - the MORE
+     * privileged answer - unlocking AP-only browser routes and SOFTAP-only
+     * machine records to the plant network. Ambiguity must resolve the other
+     * way. */
+    const uint32_t ap = 0x0104A8C0U;    /* 192.168.4.1  */
+    const uint32_t sta = 0x3A32A8C0U;   /* 192.168.50.58 */
+
+    argus_net_mgr_clear_interface_conflict();
+
+    /* Unambiguous cases still classify. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_SOFTAP);
+    CHECK(argus_net_mgr_classify_interface(sta, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+
+    /* Both interfaces on the same address: every socket is ambiguous. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, ap) ==
+          ARGUS_NET_IFACE_AMBIGUOUS);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+
+    /* The fault is now OBSERVABLE, not just an internal flag: assertion time,
+     * observation count and the operator action all have to be readable, or
+     * the refused AP-only access stays unexplained. */
+    argus_net_iface_conflict_status_t status = {0};
+    argus_net_mgr_get_interface_conflict(&status);
+    CHECK(status.active);
+    CHECK(status.observations >= 1U);
+    CHECK(argus_net_mgr_interface_conflict_action() != NULL);
+    CHECK(argus_net_mgr_interface_conflict_action()[0] != '\0');
+
+    /* Repeated detection must not turn into a log flood: the first
+     * observation may log, subsequent ones inside the interval may not. */
+    (void)argus_net_mgr_interface_conflict_log_due();
+    CHECK(!argus_net_mgr_interface_conflict_log_due());
+
+    /* It stays asserted while the overlap keeps being observed. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, ap) ==
+          ARGUS_NET_IFACE_AMBIGUOUS);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+
+    /* CLEARING is deterministic and requires POSITIVE evidence: observing
+     * both interfaces valid and no longer overlapping. Not a timer, and not
+     * an interface merely going away. */
+    CHECK(argus_net_mgr_classify_interface(sta, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+
+    /* An interface going away is NOT evidence of a healthy configuration. */
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, ap) ==
+          ARGUS_NET_IFACE_AMBIGUOUS);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+    CHECK(argus_net_mgr_classify_interface(sta, false, 0U, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+
+    /* It re-asserts immediately on the next overlapping observation after a
+     * clear, so a cleared fault is never a licence to trust an overlap. */
+    argus_net_mgr_clear_interface_conflict();
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+    CHECK(argus_net_mgr_classify_interface(ap, true, ap, true, ap) ==
+          ARGUS_NET_IFACE_AMBIGUOUS);
+    CHECK(argus_net_mgr_interface_conflict_detected());
+    argus_net_mgr_clear_interface_conflict();
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+
+    /* A local address matching neither interface is UNKNOWN, not SOFTAP. */
+    CHECK(argus_net_mgr_classify_interface(0x0202A8C0U, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    /* No usable local address at all. */
+    CHECK(argus_net_mgr_classify_interface(0U, true, ap, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    /* AP address unknown (netif down): an STA socket still classifies, and
+     * nothing can classify as SOFTAP. */
+    CHECK(argus_net_mgr_classify_interface(sta, false, 0U, true, sta) ==
+          ARGUS_NET_IFACE_STA);
+    CHECK(argus_net_mgr_classify_interface(ap, false, 0U, true, sta) ==
+          ARGUS_NET_IFACE_UNKNOWN);
+    CHECK(!argus_net_mgr_interface_conflict_detected());
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_kdf_global_bound_is_source_independent(void)
+{
+    /* The per-source buckets cannot bound total authentication work: there
+     * are only 8, they evict LRU, and a BLOCKED bucket is the stalest so it
+     * is evicted first - an attacker clears its own cooldown by connecting
+     * from a few other addresses. This global bucket is the bound that
+     * cannot be escaped, because it never looks at the address. */
+    uint32_t retry = 0U;
+    const uint64_t t0 = UINT64_C(1000000);
+    /* Distinct hostile addresses. None is proven, so all share the unproven
+     * allowance no matter how many of them there are. */
+    const uint32_t hostile[] = {0x01010101U, 0x02020202U, 0x03030303U,
+                                0x04040404U, 0x05050505U, 0x06060606U,
+                                0x07070707U, 0x08080808U, 0x09090909U};
+
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_clear_proven_sources_for_test();
+
+    /* The unproven share is admitted, each request from a DIFFERENT source... */
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            hostile[i], t0, &retry));
+    }
+    /* ...and the very next unproven request is refused with a usable retry
+     * hint, from an address that has spent nothing. Cycling addresses does
+     * not help: the bound is global, and the remaining tokens are reserved. */
+    retry = 0U;
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+        hostile[ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST], t0, &retry));
+    CHECK(retry > 0U);
+
+    /* Still refused later in the same window. */
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+              hostile[0], t0 + ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US - 1U,
+              &retry));
+
+    /* The window rolls, and legitimate work proceeds - the bound delays a
+     * reconnect during a flood, it does not deny it indefinitely. */
+    CHECK(argus_machine_service_kdf_global_admit_for_test(
+              hostile[0], t0 + ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US,
+              &retry));
+
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_clear_proven_sources_for_test();
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_proven_source_reservation_bounds_the_flood(void)
+{
+    /* What the reservation DOES support: a flood from addresses that have
+     * never authenticated cannot consume the whole KDF budget, so a source
+     * that recently authenticated still gets work done. What it does NOT
+     * support is asserted at the end - honestly, because a reservation keyed
+     * on an unauthenticated source address cannot identify anyone. */
+    const uint32_t proven = 0x0A0A0A0AU;
+    const uint64_t t0 = UINT64_C(5000000);
+    uint32_t retry = 0U;
+
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_clear_proven_sources_for_test();
+    argus_machine_service_mark_source_proven_for_test(proven, t0);
+
+    /* Hostile sources exhaust the unproven share. */
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            0xB0000000U + i, t0, &retry));
+    }
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+        0xB000FFFFU, t0, &retry));
+
+    /* The proven source still gets the reserved remainder. This is the whole
+     * point: the flood delays it, it does not lock it out. */
+    for (uint32_t i = ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST;
+         i < ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            proven, t0, &retry));
+    }
+
+    /* The absolute ceiling still binds everyone, proven included: the
+     * reservation reallocates the budget, it does not raise it. */
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(proven, t0, &retry));
+
+    /* RESIDUAL LIMITATION, asserted so it cannot quietly become a claim: a
+     * flood ORIGINATING FROM the proven address consumes the reserved share
+     * itself. Nothing here distinguishes the real HMI from anything else at
+     * that address before credential verification. */
+    argus_machine_service_kdf_global_reset_for_test();
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            proven, t0, &retry));
+    }
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(proven, t0, &retry));
+
+    /* RESIDUAL LIMITATION: the table is empty after boot, so the first
+     * reconnect after a restart competes as an unproven source. */
+    argus_machine_service_clear_proven_sources_for_test();
+    argus_machine_service_kdf_global_reset_for_test();
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            0xC0000000U + i, t0, &retry));
+    }
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(proven, t0, &retry));
+
+    /* Entries expire, and an expired entry is not proven. */
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_clear_proven_sources_for_test();
+    argus_machine_service_mark_source_proven_for_test(proven, t0);
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            0xD0000000U + i, t0 + ARGUS_MACHINE_AUTH_PROVEN_TTL_US, &retry));
+    }
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+        proven, t0 + ARGUS_MACHINE_AUTH_PROVEN_TTL_US, &retry));
+
+    /* The condition is PUBLISHED, so it has to assert when the budget is
+     * actually exhausted. Driven at real time so the live window - the one
+     * argus_machine_service_get_throttle_status() reads - is the one being
+     * exhausted. */
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_clear_proven_sources_for_test();
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    argus_machine_auth_throttle_status_t status = {0};
+    for (uint32_t i = 0; i < ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST; ++i) {
+        CHECK(argus_machine_service_kdf_global_admit_for_test(
+            0xE0000000U + i, now_us, &retry));
+    }
+    /* Spending the share is NOT the condition: nothing has been denied yet,
+     * and five legitimate reconnects reach this state on an ordinary power-up
+     * storm. Assert that it stays clear here... */
+    argus_machine_service_get_throttle_status(&status);
+    CHECK(!status.throttle_active || status.blocked_sources > 0U);
+    /* ...and asserts on the first request actually refused. */
+    CHECK(!argus_machine_service_kdf_global_admit_for_test(
+        0xE000FFFFU, now_us, &retry));
+    argus_machine_service_get_throttle_status(&status);
+    CHECK(status.throttle_active);
+    CHECK(status.seconds_until_clear > 0U);
+    CHECK(status.unproven_burst < status.window_burst);
+    CHECK(status.window_spent >= ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST);
+
+    argus_machine_service_kdf_global_reset_for_test();
+    argus_machine_service_get_throttle_status(&status);
+    /* Only the budget half is asserted clear here: a source may legitimately
+     * still be in failure lockout from real traffic, and the published
+     * condition covers BOTH causes deliberately. */
+    CHECK(status.window_spent == 0U);
+    CHECK(status.global_refusals == 0U);
+
+    argus_machine_service_clear_proven_sources_for_test();
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_admission_budgets_are_self_consistent(void)
+{
+    /* These constants are load-bearing and were previously fictional: the
+     * broker advertised 10 client slots costing ~13 KB of heap each, against
+     * a heap that could not fund them, so the shortfall surfaced as unrelated
+     * allocations failing. Pin the relationships that must hold. */
+
+    /* The previous version of this test asserted MAX_PRECONNECT <=
+     * MAX_CLIENTS and called that "unauthenticated load cannot consume
+     * authenticated capacity". It was the wrong property, and it passed while
+     * the defect was live: both pools drew from ONE clients[MAX_CLIENTS]
+     * array, so filling the pre-connect pool filled every physical slot and
+     * the HMI could not reconnect. Assert the sizing invariant that actually
+     * makes the separation physical instead.
+     *
+     *   pending      <  MAX_PRECONNECT   (checked before a record is taken)
+     *   authenticated<= MAX_CLIENTS      (session-slot ownership)
+     *   => in_use    <= MAX_CONNECTIONS - 1, so an admitted arrival always
+     *      has a free record and a CONNECT always has authenticated capacity
+     *      whenever fewer than MAX_CLIENTS sessions exist. */
+    CHECK(ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED >= 2U);  /* HMI + ArgusCore */
+    CHECK(ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED >= 1U);
+    CHECK(ARGUS_MQTT_BROKER_MAX_CONNECTIONS_DECLARED ==
+          ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED +
+              ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED);
+    /* One source must not be able to fill the pre-connect pool alone. */
+    CHECK(ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED <
+          ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED);
+    /* Part of the pre-connect pool must stay out of reach of sources that
+     * have never authenticated, or "the HMI can still reconnect while the
+     * pool is full" is not a property the code has. */
+    CHECK(ARGUS_MQTT_BROKER_MAX_PRECONNECT_UNPROVEN_DECLARED <
+          ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED);
+    /* Same shape for the KDF budget. */
+    CHECK(ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST <
+          ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST);
+    CHECK(ARGUS_MACHINE_AUTH_PROVEN_SOURCES >= 2U);
+    /* The retained store must cover every retained contract topic. */
+    CHECK(ARGUS_MQTT_BROKER_RETAINED_CAPACITY >=
+          ARGUS_MQTT_RETAINED_TOPICS_REQUIRED);
+
+    /* The replay cache is sized from the enrollment ceiling - one slot per
+     * machine that can have a request in flight - not from a traffic guess. */
+    CHECK(ARGUS_MQTT_AUTH_DUP_CACHE_SIZE == ARGUS_SECURITY_MAX_MACHINES);
+
+    /* Concurrent machine KDF admission must leave the depth-1 worker queue
+     * free for the human/recovery path. */
+    CHECK(ARGUS_MACHINE_AUTH_KDF_ADMISSION_MAX == 1U);
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_pending_pool_cannot_starve_authenticated(void)
+{
+    /* Drives argus_mqtt_broker_preconnect_decide() - the function production
+     * calls, not a copy of it - across every reachable occupancy. */
+    const size_t max_pending = ARGUS_MQTT_BROKER_MAX_PRECONNECT_DECLARED;
+    const size_t max_auth = ARGUS_MQTT_BROKER_MAX_CLIENTS_DECLARED;
+    const size_t max_conn = ARGUS_MQTT_BROKER_MAX_CONNECTIONS_DECLARED;
+
+    /* 1. THE INVARIANT. Whenever a socket is admitted into the pre-connect
+     *    pool, a physical record exists for it even with the authenticated
+     *    pool completely full. This is what a shared array did not give. */
+    for (size_t pending = 0U; pending <= max_pending; ++pending) {
+        for (size_t authenticated = 0U; authenticated <= max_auth;
+             ++authenticated) {
+            bool admitted = argus_mqtt_broker_preconnect_decide(
+                                pending, 0U, true) ==
+                            ARGUS_MQTT_PRECONNECT_ADMIT;
+            if (admitted) {
+                CHECK(pending + 1U + authenticated <= max_conn);
+            }
+        }
+    }
+
+    /* 2. A full pre-connect pool never consumes authenticated capacity: even
+     *    at maximum pending, MAX_CLIENTS records remain for sessions. */
+    CHECK(max_conn - max_pending == max_auth);
+
+    /* 3. Hostile sources cannot take the reserved share. This is the
+     *    "two or more sources fill the pending allowance and the HMI still
+     *    reconnects" case: unproven sources are refused at
+     *    MAX_PRECONNECT_UNPROVEN, a proven source is still admitted. */
+    const size_t unproven_cap = ARGUS_MQTT_BROKER_MAX_PRECONNECT_UNPROVEN_DECLARED;
+    for (size_t pending = 0U; pending < unproven_cap; ++pending) {
+        CHECK(argus_mqtt_broker_preconnect_decide(pending, 0U, false) ==
+              ARGUS_MQTT_PRECONNECT_ADMIT);
+    }
+    CHECK(argus_mqtt_broker_preconnect_decide(unproven_cap, 0U, false) ==
+          ARGUS_MQTT_PRECONNECT_REFUSE_RESERVED);
+    CHECK(argus_mqtt_broker_preconnect_decide(unproven_cap, 0U, true) ==
+          ARGUS_MQTT_PRECONNECT_ADMIT);
+
+    /* 4. The absolute pool bound still binds a proven source: the
+     *    reservation reallocates capacity, it does not create any. */
+    CHECK(argus_mqtt_broker_preconnect_decide(max_pending, 0U, true) ==
+          ARGUS_MQTT_PRECONNECT_REFUSE_POOL);
+
+    /* 5. Per-source cap, checked after the pool bounds so the reported
+     *    reason names the binding constraint. */
+    CHECK(argus_mqtt_broker_preconnect_decide(
+              0U, ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED,
+              true) == ARGUS_MQTT_PRECONNECT_REFUSE_SOURCE);
+
+    /* 6. The live broker agrees with the declared budget, and pending and
+     *    authenticated occupancy are reported SEPARATELY - a single "client
+     *    count" is exactly what hid the defect. */
+    argus_mqtt_broker_capacity_t cap;
+    CHECK(argus_mqtt_broker_get_capacity(&cap) == ESP_OK);
+    CHECK(cap.max_connections == max_conn);
+    CHECK(cap.max_authenticated == max_auth);
+    CHECK(cap.max_pending == max_pending);
+    CHECK(cap.pending + cap.authenticated <= cap.max_connections);
+    CHECK(cap.authenticated <= cap.max_authenticated);
+    CHECK(cap.pending <= cap.max_pending);
+    /* The connection record must not carry the subscription table any more;
+     * that lives in the session record, which only an authenticated client
+     * owns. If this ever inverts, pending sockets are paying for capacity
+     * they cannot use. */
+    CHECK(cap.session_record_bytes >= 1280U);   /* 8 filters x 160 bytes */
+    CHECK(cap.session_record_bytes > cap.connection_record_bytes);
+
+    /* 7. The retained store is a resource too, and it overflowed on hardware
+     *    in this pass: the broker rightly refused to evict authoritative
+     *    state, so the last retained topics silently never became retained
+     *    and a client subscribing later would not have learned about a live
+     *    fault. Sized from the contract now, with headroom asserted here so a
+     *    future retained topic fails the suite instead of a bench run. */
+    CHECK(cap.retained_capacity >= ARGUS_MQTT_RETAINED_TOPICS_REQUIRED);
+    CHECK(cap.retained_used <= cap.retained_capacity);
+    CHECK(cap.retained_used < cap.retained_capacity);
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_authenticated_pool_refuses_beyond_limit(void)
+{
+    /* The authenticated limit is a physical resource: exactly
+     * MAX_CLIENTS session records exist, a CONNECT cannot complete without
+     * owning one, and the client beyond the limit gets a clean CONNACK 0x03
+     * rather than an allocation failure somewhere unrelated.
+     *
+     * SCOPE OF THIS TEST, stated so it is not mistaken for more: it proves
+     * the budget relationships and that the refusal counter exists on the
+     * production path. Driving MAX_CLIENTS+1 real authenticated clients needs
+     * that many enrolled machine credentials and is a HARDWARE step - see the
+     * evidence record, which says plainly whether it was performed. */
+    argus_mqtt_broker_capacity_t cap;
+    CHECK(argus_mqtt_broker_get_capacity(&cap) == ESP_OK);
+
+    /* Enough for the two roles the deployment actually has. */
+    CHECK(cap.max_authenticated >= 2U);
+    /* Session records are the resource; there is one per supported client. */
+    CHECK(cap.session_record_bytes > 0U);
+    CHECK(cap.client_task_stack_bytes > 0U);
+    /* Never observed more authenticated clients than the pool can hold. */
+    CHECK(cap.peak_authenticated <= cap.max_authenticated);
+    CHECK(cap.peak_pending <= cap.max_pending);
+    /* A client task must never have run closer to its stack limit than the
+     * margin the budget assumes. Seeded to the stack size, so this also
+     * passes before any client has connected. */
+    CHECK(cap.client_stack_min_free_bytes >= 512U);
+    CHECK(cap.client_stack_min_free_bytes <= cap.client_task_stack_bytes);
     return ESP_OK;
 }

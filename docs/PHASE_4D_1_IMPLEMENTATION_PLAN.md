@@ -39,6 +39,15 @@ No security module may bypass these owners.
 
 - Uncommissioned boot is AP-only; commissioned boot is APSTA `AP_DISCOVERABLE` with HTTP active.
 - The Service AP has one client and uses a build-provisioned WPA secret.
+  **Amended 2026-07-26: the Service AP now admits up to 4 clients**
+  (`ap.max_connection = 4`). The single-client rule was a stand-in for a
+  security control that no longer depends on it — since Phase 4D.4 every
+  machine authenticates with an independently revocable credential and
+  `allowed_interfaces` scopes SoftAP eligibility per machine, so admission is
+  governed by authentication rather than by client count. The change was
+  forced by the rotary HMI becoming a permanent AP resident, which locked the
+  browser console out of a commissioned pump. See the Q5 amendment in
+  `PHASE_4B_IMPLEMENTATION_PLAN.md`.
 - Normal browser commissioning already works with power, AP, and browser. Serial remains diagnostic and disaster-recovery tooling.
 - Current configuration reset erases identity and STA configuration but intentionally preserves portal authentication.
 - STA reconnect is not AP-access recovery. No browser-first credential recovery exists.

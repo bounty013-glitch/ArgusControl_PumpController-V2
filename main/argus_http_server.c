@@ -1617,8 +1617,18 @@ static esp_err_t login_post_handler(httpd_req_t *req)
                 status.security_epoch, false);
             s_last_login_failure_audit_us = now_us;
         }
+        // Scoped to the whole response, NOT to the if-block. ESP-IDF's
+        // httpd_resp_set_hdr() stores the POINTER and serializes the header
+        // when the body is sent - it does not copy. A block-scoped buffer
+        // here left a dangling pointer: its storage was reclaimed at the
+        // closing brace and overwritten by httpd_resp_sendstr()'s own stack
+        // frame before serialization, disclosing HTTP-task stack bytes in
+        // the Retry-After header of a 429 (and inviting header injection if
+        // a CR/LF happened to land there). Reachable by any AP peer that
+        // fails five logins. This is the only httpd_resp_set_hdr call in the
+        // tree that did not pass a literal or a still-live buffer.
+        char retry[12];
         if (outcome.result == ARGUS_LOGIN_THROTTLED) {
-            char retry[12];
             snprintf(retry, sizeof(retry), "%lu",
                      (unsigned long)outcome.retry_after_s);
             httpd_resp_set_hdr(req, "Retry-After", retry);

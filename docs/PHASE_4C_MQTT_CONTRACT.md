@@ -1,8 +1,51 @@
 # Phase 4C MQTT Supervisory Contract
 
-**Status:** ACCEPTED on July 22, 2026
+**Status:** ACCEPTED on July 22, 2026. **AMENDED — see Amendment A1 below.
+The amendment is in force on the `atlantis-authority-integration` branch and
+merges to `main` only after acceptance testing.**
 
 **Firmware identity:** `v2-phase4c-dev`
+
+## Amendment A1 — Authority acquisition becomes explicit (2026-07-26)
+
+Authorized by Shawn on 2026-07-26. Governing decision documents:
+"Deterministic Initial Authority Selection" and "Pump Operation — Authority
+Changes". Implementation plan:
+`ArgusControl_PumpHMI-Rotary-V1/docs/plan/PHASE_3_PROVISIONING_AND_COMMAND_PLAN.md`.
+
+**What changed and why.** As accepted, §7 made the heartbeat *itself* the
+act of acquiring command authority: the first valid current-session
+heartbeat bound the lease. That is implicit acquisition, and it is
+incompatible with the governing rule that **connection proves presence but
+does not grant control**. It also made authority depend on connection order,
+which the decision prohibits outright — a client must not win control
+because its boot time is shorter or its Wi-Fi associated first.
+
+Under A1:
+
+1. **Acquisition is an explicit, validated, epoch-changing request.** The
+   controller evaluates identity, scope, capability, session, the
+   commissioned `authority_profile`, and current machine state, then grants
+   or refuses. Refusal has no side effects.
+2. **The heartbeat is demoted to lease renewal.** It keeps an
+   already-granted lease alive. It can no longer create one.
+3. **The lease belongs to the authenticated principal**, not to the socket.
+4. **Initial ownership comes from the commissioned `authority_profile`**
+   (`STANDALONE_HMI` or `ARGUSCORE_PREFERRED`), never from arrival order.
+5. **Transfer is asymmetric and controller-adjudicated.** ArgusCore may
+   request transfer from the HMI; the HMI may not take authority from a
+   healthy ArgusCore lease; the controller decides both.
+
+**What did NOT change, and must not.** §1's fail-operational rule stands
+unaltered and is reinforced by A1: loss of MQTT, loss of the heartbeat, loss
+of the lease, and transfer of authority all remain incapable of stopping
+motion, clearing a target, disabling the driver, or synthesizing a command.
+Authority determines who may issue the *next* accepted command. It does not
+own the RUN intent or accepted setpoint the controller already holds.
+Regression tests `test_4c_fail_operational_*` pin this.
+
+Sections amended: §5 (final paragraph) and §7 (replaced). All other sections
+are unchanged and remain as accepted.
 
 ## 1. Authority and Safety Boundary
 
@@ -72,7 +115,45 @@ status/core/authority_owner
 status/core/uptime_s
 status/core/command_session
 status/core/last_accepted_sequence
+status/core/network_fault
+status/core/network_fault_action
+status/core/auth_throttle
 ```
+
+**Retained-store sizing.** These retained topics are not free: each occupies
+one slot in the broker's retained store for the life of the connection. The
+count is fixed at **34** (`ARGUS_MQTT_RETAINED_TOPICS_REQUIRED`) and the store
+holds **40** (`ARGUS_MQTT_BROKER_RETAINED_CAPACITY`), tied together by a
+static assertion. At the previous value of 32 the store was already one slot
+clear of the contract, and the three admission-condition topics overflowed it
+on hardware: the broker correctly refused to evict authoritative state, and
+`network_fault_action` and `auth_throttle` simply never became retained, so a
+client subscribing afterwards would not have learned about a live fault. Add a
+retained topic and you must raise both numbers.
+
+**`status/core/network_fault`** — `NONE` | `AP_STA_ADDRESS_CONFLICT`.
+Asserted when the AP and station interfaces are observed reporting the same
+IP address, which makes every socket's interface ambiguous. While it holds,
+ambiguous sockets are refused AP-only admission and SoftAP-scoped machine
+records cannot authenticate — ambiguity never resolves to SOFTAP, which is
+the more privileged answer. Clearing is deterministic and requires POSITIVE
+evidence: a classification observing both interfaces valid and NOT
+overlapping, or an explicit operator clear. It never clears on a timer and
+never because an interface went away, and it re-asserts on the next
+overlapping observation. `status/core/network_fault_action` carries the
+operator-facing corrective action while the fault holds and is empty
+otherwise; the two are published on the same transition so they cannot
+disagree.
+
+**`status/core/auth_throttle`** — `ACTIVE` | `CLEAR`. Asserted while machine
+authentication is actually being refused, for either reason: the global KDF
+budget is denying work, or at least one source is in failure lockout. It keys
+on refusals within the current window, not on the budget merely being spent —
+five legitimate reconnects exhaust the unproven share without anything being
+denied, and asserting there would cry wolf on an ordinary power-up storm.
+
+Both are published on TRANSITION only, and each transition is also logged, so
+the conditions are visible on a production image that has no diagnostic menu.
 
 Controller-owned retained open-loop telemetry:
 
@@ -97,7 +178,7 @@ Every path above is appended to the dynamic root.
 
 External clients may publish only to the seven exact command topics and the exact heartbeat topic. Broker policy runs before retained storage, subscriber delivery, application parsing, heartbeat mutation, or command dispatch. External publication to metadata, state, status, telemetry, event, alarm, configuration, wildcard, near-match, and legacy paths is rejected.
 
-Commands, heartbeats, and command results are never retained. Metadata, authoritative state, status, and open-loop telemetry are retained. The broker has 32 retained slots for the 25-topic baseline and refuses capacity exhaustion instead of evicting authoritative state.
+Commands, heartbeats, and command results are never retained. Metadata, authoritative state, status, and open-loop telemetry are retained. The broker has 40 retained slots for the current 34-topic baseline and refuses capacity exhaustion instead of evicting authoritative state. Required occupancy is compile-time guarded and exposed at runtime.
 
 Subscriptions are read-only observation and do not grant publication authority.
 
@@ -105,7 +186,81 @@ Subscriptions are read-only observation and do not grant publication authority.
 
 Each accepted socket receives a monotonically allocated 64-bit connection identity. Application callbacks receive a bounded copy of client ID, connection identity, exact topic, payload length, QoS, RETAIN, DUP, and broker-policy result. No application callback retains a broker packet pointer.
 
-Simultaneously active duplicate MQTT client IDs are rejected deterministically. Lease ownership uses the connection identity, not the client ID, so a recycled slot or repeated name cannot impersonate an earlier socket.
+Simultaneously active duplicate MQTT client IDs are rejected deterministically.
+
+**Amended by A1.** As accepted, this paragraph stated that lease ownership uses the connection identity rather than the client ID, so that a recycled slot or repeated name could not impersonate an earlier socket. That protection is retained but re-based: **lease ownership uses the authenticated machine principal**, and the connection identity proves that principal is still on the far end of a live socket. Impersonation is prevented by authentication rather than by socket identity, which is strictly stronger — a repeated client ID never reaches lease arbitration unauthenticated. Keying solely to the connection also had an operational defect: a supervisor that dropped and reconnected was refused its own lease until the heartbeat timeout expired, opening a window in which another client could take control. See §7.
+
+## 5a. Network Admission Pools and Capacity (revised 2026-07-27)
+
+Two **physically separate** pools. The previous revision bounded them with
+separate counters while both drew from the same `clients[MAX_CLIENTS]` array,
+so filling the pending pool filled every physical record and the rotary HMI
+could not reconnect. A counter that guards a resource it does not own
+guarantees nothing.
+
+| Resource | Limit | What it is |
+|---|---|---|
+| Connection records | 6 | `MAX_CLIENTS + MAX_PRECONNECT`, 344 bytes each |
+| Authenticated sessions | 3 | Session records, 1288 bytes each — owning one **is** the authenticated capacity |
+| Pending (pre-CONNECT) sockets | 3 | Accepted, not yet authenticated |
+| — of which reachable by unproven sources | 2 | The remainder is reserved |
+| Pending per source address | 1 | One in-flight CONNECT per address |
+| CONNECT grace deadline | 3 s | Silent socket is reaped |
+
+**The sizing invariant.** `pending < MAX_PRECONNECT` is enforced before a
+record is taken and `authenticated <= MAX_CLIENTS` is enforced by session-slot
+ownership, so `in_use <= MAX_CONNECTIONS - 1`: an arrival that passes
+pre-connect admission **always** finds a free record, and a pending socket
+that completes CONNECT **always** finds authenticated capacity when fewer than
+`MAX_CLIENTS` sessions exist — whatever the other pool is doing.
+
+**Measured cost, on target, in this firmware.** One connection costs
+**≈ 11.8 KB of heap**: an 8192-byte client task stack plus ≈ 3.6 KB of lwIP
+socket state and TCB. The task stack is measured, not inherited — the worst
+free margin any client task has reached is **2504 bytes of 8192** (5688 used),
+so it is not over-provisioned and must not be cut. The broker's static
+allocation is **29,424 bytes**. `MAX_CLIENTS = 3` is what the measured budget
+supports with headroom, and covers the two roles the deployment has (rotary
+HMI, ArgusCore) plus one service tool.
+
+**There is no reserved reconnect slot, and none is claimed.** A stale
+authenticated slot is recovered by keep-alive reaping (1.5 × the client's
+declared keep-alive, MQTT 3.1.1 §3.1.2.10), not by holding capacity in
+reserve.
+
+**Refusal is clean and named.** A CONNECT that authenticates successfully but
+finds every session slot held is answered with **CONNACK 0x03** (server
+unavailable) and counted, rather than being admitted into a pool that cannot
+hold it or failing an allocation somewhere unrelated.
+
+### Proven-source reservation — exact guarantee and residual limitation
+
+Part of the pending pool and part of the KDF budget are reserved for source
+addresses that have completed a **successful machine authentication** within
+10 minutes. Only a successful authentication creates an entry, and the table
+is separate from the LRU failure buckets precisely so that an attacker
+cycling addresses cannot evict one.
+
+**Supported guarantee.** A flood from addresses that have never authenticated
+cannot consume the whole pre-connect pool or the whole KDF budget. A recently
+authenticated client retains a share and reconnects with bounded delay.
+
+**Residual limitation — not guaranteed, and not claimed anywhere:**
+
+- Nothing against a flood that originates from, or successfully spoofs, a
+  proven address. The reservation keys on an **unauthenticated** source
+  address; it does not identify anyone.
+- Nothing before the first successful authentication after a reboot, when the
+  table is empty and even the rotary HMI competes as an unproven source.
+- No identification of a legitimate client. Nothing in MQTT CONNECT can
+  distinguish one before credential verification: client id and username are
+  attacker-chosen text.
+
+**Future protocol work, deliberately not attempted here.** Distinguishing a
+legitimate client before credential verification requires a
+pre-authentication challenge — TLS-PSK, or an HMAC cookie carried in CONNECT.
+That is a wire-protocol change affecting every client and is out of scope for
+an admission-hardening pass.
 
 ## 6. Broker Command Session
 
@@ -121,9 +276,52 @@ Heartbeat schema:
 
 The object is strict, flat, bounded, non-retained, and contains exactly one `session` and one nonzero uint32 `counter`. Unknown, duplicate, missing, nested, malformed, oversized, embedded-NUL, and trailing content is rejected.
 
-The first valid current-session heartbeat binds an unowned lease to the actual connection. A different connection cannot steal an `ONLINE` lease. Counters advance under uint32 serial-number arithmetic. Equal, older, or ambiguous half-range counters are rejected.
+**Amended by A1. The heartbeat renews a lease; it does not acquire one.**
 
-Supervisors should publish every two seconds. After six seconds without a valid heartbeat, link state becomes `STALE` and the lease is released. A confirmed disconnect becomes `OFFLINE`. Counter history is retained while an expired socket remains connected to reject replay, then cleared when that socket disconnects. Neither transition mutates machine state or motion output.
+As accepted, the first valid current-session heartbeat bound an unowned
+lease to the connection that sent it. That behaviour is withdrawn: a
+heartbeat from a principal that does not already hold the lease is not an
+acquisition and is refused. Authority is acquired only through the explicit
+request described in A1, and initial ownership follows the commissioned
+`authority_profile`, never arrival order.
+
+The heartbeat therefore now means exactly one thing: *the holder is still
+alive and still wants the lease.*
+
+Rules in force:
+
+- A heartbeat from the **current holder** renews the lease and refreshes the
+  expiry deadline.
+- A heartbeat from **any other principal** is refused and has no effect on
+  the lease, the epoch, or machine state.
+- The holder is the authenticated machine principal. A reconnect **inside
+  the lease term** by that same principal renews the lease on the new
+  connection and **preserves the authority epoch** — a dropped packet is a
+  comms event, and comms events must not move authority. The expiry deadline
+  continues to follow the most recent valid heartbeat, so a supervisor that
+  goes silent after reconnecting still expires on schedule rather than
+  surviving indefinitely inside a reconnect loop.
+- Counters advance under uint32 serial-number arithmetic. Equal, older, or
+  ambiguous half-range counters are rejected. Counter history is scoped to
+  the connection that produced it, so a reconnecting holder may legitimately
+  restart its counter.
+
+Supervisors should publish every two seconds. After six seconds without a
+valid heartbeat, link state becomes `STALE` and the lease is released; the
+authority epoch ends with it. A confirmed disconnect becomes `OFFLINE`.
+Counter history is retained while an expired socket remains connected to
+reject replay, then cleared when that socket disconnects.
+
+Once a lease has actually **expired**, the epoch is gone. A returning
+principal — including the previous holder — must re-authenticate, read
+current authoritative state, synchronize its output to the live target, and
+submit a new explicit request. Reconnection never restores a former lease
+and never automatically reclaims control.
+
+**Neither expiry nor disconnect nor transfer mutates machine state, motion
+output, RUN intent, or the accepted setpoint.** This is the §1
+fail-operational rule and it is binding: no comms or lease watchdog may be
+connected to a stop, a deceleration, or clearing the setpoint.
 
 ## 8. Command Envelope
 
@@ -192,3 +390,367 @@ Sessions, sequences, connection IDs, client IDs, and topic policy provide lifecy
 7. Observe retained state and telemetry; do not infer physical motion from HTTP/MQTT acceptance or generated pulses.
 
 On reconnect, read the session again before sending anything. Never replay buffered commands from an earlier session.
+
+---
+
+# Amendment A2 — Authority Wire Contract (2026-07-26)
+
+**Status: NORMATIVE. Amends the accepted Phase 4C MQTT Supervisory Contract.**
+Authorized by Shawn in the authority-protocol correction order, 2026-07-26.
+The accepted tag is not rewritten; this amends forward on the integration
+branch.
+
+**Revision 2026-07-27 (final focused correction pass):** A2.2 (acquisition
+epoch semantics and the transfer-epoch rule), A2.3 (release admission
+clarified; `denied_machine_state` reserved and unused), A2.6 (bounded replay
+semantics made explicit), and A2.8 (commissioning-profile precedence stated)
+were revised in place. Each revised passage is marked. The revisions close
+implementation-review findings; they do not change accepted ownership,
+transfer, fail-operational, or commissioning policy.
+
+A1 established that authority is acquired explicitly and that a heartbeat
+renews rather than grants. A1 did **not** define the wire protocol, and the
+first implementation shipped with the payload ignored and the topics
+unreachable at the broker. A2 defines the protocol completely so that no
+part of it is left to implementation choice.
+
+**Publishing to the correct topic is not a request.** A request exists only
+when it decodes, validates, and passes admission as defined below.
+
+## A2.1 Topics
+
+All topics are relative to the dynamic root `argus/<client_id>/<unit_id>`.
+
+| Topic | Direction | QoS | Retain |
+|---|---|---|---|
+| `command/core/request_authority` | client → controller | 1 | **must be false** |
+| `command/core/release_authority` | client → controller | 1 | **must be false** |
+| `event/core/authority_result` | controller → clients | 1 | false |
+| `status/core/control_owner` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_epoch` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_profile` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/local_control_status` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/core_lease_status` | controller → clients | 1 | **true (snapshot)** |
+| `status/core/authority_reason` | controller → clients | 1 | **true (snapshot)** |
+
+A retained request is **dropped at the broker**, before authentication,
+policy, or any application callback: a retained command topic would let a
+broker replay an acquisition after a session change, which is precisely the
+class of thing this contract exists to prevent.
+
+*(Revised 2026-07-27.* This said the request "is rejected with
+`retain_forbidden`", implying an `event/core/authority_result` naming that
+reason. No such result was ever published and none can be: broker topic
+policy refuses a retained publish to a command topic outright, so the
+application layer never sees it. The refusal is real and fail-closed - it is
+the reporting that did not exist. `retain_forbidden` is retained in the A2.5
+vocabulary as **reserved**; a client must not expect to receive it. The
+handler retains a redundant retain check as defence in depth for the case
+where broker policy is ever loosened.*)*
+
+**Subscription budget.** The result topic is deliberately placed under
+`event/` so an existing subscriber can widen its fifth filter from
+`event/pump1/command_result` to `event/#` and cover both. The filter count
+stays at 5 and the per-client subscription limit is not raised.
+
+## A2.2 Request schema — `command/core/request_authority`
+
+Maximum payload: **384 bytes**. Larger is rejected without parsing.
+
+*(Revised 2026-07-27. This said 512, which never existed: the broker rejects
+any PUBLISH whose payload reaches `ARGUS_MQTT_BROKER_PAYLOAD_CAP` = 385 bytes
+before authentication, policy, or any application callback runs, so the
+effective ceiling was always 384 and `payload_too_large` could never be
+reported on the wire for a 385-512 byte request - the peer simply saw its
+packet dropped. A valid maximal request is ~130 bytes, so nothing legitimate
+is affected. The contract now states the limit that is actually enforced.)*
+
+```json
+{
+  "schema": 1,
+  "request_id": "a1b2c3d4",
+  "session": "0123456789abcdef",
+  "authority_epoch": 7,
+  "intent": "OPERATOR_INTENT"
+}
+```
+
+| Field | Type | Required | Rules |
+|---|---|---|---|
+| `schema` | uint | yes | Must be `1`. Anything else → `schema_unsupported`. |
+| `request_id` | string | yes | 1–36 chars, `[A-Za-z0-9._-]` only. |
+| `session` | string | yes | Exactly the controller's current 16-char lowercase-hex command session. |
+| `authority_epoch` | uint32 | yes | The epoch the request is predicated on. See the epoch rules below. |
+| `intent` | string | no | One of `OPERATOR_INTENT`, `SUPERVISORY_START`, `SERVICE`, `FALLBACK`. Advisory; recorded in audit, never affects admission. |
+
+**Acquisition epoch rules (revised 2026-07-27):**
+
+- `authority_epoch: 0` means the requester makes **no epoch assumption**.
+- A **nonzero** `authority_epoch` is a predicate against the controller's
+  current authority epoch. If it does not match, the request is rejected
+  `stale_epoch` **before arbitration**, with zero mutation of owner, epoch,
+  lease, deadline, sequence, or machine state. This applies to acquisition
+  requests exactly as it always applied to releases — a request composed
+  against a since-superseded epoch must not be evaluated as if current.
+- A request that would **transfer** the lease away from a *different*
+  current owner must carry the current nonzero epoch. `0` is not accepted
+  for a transfer (rejected `stale_epoch`): the requester must demonstrate it
+  knows the ownership state it is displacing. This is what makes a delayed
+  or replayed old acquisition permanently harmless — once ownership has
+  changed, its epoch (zero or stale-nonzero) can never satisfy this rule.
+  Requests that displace no one — a grant onto an unowned lease, or a
+  same-principal renewal/rebind — remain valid with `0`.
+
+Unknown fields are **rejected**, not ignored (`unknown_field`), matching the
+existing strict command decoder. Wrong types are rejected `invalid_value`.
+
+## A2.3 Release schema — `command/core/release_authority`
+
+Identical shape and limits, with one difference that matters:
+
+`authority_epoch` **must equal the controller's current epoch exactly.**
+`0` is not permitted. A release predicated on a stale epoch is rejected
+`stale_epoch` and changes nothing.
+
+This is what stops a delayed release from a previous owner releasing a later
+owner's authority.
+
+A release is valid when **all** hold (revised 2026-07-27):
+- the sender is the authenticated current owner (`not_owner` otherwise);
+- the session matches (`session_mismatch`);
+- the epoch matches exactly (`stale_epoch`).
+
+That list is complete. **No machine state blocks a release** — a correctly
+authenticated current owner may release in any machine state, including
+while the pump is running, because releasing changes only who may issue the
+next accepted command and never touches what the pump is doing. A rule that
+trapped the current owner in authority would serve nothing and was never
+implemented. `denied_machine_state` remains **reserved** in the A2.5
+vocabulary for a future, explicitly defined policy; **no current release
+path produces it**, and clients must not expect it.
+
+**Releasing authority does not stop the pump**, clear RUN intent, clear the
+accepted setpoint, or alter output or trajectory. It changes only who may
+issue the next accepted command.
+
+## A2.4 Result schema — `event/core/authority_result`
+
+Published for every request that survives broker admission, accepted or
+rejected. A request rejected *at the broker* (topic scope or permission)
+produces no result, because the controller never sees it — that is a
+deliberate isolation property, not an omission.
+
+```json
+{
+  "schema": 1,
+  "request_id": "a1b2c3d4",
+  "session": "0123456789abcdef",
+  "outcome": "ACCEPTED",
+  "reason": "granted",
+  "control_owner": "LOCAL_HMI",
+  "authority_epoch": 8,
+  "core_lease_status": "ACTIVE",
+  "local_control_status": "ACTIVE"
+}
+```
+
+This satisfies the minimum observability requirement: the requester can
+determine `request_id`, accepted/rejected, reason, current owner, current
+epoch, and controller session from a single message.
+
+**On a duplicate replay, these fields are the values AS OF THE ORIGINAL
+DECISION, not current state** (clarified 2026-07-27). A2.6 requires an
+identical repeat to republish the cached result, so `control_owner`,
+`authority_epoch`, `core_lease_status` and `local_control_status` in a
+replayed result describe the moment the request was first decided and may
+since have moved. The two clauses appeared to conflict; A2.6 governs, and
+this is deliberate - re-deriving them would make a redelivery report a
+different outcome than the original, which is exactly what idempotent
+replay exists to prevent. A client that needs current authority state must
+read the retained `status/core/*` topics, which are always current, rather
+than inferring it from a result that may be a replay.
+
+## A2.5 Stable rejection-reason vocabulary
+
+These strings are contract surface. They may be added to; existing values
+must not be renamed or repurposed.
+
+**Decode and envelope:** `schema_unsupported`, `payload_too_large`,
+`malformed_json`, `missing_field`, `unknown_field`, `invalid_value`,
+`retain_forbidden`, `qos_1_required`, `invalid_request_id`
+
+**Binding:** `session_mismatch`, `stale_epoch`, `duplicate_conflict`
+
+**Authorization** (broker boundary; no result published):
+`topic_scope_denied`, `not_permitted`
+
+**Admission:** `denied_by_profile`, `denied_window_open`,
+`denied_held_by_other`, `denied_machine_state`, `not_owner`,
+`transfer_unsupported_running`
+
+`denied_window_open` (added 2026-07-27) is returned when the commissioned
+profile PERMITS the requester but ArgusCore's bounded startup window has not
+yet closed. It is deliberately distinct from `denied_by_profile`: the remedy
+for this one is to wait a few seconds, whereas a profile denial requires
+recommissioning the unit. Reporting both as `denied_by_profile` sent an
+operator whose panel was simply waiting out the window off to recommission a
+correctly-commissioned controller.
+
+**Success:** `granted`, `already_held`, `released`
+
+## A2.6 Duplicate handling and bounded replay (revised 2026-07-27)
+
+Keyed on `(session, request_id)`.
+
+- **Identical repeat** — same key, byte-identical payload: the cached result
+  is republished. No arbitration, no epoch change, no lease renewal. This
+  makes QoS 1 redelivery idempotent.
+- **Conflicting repeat** — same key, different payload: rejected
+  `duplicate_conflict` with zero mutation. A request id is not reusable for
+  a different request, and the conflict does **not** create a second record —
+  the original stays the single canonical entry for its identity, and every
+  redelivered conflict is re-detected against it.
+
+The duplicate record is scoped to the controller session and is discarded on
+session change.
+
+**The replay window is bounded, and its bound is a protocol property.** The
+response cache holds `MAX_MACHINES` (currently 16) entries, evicted
+strictly FIFO. The bound derives from the broker's own admission rules — at
+most one live connection per enrolled machine (§5 duplicate-client-ID
+rejection) against a fixed enrollment ceiling — not from an estimate of
+traffic. *(Revised 2026-07-27 from `2 × MAX_MACHINES`. The doubling was
+speculative padding for "a request and its follow-up", not a protocol
+property, and it cost heap that unrelated allocations needed; a machine's
+follow-up is only sent after its first is answered, and cache residency
+carries no safety burden — the A2.2 epoch rules do.)* Rollover is deterministic: the oldest entry is displaced, the same
+rule at every wrap.
+
+**Outside the window, safety does not depend on the cache.** An opaque
+client-chosen `request_id` carries no ordering, so once an entry is evicted
+the controller cannot distinguish "never seen" from "forgotten" — no bounded
+memory can. A redelivery that misses the cache therefore re-enters full
+admission, where the A2.2 epoch rules make every dangerous outcome
+unreachable: a stale nonzero epoch is refused `stale_epoch`, and an epoch-0
+request cannot transfer from the owner that exists now. The only requests
+that can re-arbitrate after eviction are those that displace no one — a
+grant onto an unowned lease or a same-principal renewal — and re-evaluating
+either is harmless. Reconnection never replays authority requests: rebinding
+is not acquisition (A2.11), and the operational-command path has its own
+session/sequence/epoch replay protection (§9, A2.9), which this cache
+neither replaces nor weakens.
+
+## A2.7 Session and epoch change behaviour
+
+- **Controller session change** invalidates every previous session's requests,
+  results, duplicate records, and operational commands. A request carrying a
+  prior session is rejected `session_mismatch` with zero mutation.
+- **Authority epoch change** invalidates every operational command predicated
+  on the previous epoch (see A2.9), and every release predicated on it.
+
+## A2.8 Supported acquisition and transfer subset — CURRENT PHASE
+
+Stated explicitly so the contract does not imply capability that does not
+exist yet.
+
+| Case | Supported now |
+|---|---|
+| Grant when unowned, profile permits | **Yes** |
+| Same principal re-requests while holding | **Yes** — `already_held`, epoch unchanged |
+| Owner releases | **Yes** |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **not** running (`ARGUSCORE_PREFERRED` only) | **Yes** — epoch advances; must carry the current epoch (A2.2) |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **running** (`ARGUSCORE_PREFERRED` only) | **No** — rejected `transfer_unsupported_running` |
+| `ARGUSCORE` requests anything on a `STANDALONE_HMI` unit, any machine state | **No** — `denied_by_profile` |
+| `LOCAL_HMI` takes from a healthy `ARGUSCORE` lease | **No** — `denied_held_by_other` |
+| Any client takes from a same- or higher-standing holder | **No** — `denied_held_by_other` |
+
+**Policy precedence (revised 2026-07-27): the commissioned profile is
+evaluated first.** A requester the commissioned profile forbids outright is
+refused `denied_by_profile` regardless of machine state — on a
+`STANDALONE_HMI` unit an ArgusCore request is `denied_by_profile` even while
+the pump is running and an HMI holds authority, never
+`transfer_unsupported_running`. The reason string is operator guidance: the
+remedy for a profile denial is recommissioning, and reporting a machine-state
+reason would send the operator to wait for a stop that changes nothing.
+
+Live running transfer awaits proven bumpless PID tracking. Until then it is
+**deferred, not simulated**: the request is rejected with a defined reason,
+the current owner keeps authority, and the pump keeps running. The controller
+must never stop the pump to make a transfer easier to implement.
+
+## A2.9 Operational command envelope — `authority_epoch` becomes REQUIRED
+
+Every operational command envelope gains a required field:
+
+```json
+{
+  "session": "0123456789abcdef",
+  "sequence": 42,
+  "command_id": "…",
+  "authority_epoch": 8,
+  "target_rpm_milli": 72000
+}
+```
+
+A command whose `authority_epoch` does not equal the controller's current
+epoch is rejected `stale_epoch` **before** the command sequence is consumed,
+before any state mutation, before any setpoint change, before any motion
+dispatch, and before any last-accepted-command record is updated.
+
+Epoch validation **supplements** the existing identity, connection, session,
+freshness, sequence, machine-state, and safety checks. It replaces none of
+them.
+
+Required sequence, which must hold even when the same principal regains
+authority:
+
+1. Principal A owns epoch 1.
+2. A command from epoch 1 is delayed in flight.
+3. Authority moves away from A. Epoch becomes 2.
+4. A later reacquires authority. Epoch becomes 3.
+5. The delayed epoch-1 command arrives.
+6. It is **rejected with zero mutation**, even though A is the owner again.
+
+An epochless command is invalid and is rejected `missing_field`. Contract
+snapshots, fixtures, tests, and client plans must be updated so no client can
+construct one.
+
+## A2.10 Authority state vocabulary
+
+`control_owner`: `NONE` | `LOCAL_HMI` | `ARGUSCORE` | `SERVICE_TOOL` | `OTHER`
+
+`authority_profile`: `STANDALONE_HMI` | `ARGUSCORE_PREFERRED`
+
+`core_lease_status`: `NONE` | `ACQUIRING` | `ACTIVE` | `EXPIRING` | `EXPIRED`
+
+`local_control_status`: `UNAVAILABLE` | `WAITING` | `AVAILABLE` | `ACTIVE`
+
+`authority_reason`: `STARTUP` | `STANDALONE_ACQUISITION` | `CORE_ACQUISITION`
+| `OPERATOR_TRANSFER` | `CORE_LEASE_EXPIRED` | `CORE_REACQUISITION` |
+`SESSION_INVALIDATED` | `RELEASED` | `TRANSPORT_LOST`
+
+All six are retained snapshots and must be internally consistent after every
+transition listed in the correction order §6. If the controller cannot
+determine a value, it publishes the **most restrictive** value it can
+justify — never a fictional `AVAILABLE`. Presentation fails closed.
+
+## A2.11 Transport versus lease — normative
+
+These are distinct concepts and must not be collapsed:
+
+transport/link condition · authenticated principal identity · authority
+ownership · renewable lease validity · heartbeat deadline · connection binding
+
+- A transport disconnect marks the link offline and invalidates the departed
+  connection binding. It **does not** clear an otherwise unexpired lease,
+  **does not** advance the epoch by itself, and **does not** touch RUN intent,
+  setpoint, output, or trajectory. The heartbeat deadline keeps running.
+- The **same** authenticated principal may rebind to a new connection while
+  the lease is unexpired, preserving owner and epoch. The old connection is
+  rejected from that moment. Rebinding is not acquisition and replays nothing.
+- A **different** principal may not inherit the lease by connecting or by
+  heartbeating.
+- On deadline expiry with no valid renewal: the lease expires, the epoch
+  advances, delayed commands from the old epoch are invalidated, the
+  commissioned fallback policy applies, RUN intent / setpoint / output are
+  preserved, and the full A2.10 state is republished with an accurate reason.

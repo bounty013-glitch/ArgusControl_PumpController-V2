@@ -11,8 +11,19 @@ set(PROJECT_VER "v2-phase4d.4-dev")
 # xtensa-esp-elf GCC 14.2.0 with ESP-IDF v5.5.3. ccache compiles
 # preprocessed source rather than the original translation unit, which is a
 # different path through the compiler, and this toolchain crashes on that
-# path for this file. Clearing the cache does not help - the crash is
-# deterministic, not a corrupt cache entry.
+# path for this file. Clearing the cache does not help - it is not a corrupt
+# cache entry.
+#
+# CORRECTION (2026-07-26, same day, later): this note first called the crash
+# "deterministic" and attributed it to ccache. Both are too strong. With
+# ccache already disabled in the HMI repo, the same ICE appeared once at the
+# same file and line, and an immediately repeated build with no source change
+# compiled it cleanly. The defect is in GCC's handling of THIS FILE; ccache
+# makes it near-certain, and without ccache it still fires sporadically
+# (most likely memory pressure from parallel jobs). Keep ccache disabled -
+# it is a large reduction in frequency - but if a build dies with an ICE
+# here, just run the build again before investigating. Treat it as a real
+# problem only if it fails twice consecutively at the same file.
 #
 # This was latent here: incremental builds reused cached objects and
 # succeeded, so it only surfaced when the build directory was removed. The

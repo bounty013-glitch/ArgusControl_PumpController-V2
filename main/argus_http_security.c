@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "argus_net_mgr.h"
 #include "argus_security_directory.h"
 #include "argus_security_audit.h"
 #include "argus_security_store.h"
@@ -60,9 +61,22 @@ static bool socket_is_softap(
         !socket_address_ipv4(&peer, &peer_addr)) return false;
 
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_ip_info_t ip = {0};
-    if (ap == NULL || esp_netif_get_ip_info(ap, &ip) != ESP_OK ||
-        ip.ip.addr == 0U || local_addr != ip.ip.addr) {
+    esp_netif_ip_info_t sta_ip = {0};
+    bool ap_valid = ap != NULL && esp_netif_get_ip_info(ap, &ip) == ESP_OK;
+    bool sta_valid = sta != NULL &&
+                     esp_netif_get_ip_info(sta, &sta_ip) == ESP_OK;
+
+    /* Fail-closed: only an UNAMBIGUOUS SoftAP match may unlock AP-only
+     * routes. Matching the AP address is no longer sufficient on its own -
+     * if the STA interface also holds that address (a rogue DHCP lease
+     * placing the station in the AP's subnet), the classifier reports
+     * AMBIGUOUS and this returns false, so the AP-only browser and
+     * commissioning surface stays closed to the plant network. */
+    if (argus_net_mgr_classify_interface(local_addr, ap_valid, ip.ip.addr,
+                                         sta_valid, sta_ip.ip.addr) !=
+        ARGUS_NET_IFACE_SOFTAP) {
         return false;
     }
     if ((peer_addr & ip.netmask.addr) !=
