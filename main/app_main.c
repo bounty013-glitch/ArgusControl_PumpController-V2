@@ -6,8 +6,10 @@
 #include <unistd.h>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -687,6 +689,19 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             case 't':
                 UBaseType_t stack_before =
                     uxTaskGetStackHighWaterMark(NULL);
+                // Free heap is reported alongside the stack watermark
+                // because several suites allocate multi-kilobyte fixtures
+                // and fail their NULL checks when heap is tight rather than
+                // when their logic is wrong. Without this line the two
+                // conditions are indistinguishable from the transcript, and
+                // a run that passes only because an MQTT client happened to
+                // be disconnected (each is an 8 KB heap task stack) reads
+                // exactly like a run that proves something. Largest free
+                // block matters as much as the total: these are single
+                // contiguous allocations.
+                printf("Heap before tests: free=%u largest_block=%u bytes\n",
+                       (unsigned)esp_get_free_heap_size(),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
                 printf("Running legacy PURE unit tests...\n");
                 argus_tests_run_all();
                 printf("Running PURE unit tests...\n");
@@ -694,6 +709,9 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                 printf("Diagnostic task stack high-water: before=%u after=%u bytes\n",
                        (unsigned)stack_before,
                        (unsigned)uxTaskGetStackHighWaterMark(NULL));
+                printf("Heap after tests: free=%u largest_block=%u bytes\n",
+                       (unsigned)esp_get_free_heap_size(),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
                 break;
             case 'k': {
                 argus_security_store_status_t security;

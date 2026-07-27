@@ -603,8 +603,19 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
         // argus_mqtt_session_accept_heartbeat() applies when a holder
         // reclaims on a new socket.
         core->lease_connection_id = connection_id;
-        core->heartbeat_connection_id = connection_id;
-        core->heartbeat_counter = 0U;
+        // Reset the replay guard ONLY when the connection actually changed.
+        // §7 scopes counter history to "the connection that produced it", so
+        // a reclaim on a NEW socket legitimately restarts the counter. An
+        // unconditional reset scoped it instead to "the connection, or any
+        // accepted authority request on it": a holder that polled its own
+        // ownership on its existing connection zeroed the guard, after which
+        // a replayed heartbeat from earlier in that same connection's
+        // history was accepted because accept_heartbeat() skips the
+        // is-newer test whenever heartbeat_counter == 0.
+        if (core->heartbeat_connection_id != connection_id) {
+            core->heartbeat_connection_id = connection_id;
+            core->heartbeat_counter = 0U;
+        }
         core->last_heartbeat_ms = now_ms;
         core->link = ARGUS_MQTT_LINK_ONLINE;
         return ARGUS_MQTT_AUTHORITY_ALREADY_HELD;

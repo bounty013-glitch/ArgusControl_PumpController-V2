@@ -5559,6 +5559,10 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_ffp_release_policy_matrix);
     RUN_TEST(test_4c_ffp_evicted_replay_cannot_mutate);
     RUN_TEST(test_4c_ffp_duplicate_conflict_single_canonical_record);
+    RUN_TEST(test_4c_audit_command_epoch_and_session_gates);
+    RUN_TEST(test_4c_audit_acquire_and_release_ids_do_not_collide);
+    RUN_TEST(test_4c_audit_session_mismatch_does_not_evict);
+    RUN_TEST(test_4c_audit_reacquire_keeps_replay_guard);
     /* Phase 4D.2 security storage, verifier, and local recovery foundation */
     RUN_TEST(test_4d2_permission_ceiling_metadata);
     RUN_TEST(test_4d2_record_schema_validation);

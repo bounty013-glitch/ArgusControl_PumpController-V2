@@ -89,3 +89,10 @@ esp_err_t test_4c_ffp_policy_profile_precedes_running(void);
 esp_err_t test_4c_ffp_release_policy_matrix(void);
 esp_err_t test_4c_ffp_evicted_replay_cannot_mutate(void);
 esp_err_t test_4c_ffp_duplicate_conflict_single_canonical_record(void);
+
+// Adversarial-audit findings: gates that had no coverage, and defects the
+// audit found in this pass's own work.
+esp_err_t test_4c_audit_command_epoch_and_session_gates(void);
+esp_err_t test_4c_audit_acquire_and_release_ids_do_not_collide(void);
+esp_err_t test_4c_audit_session_mismatch_does_not_evict(void);
+esp_err_t test_4c_audit_reacquire_keeps_replay_guard(void);

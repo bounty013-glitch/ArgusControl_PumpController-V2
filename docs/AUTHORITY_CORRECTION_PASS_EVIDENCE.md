@@ -7,6 +7,132 @@
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+## -2. Adversarial audit pass (2026-07-27)
+
+Four independent adversarial audits were run over the whole codebase
+(memory/resource/concurrency, authority-vs-contract, test validity, security
+boundary). They found real defects, several of them introduced by the
+correction passes recorded below. Fixed here and verified on hardware:
+
+| # | Defect | Severity | Origin |
+|---|---|---|---|
+| 1 | `commit_locked()` in `argus_security_directory.c` assigned a whole directory slot via a compound literal, materialising a **~4.4 KB stack temporary** in a function reached from `app_main` where the main task stack is 3584 B. Would smash the stack on **first boot of a factory-fresh or post-factory-reset unit** — the only case where both directory slots are absent and that path runs. The commissioned bench unit never reaches it. | **CRITICAL** | Pre-existing |
+| 2 | A2.6 cache key omitted the request KIND, so an acquisition and a byte-identical release sharing a `request_id` collided: the **release was silently discarded and answered `ACCEPTED`/`already_held`** from the acquisition's cached entry, leaving authority held. | HIGH | This pass |
+| 3 | `session_mismatch` rejections were cached under the SENDER's session — permanently unfindable, pure eviction pressure. Any authenticated principal could **flush the entire replay table on demand**, destroying QoS-1 idempotency. Also violated A2.7's zero-mutation requirement. | HIGH | This pass |
+| 4 | The `ALREADY_HELD` rebind path reset `heartbeat_counter` unconditionally, including when the connection had NOT changed — **disarming the heartbeat replay guard** for that connection's own history. | HIGH | This pass |
+| 5 | `publish_authority_state()` took the mutex twice and published the two observations as one, so a lease expiring between them published **`control_owner=LOCAL_HMI` alongside `core_lease_status=EXPIRED`** — contradicting A2.10's internal-consistency requirement. | MEDIUM | Pre-existing |
+| 6 | `TRANSPORT_LOST` overwrote `CORE_LEASE_EXPIRED` when an already-expired supervisor's socket later dropped, **attributing an expiry to a transport event**. | MEDIUM | This pass |
+| 7 | `httpd_resp_set_hdr()` stores the pointer, not the value; the `Retry-After` buffer was block-scoped and its storage was reclaimed before serialisation — **HTTP-task stack disclosure** in a 429, reachable by any AP peer after five failed logins. | MEDIUM | Pre-existing |
+| 8 | `argus_mqtt_runtime_reset_duplicate_cache()` ran **outside the mutex** that serialises every other access to that table, from a different task than the one that reads it. | MEDIUM | This pass |
+
+**The most important finding is not in that table.** The audit established
+that **A2.9 epoch enforcement on operational commands was provably untested**:
+`ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH` and `..._SESSION_MISMATCH` were
+asserted by no test in the suite, because every caller either passed the
+core's own epoch as the command's epoch (so it could never mismatch) or
+tripped an earlier gate first. **Deleting the A2.9 check left 993/993
+passing.** That is the precise defect this entire correction effort exists to
+eliminate, sitting in the gate correction-order §4 was written to enforce and
+in the seam this pass extracted. Four new tests (`test_4c_audit_*`) now drive
+that gate and defects 2-4 directly.
+
+Also corrected: `test_4c_fail_operational_epoch_survives_reconnect_blip`
+never granted authority, never called `argus_mqtt_session_disconnect()`, and
+never referenced `authority_epoch` — the identical flaw the record below says
+got its predecessor replaced. The replacement landed under a new name and
+this one was left in place with the flaw intact. It now acquires authority,
+drops the transport through the real disconnect path, and asserts the epoch
+across the blip and its advance on expiry.
+
+A `-Wframe-larger-than=2048 -Werror` guard existed on
+`argus_machine_directory.c` — the module that was already correct — and not
+on `argus_security_directory.c`, which held the 4.4 KB frame. The guard now
+covers both plus `argus_security_store.c` and `argus_mqtt_runtime.c`, so this
+class cannot regress silently.
+
+### -2.1 Verification — HMI connected throughout
+
+```
+Heap before tests: free=32932 largest_block=21504 bytes
+Heap after  tests: free=33568 largest_block=23552 bytes
+
+Distinct Tests : 335   Repeat Passes : 3
+Total Executed : 1005  Passed : 1005  Failed : 0
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 3)
+  Network State        : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State    : UNCHANGED (RUNNING)
+  Machine State        : UNCHANGED (UNLOCKED)
+  Task Count           : UNCHANGED (24 tasks)
+  AP Stations          : STEADY (1 -> 1)
+  Broker Clients       : STEADY (1 -> 1)
+
+PHASE 4D.4 PURE UNIT TEST SUITE: PASSED
+Diagnostic task stack high-water: before=14116 after=4244 bytes
+```
+
+`Broker Clients: STEADY (1 -> 1)` — run under the hard heap condition, not
+around it. Zero-warning build including the newly-extended frame guards.
+
+### -2.2 Reported, NOT fixed — needs Shawn's decision
+
+These are real findings from the same audits, deliberately left alone
+because each is either a policy/contract decision or carries risk I cannot
+verify without hardware I do not have:
+
+- **Unauthenticated MQTT CONNECT flood denies all authentication.** Every
+  CONNECT reaches the PBKDF2 worker (correct anti-enumeration design), the
+  worker is serialised with a depth-1 queue, and the 8 throttle buckets are
+  keyed on source IP with LRU eviction that clears a *blocked* bucket first.
+  An attacker on the plant network keeping 2 derivations in flight denies
+  browser login (503) and all machine auth indefinitely. Motion is
+  unaffected. **HIGH** — needs a per-identity bucket that is not evictable
+  and/or a pre-KDF admission bound.
+- **Pre-CONNECT client-slot exhaustion.** Slot + 8 KB task are committed at
+  `accept()`, 10 slots, no per-source limit, 30 s grace. Ten idle sockets
+  deny MQTT to the real HMI. **MEDIUM.**
+- **AP-vs-STA decided by IP identity, and ambiguity resolves to the MORE
+  privileged answer.** Both `socket_is_softap()` and
+  `argus_mqtt_receiving_interface()` compare against the AP's
+  192.168.4.1/24; a rogue DHCP server that places the STA interface in that
+  subnet makes AP-only browser routes and SOFTAP-only machine records
+  reachable from the plant network. Structural defect verified; exploit
+  precondition inferred. **MEDIUM.**
+- **The broker advertises 10 client slots (81,920 B of task stack) the heap
+  cannot fund.** Degrades gracefully but surfaces as unrelated allocation
+  failures — which is exactly the class of symptom that produced the 4D.4
+  failures. `s_broker` is 54,536 B of `.bss`, 32,000 B of it subscription
+  slots (20/client × 160 B) against a contract defining 43 fixed topics.
+  **HIGH as a budget decision.**
+- **Test objects are in the shipping image.** ~9 KB of `.bss` and the
+  diagnostic task's 16 KB stack exist to serve test fixtures; the ten
+  deepest frames in the image are all test functions. `CONFIG_ARGUS_DIAGNOSTIC_MODE`
+  is not applied at the build-system level, so the test translation units
+  compile unconditionally.
+- **A2.6 contract text says the cache holds `2 × MAX_MACHINES` (32).** The
+  code now holds 16 for heap reasons, documented in-source. Contract and
+  code disagree — one must change.
+- **A2.2's 512-byte request budget does not exist.** The broker rejects at
+  `ARGUS_MQTT_BROKER_PAYLOAD_CAP` = 385 before any callback, so the
+  effective ceiling is 384 and `payload_too_large` never occurs on the wire.
+- **`retain_forbidden` is unreachable and `qos_1_required` publishes
+  nothing.** Broker policy rejects retained messages before the handler, so
+  that branch is dead code; a QoS-0 authority request is logged but produces
+  no `authority_result`, leaving a client unable to diagnose it.
+- **`denied_by_profile` misdirects during the ArgusCore acquisition window.**
+  The profile does not forbid the HMI there — it is the fallback once the
+  window closes — so the operator is told to recommission when the answer is
+  "wait up to 45 s". A2.5 has no reason string for this state.
+- **A2.4 vs A2.6 conflict on replayed results.** A2.4 says the result lets a
+  requester determine the CURRENT owner/epoch; A2.6 mandates replaying the
+  CACHED result. The implementation follows A2.6. The contract should say
+  which is authoritative on a replay.
+- **A misattributed quotation** appears in source comments and in this
+  record: "published ownership must remain truthful even while the link is
+  offline" is a faithful paraphrase of A2.11's substance but is not text
+  that exists in A2.11.
+
 ## -1. Final focused correction pass (2026-07-27)
 
 A second independent review of the state at `1d36829` ordered six further
@@ -147,7 +273,92 @@ initialized throughout, so the defect is likely elsewhere in the console
 path and remains un-root-caused. Dumb mode makes the triggering path
 unreachable; the observation stands as a finding, not a fix.
 
-#### Final run (this build, driven end-to-end over scripted serial): CLEAN
+#### INVALID VERIFICATION — recorded because it is the instructive part
+
+The run below was reported at the time as proof the heap fix worked. **It
+was not proof.** Its isolation block reads `Broker Clients: CHANGED (0 -> 1)`
+— the HMI was NOT connected when the suite started. Shawn's failing run had
+`1 -> 0`: the HMI *was* connected. Each broker client is an 8 KB heap task
+stack, so the run below executed under ~13 KB more free heap than the run it
+claimed to vindicate. Shawn re-ran the suite three times on the same build
+and got the same 17 failures, which is what exposed this.
+
+Two compounding causes, both mine:
+1. **The condition was never controlled.** Opening the serial port resets the
+   chip, so a scripted run always begins on a fresh boot ~25 s before the HMI
+   reconnects. Every scripted run therefore silently selected the EASY heap
+   condition. The harness now takes a `hmi` argument that blocks until
+   `authenticated machine connected` appears before sending `t`, and exits
+   non-zero if it never does — a run that cannot reach the hard condition now
+   fails loudly instead of passing quietly.
+2. **The heap was never measured.** Nothing in the transcript distinguished
+   "logic correct" from "allocation happened to fit", so a passing run and a
+   lucky run were indistinguishable. The suite now prints free heap and
+   largest free block before and after.
+
+This is the same failure this entire correction pass exists to correct — a
+green result that proved nothing because the conditions differed — committed
+by the person writing the corrections, one section after documenting it.
+
+#### Second fix: the first fix was insufficient, not just unverified
+
+Hashing the payload took the entry from ~968 to ~490 bytes, but the table was
+still 32 entries (15,616 B) against a baseline of 8 entries (7,680 B), and
+the diagnostic stack was still +4 KB. Under the HMI-connected condition that
+left roughly 8 KB of contiguous heap against a ~13 KB requirement — short,
+exactly as observed. The real fix removes the rest:
+
+- The result is stored as the **fields** it is composed from, not the
+  composed 385-byte JSON. `compose_authority_result_json()` was split out as
+  a pure function of exactly those fields, so a replay recomposes
+  byte-identical output. Storing fields is not a summary of the result; it is
+  the result's complete input set.
+- The table is `ARGUS_SECURITY_MAX_MACHINES` (16), not 2×. The 2× was
+  speculative padding for "a request and its follow-up", not a protocol
+  property — and a machine's follow-up is only sent after its first is
+  answered. One slot per machine that can have a request in flight is the
+  honest bound.
+
+Entry ~968 → ~152 B; table `.bss` 30,976 → 15,616 → **2,368 B**, now
+*smaller than the original 8-entry table it replaced*. Net against the
+baseline that passed: −5,312 B of `.bss` against +4,096 B of diagnostic
+stack, i.e. this pass now returns about 1.2 KB more heap than it consumes.
+
+#### Final run — HMI CONNECTED throughout, the condition that failed
+
+```
+Heap before tests: free=32912 largest_block=21504 bytes
+Heap after  tests: free=33544 largest_block=23552 bytes
+
+Distinct Tests : 331   Repeat Passes : 3
+Total Executed : 993   Passed : 993   Failed : 0
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 3)
+  Network State        : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State    : UNCHANGED (RUNNING)
+  Machine State        : UNCHANGED (UNLOCKED)
+  Task Count           : UNCHANGED (24 tasks)
+  AP Stations          : STEADY (1 -> 1)
+  Broker Clients       : STEADY (1 -> 1)
+
+PHASE 4D.4 PURE UNIT TEST SUITE: PASSED
+Diagnostic task stack high-water: before=14116 after=4100 bytes
+```
+
+`Broker Clients: STEADY (1 -> 1)` and `Task Count: UNCHANGED (24)` are the
+load-bearing lines: the HMI held its broker connection for the whole run, so
+this executed under Shawn's failing condition rather than around it. Every
+isolation field is clean — the first run in this pass for which that is true.
+
+The margin is now measured, not inferred: 21,504 B largest contiguous block
+at suite start against a ~13 KB peak requirement (the directory tests
+allocate two ~6.5 KB slots simultaneously; measured suite-wide peak
+consumption is ~12.7 KB). For comparison, the same measurement under the
+HMI-absent condition reads 31,744 B — the ~10 KB delta between them is the
+margin every previous "verification" in this pass was silently spending.
+
+#### Superseded run (HMI absent — retained for the record)
 
 ```
 Distinct Tests : 331   Repeat Passes : 3

@@ -89,13 +89,22 @@ void authority_status_from_core(
 // 4 requires this): the broker rejects simultaneously active duplicate MQTT
 // client IDs (§5 of the contract), so at most one connection per enrolled
 // machine can be issuing requests at once, and ARGUS_SECURITY_MAX_MACHINES
-// bounds how many machines can ever be enrolled at all. Sizing at 2x that
-// ceiling covers every enrolled machine having one DISTINCT request AND its
-// immediate follow-up (e.g. a request then a release) simultaneously
-// resident, which is the actual worst case this protocol can produce - not
-// a guess about how often operators act. In the header so tests exercise
-// the REAL bound rather than hardcoding a stale copy of it.
-#define ARGUS_MQTT_AUTH_DUP_CACHE_SIZE (2U * ARGUS_SECURITY_MAX_MACHINES)
+// bounds how many machines can ever be enrolled at all. At most
+// ARGUS_SECURITY_MAX_MACHINES distinct request identities can therefore be
+// in flight at any instant, and that - not a traffic estimate - is the
+// bound. In the header so tests exercise the REAL bound rather than
+// hardcoding a stale copy of it.
+//
+// An earlier cut of this pass used 2x the ceiling, reasoning that a machine
+// might have a request and an immediate follow-up resident together. That
+// was speculative padding, not a protocol property, and it cost real heap
+// (see the entry-layout comment in argus_mqtt_runtime.c - the oversized
+// table starved the 4D.4 directory tests' allocations on hardware). It is
+// also unnecessary: a machine's follow-up request is only sent after its
+// first was answered, and cache residency no longer carries any safety
+// burden - the A2.2 epoch rules do (see A2.6). One slot per machine that
+// can have a request in flight is the honest bound.
+#define ARGUS_MQTT_AUTH_DUP_CACHE_SIZE ARGUS_SECURITY_MAX_MACHINES
 
 // Clears the bounded A2.6 duplicate-request cache. Called by
 // argus_mqtt_runtime_prepare_start() on every broker (re)start, and exposed

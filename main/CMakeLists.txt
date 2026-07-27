@@ -79,8 +79,20 @@ idf_component_register(
         json
 )
 
+# Frame-size guard. Extended beyond argus_machine_directory.c after an audit
+# found a ~4.4 KB stack frame in argus_security_directory.c's commit_locked()
+# - a compound-literal assignment that materialised a whole directory slot on
+# the stack - reached from app_main's first-boot path where the main task has
+# only CONFIG_ESP_MAIN_TASK_STACK_SIZE (3584) bytes. The guard was on the one
+# module that was already correct and not on the one that was broken, so the
+# defect compiled cleanly for its whole life. These are the modules that
+# handle whole-directory / whole-payload structures and are therefore where
+# this class of mistake actually lands.
 set_source_files_properties(
     "argus_machine_directory.c"
+    "argus_security_directory.c"
+    "argus_security_store.c"
+    "argus_mqtt_runtime.c"
     PROPERTIES COMPILE_OPTIONS
         "-Wframe-larger-than=2048;-Werror=frame-larger-than=2048"
 )

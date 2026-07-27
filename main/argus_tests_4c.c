@@ -650,30 +650,66 @@ esp_err_t test_4c_fail_operational_epoch_survives_reconnect_blip(void)
 {
     // Shawn's decision 8.1 (2026-07-26): a TCP reconnect INSIDE the lease
     // term preserves authority. A dropped packet is a comms event, and comms
-    // events must not move authority. The lease timer keeps running through
-    // the blip, so a genuinely dead supervisor still expires on schedule
-    // rather than hiding inside a reconnect loop.
+    // events must not move authority.
+    //
+    // AUDIT CORRECTION: this test previously never granted authority, never
+    // called argus_mqtt_session_disconnect(), and never referenced
+    // authority_epoch - so the epoch was 0 throughout and the property in
+    // its own name was asserted nowhere. That is the SAME defect the
+    // evidence record says got the original epoch_survives_reconnect_blip
+    // replaced; the replacement landed under a new name and this one was
+    // left in place with the flaw intact. It now acquires authority, drops
+    // the bound transport through the real disconnect path, and asserts the
+    // epoch across the blip.
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
-    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
-    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
-                                              &heartbeat, 100U) == ESP_OK);
+    CHECK(argus_mqtt_session_request_authority(
+              &core, 11U, "m-core", ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 100U) ==
+          ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(core.authority_epoch == 1U);
+    // Stand in for a controller already running an accepted command.
+    core.has_sequence = true;
+    core.last_sequence = 42U;
+    core.cached_action = ARGUS_MQTT_ACTION_SET_TARGET;
+    strlcpy(core.cached_command_id, "cmd-72rpm", sizeof(core.cached_command_id));
+    strlcpy(core.cached_payload, "{\"target_rpm_milli\":72000}",
+            sizeof(core.cached_payload));
+    strlcpy(core.cached_result, "ACCEPTED", sizeof(core.cached_result));
+
+    // The blip: the bound transport actually drops.
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
+    // Ownership and epoch survive a comms event - the whole point.
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.authority_epoch == 1U);
 
     // Same principal returns on a new socket, well inside the lease term.
-    heartbeat.counter = 1U;
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, "m-core", 5U,
-                                              &heartbeat, 3000U) == ESP_OK);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(
+              &core, 12U, "m-core", ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              &heartbeat, 3000U) == ESP_OK);
     CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
     CHECK(core.lease_connection_id == 12U);
     CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    // Reconnecting is not an ownership change, so the epoch must NOT move.
+    CHECK(core.authority_epoch == 1U);
 
-    // The blip must not have restarted the expiry clock from the blip time:
-    // the lease deadline follows the renewing heartbeat, so a supervisor
-    // that goes truly silent after reconnecting still expires.
+    // The deadline follows the most recent valid renewal (3000 + 6000), so a
+    // supervisor that goes silent after reconnecting still expires on
+    // schedule rather than hiding inside a reconnect loop.
     CHECK(!argus_mqtt_session_tick(&core, 8999U));
     CHECK(argus_mqtt_session_tick(&core, 9000U));
     CHECK(core.link == ARGUS_MQTT_LINK_STALE);
+    // Expiry IS an ownership change: the epoch advances here, and only here.
+    CHECK(core.authority_epoch == 2U);
+    // Fail-operational: none of it touched the accepted command record.
+    CHECK(core.has_sequence && core.last_sequence == 42U);
+    CHECK(core.cached_action == ARGUS_MQTT_ACTION_SET_TARGET);
+    CHECK(strcmp(core.cached_command_id, "cmd-72rpm") == 0);
+    CHECK(strcmp(core.cached_payload, "{\"target_rpm_milli\":72000}") == 0);
+    CHECK(strcmp(core.cached_result, "ACCEPTED") == 0);
     return ESP_OK;
 }
 
@@ -3321,6 +3357,223 @@ esp_err_t test_4c_ffp_evicted_replay_cannot_mutate(void)
     argus_mqtt_command_t command = ffp_command(1U, 3U);
     CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 12U, &command) ==
           ARGUS_MQTT_COMMAND_ADMIT_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_audit_command_epoch_and_session_gates(void)
+{
+    // AUDIT FINDING (critical): ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH and
+    // ..._SESSION_MISMATCH were asserted by NO test in the suite. Every
+    // existing caller either passed core.authority_epoch as the command's
+    // own epoch (so it could never mismatch) or tripped the earlier
+    // identity/link gate first. Deleting the A2.9 epoch check from
+    // argus_mqtt_command_admission_check() left 993/993 passing - the exact
+    // "green proves nothing" defect this project exists to eliminate,
+    // sitting in the gate correction-order §4 was written to enforce.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    seam_load_operational_state(&core);
+    CHECK(core.authority_epoch == 1U);
+
+    // Baseline: the bound holder at the CURRENT epoch admits.
+    argus_mqtt_command_t ok = ffp_command(1U, 1U);
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U, &ok) ==
+          ARGUS_MQTT_COMMAND_ADMIT_OK);
+
+    // A2.9, the case that had no coverage: same holder, same live
+    // connection, same session - ONLY the epoch is stale. Every other gate
+    // passes, so this reaches the epoch check and nothing else can explain
+    // a rejection.
+    argus_mqtt_command_t stale = ffp_command(2U, 0U);
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U, &stale) ==
+          ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH);
+    argus_mqtt_command_t future = ffp_command(3U, 99U);
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U, &future) ==
+          ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH);
+
+    // The A2.9 required sequence: a principal that lost authority and
+    // regained it under a NEW epoch must still have its OWN delayed
+    // epoch-1 command rejected, even though identity and connection match
+    // again. Release (epoch 2), reacquire (epoch 3).
+    CHECK(argus_mqtt_session_release_authority(&core, "m-panel"));
+    CHECK(core.authority_epoch == 2U);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 200U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(core.authority_epoch == 3U);
+    argus_mqtt_command_t delayed = ffp_command(4U, 1U);
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U, &delayed) ==
+          ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH);
+    argus_mqtt_command_t current = ffp_command(5U, 3U);
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U, &current) ==
+          ARGUS_MQTT_COMMAND_ADMIT_OK);
+
+    // Session binding, likewise never asserted before: a command naming a
+    // different controller session is refused ahead of identity, so a
+    // command buffered across a controller restart cannot land.
+    argus_mqtt_command_t wrong_session = ffp_command(6U, 3U);
+    strlcpy(wrong_session.session, "fedcba9876543210",
+            sizeof(wrong_session.session));
+    CHECK(argus_mqtt_command_admission_check(&core, "m-panel", 11U,
+                                             &wrong_session) ==
+          ARGUS_MQTT_COMMAND_ADMIT_SESSION_MISMATCH);
+
+    // None of the refusals disturbed the accepted-command record.
+    CHECK(seam_assert_operational_state(&core) == ESP_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_audit_acquire_and_release_ids_do_not_collide(void)
+{
+    // AUDIT FINDING: the A2.6 cache key is (session, request_id), which
+    // taken literally collides the two authority topics - and an
+    // acquisition and a release CAN be byte-identical, since a release
+    // merely may not carry epoch 0 while an acquisition may carry a
+    // nonzero epoch. An owner reusing one id for "acquire, then release"
+    // therefore had its RELEASE answered from the acquisition's cached
+    // entry: replayed as ACCEPTED/already_held, never executed, authority
+    // silently retained while the client was told it succeeded.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+    seam_load_operational_state(&core);
+    CHECK(core.authority_epoch == 1U);
+
+    // One payload, epoch 1 - valid as BOTH an acquisition (nonzero epoch
+    // matching current) and a release (nonzero epoch matching current).
+    const char *shared =
+        "{\"schema\":1,\"request_id\":\"same-id\","
+        "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}";
+
+    argus_mqtt_broker_message_t as_request = seam_message(
+        topics.command_request_authority, shared, &panel);
+    as_request.connection_id = 11U;
+    argus_mqtt_authority_outcome_t acquired = argus_mqtt_authority_admit(
+        &core, &as_request, false, P_ALONE, false, false, 200U);
+    CHECK(acquired.stage == ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED);
+    CHECK(acquired.request_result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
+
+    // The SAME bytes as a release must actually release - not replay the
+    // acquisition's cached ACCEPTED result.
+    argus_mqtt_broker_message_t as_release = seam_message(
+        topics.command_release_authority, shared, &panel);
+    as_release.connection_id = 11U;
+    argus_mqtt_authority_outcome_t released = argus_mqtt_authority_admit(
+        &core, &as_release, true, P_ALONE, false, false, 300U);
+    CHECK(released.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED);
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.authority_epoch == 2U);
+    CHECK(strstr(released.result_json, "\"reason\":\"released\"") != NULL);
+
+    // Each kind still replays independently under its own key.
+    argus_mqtt_broker_message_t release_again = seam_message(
+        topics.command_release_authority, shared, &panel);
+    argus_mqtt_authority_outcome_t replay = argus_mqtt_authority_admit(
+        &core, &release_again, true, P_ALONE, false, false, 400U);
+    CHECK(replay.stage == ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY);
+    CHECK(strcmp(replay.result_json, released.result_json) == 0);
+
+    CHECK(seam_assert_operational_state(&core) == ESP_OK);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_audit_session_mismatch_does_not_evict(void)
+{
+    // AUDIT FINDING: a session_mismatch rejection was cached under the
+    // SENDER's session, which by definition never matches the controller's,
+    // so the entry was permanently unfindable - pure eviction pressure. Any
+    // authenticated principal could flush the whole table by publishing
+    // CACHE_SIZE well-formed requests carrying a bogus session, destroying
+    // QoS-1 idempotency for every legitimate in-flight request. A2.7 also
+    // requires zero mutation for a prior-session request.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_runtime_reset_duplicate_cache();
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_machine_principal_t panel = seam_principal(
+        "m-panel", HMI_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
+
+    // A real request, cached.
+    argus_mqtt_broker_message_t original = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel);
+    argus_mqtt_authority_outcome_t first = argus_mqtt_authority_admit(
+        &core, &original, false, P_ALONE, false, false, 100U);
+    CHECK(first.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t admissions_after_first =
+        argus_mqtt_runtime_duplicate_admission_count();
+
+    // Now flood with prior-session requests - more than the whole table.
+    for (uint32_t i = 0; i < ARGUS_MQTT_AUTH_DUP_CACHE_SIZE + 4U; ++i) {
+        char body[160];
+        snprintf(body, sizeof(body),
+            "{\"schema\":1,\"request_id\":\"flood-%lu\","
+            "\"session\":\"fedcba9876543210\",\"authority_epoch\":0}",
+            (unsigned long)i);
+        argus_mqtt_broker_message_t bogus = seam_message(
+            topics.command_request_authority, body, &panel);
+        argus_mqtt_authority_outcome_t out = argus_mqtt_authority_admit(
+            &core, &bogus, false, P_ALONE, false, false, 200U + i);
+        CHECK(out.stage == ARGUS_MQTT_AUTHORITY_ADMIT_SESSION_MISMATCH);
+    }
+    // Not one of them consumed a cache slot.
+    CHECK(argus_mqtt_runtime_duplicate_admission_count() ==
+          admissions_after_first);
+
+    // The legitimate request still replays its ORIGINAL result.
+    argus_mqtt_broker_message_t redelivered = seam_message(
+        topics.command_request_authority, SEAM_REQ_OK, &panel);
+    argus_mqtt_authority_outcome_t replay = argus_mqtt_authority_admit(
+        &core, &redelivered, false, P_ALONE, false, false, 900U);
+    CHECK(replay.stage == ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY);
+    CHECK(strcmp(replay.result_json, first.result_json) == 0);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_audit_reacquire_keeps_replay_guard(void)
+{
+    // AUDIT FINDING: the ALREADY_HELD rebind path reset heartbeat_counter
+    // unconditionally, including when the connection had NOT changed. Since
+    // accept_heartbeat() skips its is-newer test whenever the stored counter
+    // is 0, a holder that polled its own ownership on its existing
+    // connection disarmed the replay guard for that connection's history.
+    CHECK(seam_topics_build() == ESP_OK);
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 100U) == ARGUS_MQTT_AUTHORITY_GRANTED);
+
+    // Advance the heartbeat counter on connection 11.
+    argus_mqtt_heartbeat_t hb = {.counter = 500U};
+    strlcpy(hb.session, SESSION, sizeof(hb.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-panel", HMI_T,
+                                              &hb, 200U) == ESP_OK);
+    CHECK(core.heartbeat_counter == 500U);
+
+    // Same-connection reacquisition must NOT disarm the guard.
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-panel", HMI_T,
+              P_ALONE, false, 300U) == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
+    CHECK(core.heartbeat_counter == 500U);
+
+    // A replayed old heartbeat from that same connection is still refused.
+    argus_mqtt_heartbeat_t replayed = {.counter = 1U};
+    strlcpy(replayed.session, SESSION, sizeof(replayed.session));
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-panel", HMI_T,
+                                              &replayed, 400U) != ESP_OK);
+
+    // A genuinely NEW connection does legitimately restart the counter -
+    // §7 scopes counter history to the connection that produced it.
+    CHECK(argus_mqtt_session_request_authority(&core, 12U, "m-panel", HMI_T,
+              P_ALONE, false, 500U) == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
+    CHECK(core.heartbeat_connection_id == 12U);
+    CHECK(core.heartbeat_counter == 0U);
     return ESP_OK;
 }
 

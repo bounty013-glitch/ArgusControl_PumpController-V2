@@ -86,6 +86,10 @@ static void publish_number(const char *topic, int64_t value)
 
 static void publish_authority_state(void);
 static void set_authority_reason(const char *reason);
+static void compose_authority_result_json(
+    char *out, size_t out_size, const char *request_id, const char *session,
+    const char *outcome, const char *reason, const char *owner_kind,
+    uint32_t authority_epoch, const char *lease_status, const char *local_status);
 
 static void publish_operational_snapshot(void)
 {
@@ -543,52 +547,77 @@ void authority_status_from_core(
     strlcpy(local_status_out, local_status, local_status_cap);
 }
 
-// Thin runtime-side wrapper: reads s_runtime under the mutex and delegates
-// the actual computation to the pure function above, so the retained
-// snapshot published by publish_authority_state() and the result published
-// by argus_mqtt_authority_admit() can never disagree - one computation, two
-// callers.
-static void authority_status_snapshot(char *lease_status_out, size_t lease_status_cap,
-                                      char *local_status_out, size_t local_status_cap)
-{
-    argus_mqtt_session_core_t snapshot;
-    uint8_t profile;
-    bool window_open;
-    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
-    snapshot = s_runtime.session;
-    xSemaphoreGive(s_runtime.mutex);
-    profile = commissioned_authority_profile();
-    window_open = core_acquisition_window_open();
-    authority_status_from_core(&snapshot, profile, window_open, now_ms(),
-                               lease_status_out, lease_status_cap,
-                               local_status_out, local_status_cap);
-}
+// (A former authority_status_snapshot() wrapper lived here. It took the
+// mutex a SECOND time, independently of publish_authority_state()'s own
+// acquisition, which is exactly the incoherence the single-snapshot fix in
+// publish_authority_state() removed - two observations published as one.
+// Deleted rather than left unused: keeping a second, racy way to obtain
+// these values is how the two callers drift apart again.)
 
 // A2.6 duplicate/replay cache: bounded, fixed-size, FIFO-evicted, keyed on
 // (session, request_id), each entry tagged with a monotonic admission
 // ordinal.
 //
-// Payload identity is held as (length, SHA-256) rather than the payload
-// bytes themselves. The A2.6 semantic is unchanged - an identical repeat
-// replays, a conflicting reuse is refused - but the entry shrinks from ~968
-// to ~490 bytes, which matters directly: the first cut of the 32-entry cache
-// stored full payloads (~31 KB of .bss), and that consumed exactly the heap
-// margin the 4D.4 machine-directory tests' multi-KB calloc()s lived in -
-// six of them began failing allocation on hardware. Length plus SHA-256 is
-// byte-identity for every practical purpose here: the comparison only
-// disambiguates replay-vs-conflict among authenticated, capability-checked
-// principals, and constructing a same-length SHA-256 collision is not a
-// capability this threat model contains.
+// MEMORY DISCIPLINE, and the reason this entry looks the way it does.
+//
+// This cache is static, and every byte of it is a byte the rest of the
+// firmware does not get. The first cut of the enlarged cache stored the
+// request payload (513 B) AND the composed result JSON (385 B) per entry -
+// ~968 B x 32 = ~31 KB - which consumed exactly the heap margin the 4D.4
+// machine-directory tests' multi-kilobyte calloc()s live in, and six of
+// them began failing allocation on hardware whenever an MQTT client was
+// connected (each broker client is an 8 KB heap task stack). Two
+// reductions, neither of which changes A2.6 behaviour:
+//
+// 1. Payload identity is (length, SHA-256), not the payload bytes.
+//    Length plus SHA-256 is byte-identity for every purpose this
+//    comparison serves - it only disambiguates replay-vs-conflict among
+//    authenticated, capability-checked principals, and constructing a
+//    same-length SHA-256 collision is not a capability this threat model
+//    contains.
+// 2. The result is stored as the FIELDS it is composed from, not as the
+//    composed JSON. A replay recomposes byte-identical output because
+//    compose_authority_result_json() is a pure function of exactly these
+//    fields, and every string among them is a static literal or a bounded
+//    vocabulary value. Storing the fields is not a summary of the result -
+//    it is the result's complete input set.
+//
+// Entry ~968 -> ~152 B. At ARGUS_SECURITY_MAX_MACHINES entries the whole
+// table is ~2.4 KB, SMALLER than the original 8-entry table it replaces
+// (~7.7 KB), so this pass now returns more heap than its diagnostic-stack
+// raise consumed.
 #define AUTH_DUP_HASH_LEN 32U
+#define AUTH_DUP_STATUS_CAP 16U
 
 typedef struct {
     bool in_use;
     uint32_t ordinal;
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     char request_id[ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX + 1U];
+    // The KIND of operation is part of the identity, not just the id.
+    // A2.6 names the key as (session, request_id); taken literally that
+    // collides the two topics, and an acquisition and a release CAN be
+    // byte-identical (the schemas differ only in that a release may not
+    // carry epoch 0 - an acquisition may carry a nonzero epoch too). An
+    // owner that reused one id for "acquire, then release" therefore had
+    // its RELEASE answered from the acquisition's cached entry: replayed
+    // as ACCEPTED/already_held, never executed, authority silently
+    // retained. Keying on the kind as well closes that without weakening
+    // A2.6 - a genuine redelivery still carries the same kind.
+    bool release;
     uint8_t payload_hash[AUTH_DUP_HASH_LEN];
     size_t payload_len;
-    char result[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+    // The complete input set of compose_authority_result_json(). outcome,
+    // reason and owner_kind are always static string literals - every
+    // caller passes either a literal or the return of decode_reason() /
+    // authority_result_reason(), both of which return literals - so storing
+    // the pointer is safe for the lifetime of the firmware image.
+    const char *outcome;
+    const char *reason;
+    const char *owner_kind;
+    uint32_t authority_epoch;
+    char lease_status[AUTH_DUP_STATUS_CAP];
+    char local_status[AUTH_DUP_STATUS_CAP];
 } auth_dup_entry_t;
 
 static auth_dup_entry_t s_auth_dup_cache[ARGUS_MQTT_AUTH_DUP_CACHE_SIZE];
@@ -611,11 +640,13 @@ uint32_t argus_mqtt_runtime_duplicate_admission_count(void)
     return s_auth_dup_ordinal_next;
 }
 
-static auth_dup_entry_t *auth_dup_find(const char *session, const char *request_id)
+static auth_dup_entry_t *auth_dup_find(const char *session, const char *request_id,
+                                       bool release)
 {
     for (size_t i = 0U; i < ARGUS_MQTT_AUTH_DUP_CACHE_SIZE; ++i) {
         auth_dup_entry_t *entry = &s_auth_dup_cache[i];
-        if (entry->in_use && strcmp(entry->session, session) == 0 &&
+        if (entry->in_use && entry->release == release &&
+            strcmp(entry->session, session) == 0 &&
             strcmp(entry->request_id, request_id) == 0) {
             return entry;
         }
@@ -665,8 +696,11 @@ static void auth_dup_hash(const char *payload, size_t payload_len,
 }
 
 static void auth_dup_store(const char *session, const char *request_id,
+                           bool release,
                            const char *payload, size_t payload_len,
-                           const char *result)
+                           const char *outcome, const char *reason,
+                           const char *owner_kind, uint32_t authority_epoch,
+                           const char *lease_status, const char *local_status)
 {
     auth_dup_entry_t *slot = &s_auth_dup_cache[s_auth_dup_next];
     s_auth_dup_next = (s_auth_dup_next + 1U) % ARGUS_MQTT_AUTH_DUP_CACHE_SIZE;
@@ -674,20 +708,66 @@ static void auth_dup_store(const char *session, const char *request_id,
     slot->ordinal = s_auth_dup_ordinal_next++;
     strlcpy(slot->session, session, sizeof(slot->session));
     strlcpy(slot->request_id, request_id, sizeof(slot->request_id));
+    slot->release = release;
     auth_dup_hash(payload, payload_len, slot->payload_hash);
     slot->payload_len = payload_len;
-    strlcpy(slot->result, result, sizeof(slot->result));
+    slot->outcome = outcome;
+    slot->reason = reason;
+    slot->owner_kind = owner_kind;
+    slot->authority_epoch = authority_epoch;
+    strlcpy(slot->lease_status, lease_status, sizeof(slot->lease_status));
+    strlcpy(slot->local_status, local_status, sizeof(slot->local_status));
     slot->in_use = true;
+}
+
+// Recomposes a cached entry's original result. Byte-identical to what was
+// emitted when the entry was stored, because compose_authority_result_json()
+// is pure and every one of its inputs was captured at that moment - the
+// replay does NOT re-derive owner/epoch/status from current state, which is
+// exactly what A2.6 forbids ("the cached result is republished").
+static void auth_dup_replay(const auth_dup_entry_t *entry,
+                            char *out, size_t out_size)
+{
+    compose_authority_result_json(out, out_size, entry->request_id,
+                                  entry->session, entry->outcome, entry->reason,
+                                  entry->owner_kind, entry->authority_epoch,
+                                  entry->lease_status, entry->local_status);
 }
 
 // Pure: builds the exact A2.4 result JSON from an explicitly passed core and
 // admission context. No global state, no mutex - callable from
 // argus_mqtt_authority_admit() with a synthetic core in a test exactly as it
 // is called in production with the real one.
+// The A2.4 result document, composed from explicit values only. Pure: given
+// the same eight inputs it emits the same bytes, which is what lets a
+// duplicate replay recompose an earlier result byte-identically from the
+// stored fields instead of keeping a 385-byte copy of the document.
+static void compose_authority_result_json(
+    char *out, size_t out_size, const char *request_id, const char *session,
+    const char *outcome, const char *reason, const char *owner_kind,
+    uint32_t authority_epoch, const char *lease_status, const char *local_status)
+{
+    int written = snprintf(out, out_size,
+        "{\"schema\":1,\"request_id\":\"%s\",\"session\":\"%s\",\"outcome\":\"%s\""
+        ",\"reason\":\"%s\",\"control_owner\":\"%s\",\"authority_epoch\":%" PRIu32
+        ",\"core_lease_status\":\"%s\",\"local_control_status\":\"%s\"}",
+        request_id, session, outcome, reason, owner_kind, authority_epoch,
+        lease_status, local_status);
+    if (written < 0 || (size_t)written >= out_size) {
+        strlcpy(out, "{\"outcome\":\"REJECTED\",\"reason\":\"result_overflow\"}", out_size);
+    }
+}
+
+// Derives the owner/lease/local values from the live core, then composes.
+// Also hands the derived values back to the caller (when the out-params are
+// non-NULL) so the duplicate cache can store exactly what was composed
+// rather than recomputing it later against changed state.
 static void build_authority_result_json(
     char *out, size_t out_size, const argus_mqtt_authority_request_t *req,
     const argus_mqtt_session_core_t *core, uint8_t authority_profile,
-    bool core_window_open, uint64_t now_ms, const char *outcome, const char *reason)
+    bool core_window_open, uint64_t now_ms, const char *outcome, const char *reason,
+    const char **owner_kind_out, char *lease_status_out, size_t lease_status_cap,
+    char *local_status_out, size_t local_status_cap)
 {
     const char *owner_kind = "NONE";
     if (core->lease_machine_id[0] != '\0') {
@@ -698,20 +778,48 @@ static void build_authority_result_json(
         default:                                 owner_kind = "OTHER"; break;
         }
     }
-    char lease_status[16];
-    char local_status[16];
+    char lease_status[AUTH_DUP_STATUS_CAP];
+    char local_status[AUTH_DUP_STATUS_CAP];
     authority_status_from_core(core, authority_profile, core_window_open, now_ms,
                                lease_status, sizeof(lease_status),
                                local_status, sizeof(local_status));
 
-    int written = snprintf(out, out_size,
-        "{\"schema\":1,\"request_id\":\"%s\",\"session\":\"%s\",\"outcome\":\"%s\""
-        ",\"reason\":\"%s\",\"control_owner\":\"%s\",\"authority_epoch\":%" PRIu32
-        ",\"core_lease_status\":\"%s\",\"local_control_status\":\"%s\"}",
+    compose_authority_result_json(out, out_size,
         req != NULL ? req->request_id : "", core->session, outcome, reason,
         owner_kind, core->authority_epoch, lease_status, local_status);
-    if (written < 0 || (size_t)written >= out_size) {
-        strlcpy(out, "{\"outcome\":\"REJECTED\",\"reason\":\"result_overflow\"}", out_size);
+
+    if (owner_kind_out != NULL) *owner_kind_out = owner_kind;
+    if (lease_status_out != NULL) strlcpy(lease_status_out, lease_status, lease_status_cap);
+    if (local_status_out != NULL) strlcpy(local_status_out, local_status, local_status_cap);
+}
+
+// Composes the outcome's result document, marks it for publication, and -
+// unless `cache` is false - records the fields under (session, request_id)
+// so a later byte-identical redelivery replays this exact result. Every
+// admission exit that publishes goes through here, so "what was published"
+// and "what a replay will reproduce" cannot drift apart.
+static void emit_authority_result(
+    argus_mqtt_authority_outcome_t *out,
+    const argus_mqtt_authority_request_t *req,
+    const argus_mqtt_broker_message_t *message,
+    const argus_mqtt_session_core_t *core, uint8_t authority_profile,
+    bool core_window_open, uint64_t now_ms,
+    const char *outcome, const char *reason, bool release, bool cache)
+{
+    const char *owner_kind = "NONE";
+    char lease_status[AUTH_DUP_STATUS_CAP];
+    char local_status[AUTH_DUP_STATUS_CAP];
+    build_authority_result_json(out->result_json, sizeof(out->result_json),
+                                req, core, authority_profile, core_window_open,
+                                now_ms, outcome, reason,
+                                &owner_kind, lease_status, sizeof(lease_status),
+                                local_status, sizeof(local_status));
+    out->published = true;
+    if (cache && req != NULL) {
+        auth_dup_store(req->session, req->request_id, release,
+                       message->payload, message->payload_len, outcome, reason,
+                       owner_kind, core->authority_epoch, lease_status,
+                       local_status);
     }
 }
 
@@ -749,28 +857,36 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
         message->payload, message->payload_len, release, &req);
     if (out.decode != ARGUS_MQTT_DECODE_OK) {
         out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_DECODE_REJECTED;
-        build_authority_result_json(out.result_json, sizeof(out.result_json),
-            NULL, core, authority_profile, core_window_open, now_ms,
-            "REJECTED", decode_reason(out.decode));
-        out.published = true;
-        return out;   // no request_id decoded: not cached, matching the old behaviour
+        // No request_id decoded: nothing to key a cache entry on.
+        emit_authority_result(&out, NULL, message, core, authority_profile,
+                              core_window_open, now_ms, "REJECTED",
+                              decode_reason(out.decode), release, false);
+        return out;
     }
 
     // Session binding. A request naming a previous controller session is
     // rejected with zero mutation.
     if (strcmp(req.session, core->session) != 0) {
         out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_SESSION_MISMATCH;
-        build_authority_result_json(out.result_json, sizeof(out.result_json),
-            &req, core, authority_profile, core_window_open, now_ms,
-            "REJECTED", "session_mismatch");
-        out.published = true;
-        auth_dup_store(req.session, req.request_id, message->payload,
-                       message->payload_len, out.result_json);
+        // NOT cached. A2.7 requires zero mutation for a prior-session
+        // request, and caching one was worse than a mere technicality: the
+        // entry is keyed on the SENDER's session, which by definition never
+        // equals the controller's, so the lookup above can never find it.
+        // Every such entry was pure eviction pressure - any authenticated
+        // principal holding REQUEST_AUTHORITY could flush the whole table
+        // by publishing ARGUS_MQTT_AUTH_DUP_CACHE_SIZE well-formed requests
+        // carrying a bogus session, destroying QoS-1 idempotency for every
+        // legitimate in-flight request and breaking A2.6's claim that
+        // occupancy is bounded by enrolled machines rather than publish
+        // rate.
+        emit_authority_result(&out, &req, message, core, authority_profile,
+                              core_window_open, now_ms, "REJECTED",
+                              "session_mismatch", release, false);
         return out;
     }
 
     // A2.6 duplicate handling, before any arbitration.
-    auth_dup_entry_t *existing = auth_dup_find(req.session, req.request_id);
+    auth_dup_entry_t *existing = auth_dup_find(req.session, req.request_id, release);
     if (existing != NULL) {
         uint8_t incoming_hash[AUTH_DUP_HASH_LEN];
         auth_dup_hash(message->payload, message->payload_len, incoming_hash);
@@ -778,16 +894,12 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
             memcmp(existing->payload_hash, incoming_hash,
                    AUTH_DUP_HASH_LEN) == 0) {
             out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_REPLAY;
-            strlcpy(out.result_json, existing->result, sizeof(out.result_json));
+            auth_dup_replay(existing, out.result_json, sizeof(out.result_json));
             out.published = true;
             return out;   // idempotent replay: no arbitration, no epoch change
         }
         out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_DUPLICATE_CONFLICT;
-        build_authority_result_json(out.result_json, sizeof(out.result_json),
-            &req, core, authority_profile, core_window_open, now_ms,
-            "REJECTED", "duplicate_conflict");
-        out.published = true;
-        // Deliberately NOT stored (final-focused-pass item 4): the ORIGINAL
+        // Deliberately NOT cached (final-focused-pass item 4): the ORIGINAL
         // record stays the single canonical entry for this request identity.
         // Storing the conflict too would create a second record under the
         // same key - and once the original was evicted, the surviving
@@ -795,6 +907,9 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
         // REJECTED result for the identity's legitimate original payload.
         // A redelivered conflict simply re-detects against the original and
         // gets the same refusal - idempotent without being cached.
+        emit_authority_result(&out, &req, message, core, authority_profile,
+                              core_window_open, now_ms, "REJECTED",
+                              "duplicate_conflict", release, false);
         return out;
     }
 
@@ -803,27 +918,21 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
         // previous owner cannot release a later holder.
         if (req.authority_epoch != core->authority_epoch) {
             out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_STALE_EPOCH;
-            build_authority_result_json(out.result_json, sizeof(out.result_json),
-                &req, core, authority_profile, core_window_open, now_ms,
-                "REJECTED", "stale_epoch");
-            out.published = true;
-            auth_dup_store(req.session, req.request_id, message->payload,
-                           message->payload_len, out.result_json);
+            emit_authority_result(&out, &req, message, core, authority_profile,
+                                  core_window_open, now_ms, "REJECTED",
+                                  "stale_epoch", release, true);
             return out;
         }
         bool released = argus_mqtt_session_release_authority(
             core, message->principal.identifier);
         out.stage = released ? ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED
                               : ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_NOT_OWNER;
-        build_authority_result_json(out.result_json, sizeof(out.result_json),
-            &req, core, authority_profile, core_window_open, now_ms,
-            released ? "ACCEPTED" : "REJECTED",
-            released ? "released" : "not_owner");
-        out.published = true;
         out.state_changed = released;
         out.link_online = false;
-        auth_dup_store(req.session, req.request_id, message->payload,
-                       message->payload_len, out.result_json);
+        emit_authority_result(&out, &req, message, core, authority_profile,
+                              core_window_open, now_ms,
+                              released ? "ACCEPTED" : "REJECTED",
+                              released ? "released" : "not_owner", release, true);
         return out;
     }
 
@@ -837,12 +946,9 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
     // were current.
     if (req.authority_epoch != 0U && req.authority_epoch != core->authority_epoch) {
         out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_STALE_EPOCH;
-        build_authority_result_json(out.result_json, sizeof(out.result_json),
-            &req, core, authority_profile, core_window_open, now_ms,
-            "REJECTED", "stale_epoch");
-        out.published = true;
-        auth_dup_store(req.session, req.request_id, message->payload,
-                       message->payload_len, out.result_json);
+        emit_authority_result(&out, &req, message, core, authority_profile,
+                              core_window_open, now_ms, "REJECTED",
+                              "stale_epoch", release, true);
         return out;
     }
 
@@ -854,14 +960,12 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
     out.request_result = result;
     bool accepted = (result == ARGUS_MQTT_AUTHORITY_GRANTED ||
                       result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD);
-    build_authority_result_json(out.result_json, sizeof(out.result_json),
-        &req, core, authority_profile, core_window_open, now_ms,
-        accepted ? "ACCEPTED" : "REJECTED", authority_result_reason(result));
-    out.published = true;
     out.state_changed = accepted;
     out.link_online = true;
-    auth_dup_store(req.session, req.request_id, message->payload,
-                   message->payload_len, out.result_json);
+    emit_authority_result(&out, &req, message, core, authority_profile,
+                          core_window_open, now_ms,
+                          accepted ? "ACCEPTED" : "REJECTED",
+                          authority_result_reason(result), release, true);
     return out;
 }
 
@@ -966,23 +1070,33 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
 // "another interface has control" it could manage before.
 static void publish_authority_state(void)
 {
-    char owner[ARGUS_SECURITY_ID_MAX + 1U];
-    uint8_t client_type;
-    uint32_t epoch;
-
+    // ONE snapshot under ONE mutex acquisition, then everything is derived
+    // from that copy. This previously took the mutex twice - once here for
+    // owner/type/epoch, again inside authority_status_snapshot() for the
+    // lease/local status - and published the two together as if they were
+    // one observation. Three tasks reach this function (the runtime task via
+    // request/heartbeat handling, a broker client task via the disconnect
+    // callback, and status_task at 1 Hz via argus_mqtt_runtime_tick), so a
+    // lease expiring between the two acquisitions published an owner and
+    // epoch from BEFORE the expiry alongside a lease status from AFTER it:
+    // control_owner=LOCAL_HMI with core_lease_status=EXPIRED and
+    // local_control_status=AVAILABLE simultaneously. A2.10 requires all six
+    // retained values to be internally consistent after every transition.
+    argus_mqtt_session_core_t snapshot;
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
-    strlcpy(owner, s_runtime.session.lease_machine_id, sizeof(owner));
-    client_type = s_runtime.session.lease_client_type;
-    epoch = s_runtime.session.authority_epoch;
+    snapshot = s_runtime.session;
     xSemaphoreGive(s_runtime.mutex);
 
-    // Ownership is lease presence alone - see authority_status_snapshot()'s
-    // comment. NOT gated on link == ONLINE: a disconnected-but-unexpired
-    // holder is still the truthful owner, per A2.11.
-    bool owned = owner[0] != '\0';
+    uint32_t epoch = snapshot.authority_epoch;
+    uint8_t profile = commissioned_authority_profile();
+    bool window_open = core_acquisition_window_open();
+
+    // Ownership is lease presence alone. NOT gated on link == ONLINE: a
+    // disconnected-but-unexpired holder is still the truthful owner, per
+    // A2.11.
     const char *owner_kind = "NONE";
-    if (owned) {
-        switch (client_type) {
+    if (snapshot.lease_machine_id[0] != '\0') {
+        switch (snapshot.lease_client_type) {
         case ARGUS_MACHINE_CLIENT_HMI:           owner_kind = "LOCAL_HMI"; break;
         case ARGUS_MACHINE_CLIENT_ARGUS_COMMAND: owner_kind = "ARGUSCORE"; break;
         case ARGUS_MACHINE_CLIENT_SERVICE_TOOL:  owner_kind = "SERVICE_TOOL"; break;
@@ -990,14 +1104,14 @@ static void publish_authority_state(void)
         }
     }
 
-    char lease_status[16];
-    char local_status[16];
-    authority_status_snapshot(lease_status, sizeof(lease_status),
-                              local_status, sizeof(local_status));
+    char lease_status[AUTH_DUP_STATUS_CAP];
+    char local_status[AUTH_DUP_STATUS_CAP];
+    authority_status_from_core(&snapshot, profile, window_open, now_ms(),
+                               lease_status, sizeof(lease_status),
+                               local_status, sizeof(local_status));
     publish_value(s_runtime.topics.status_core_lease_status, lease_status, true);
     publish_value(s_runtime.topics.status_authority_reason, s_authority_reason, true);
 
-    uint8_t profile = commissioned_authority_profile();
     publish_value(s_runtime.topics.status_authority_profile,
                   profile == ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED
                       ? "ARGUSCORE_PREFERRED" : "STANDALONE_HMI", true);
@@ -1294,6 +1408,9 @@ static void broker_client_cb(argus_mqtt_broker_client_event_t broker_event,
         xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
         bool changed = argus_mqtt_session_disconnect(
             &s_runtime.session, client->connection_id);
+        // Whether a lease still exists AFTER the disconnect decides whether
+        // this event is the reason the state looks the way it does.
+        bool still_owned = s_runtime.session.lease_machine_id[0] != '\0';
         xSemaphoreGive(s_runtime.mutex);
         if (changed) {
             // §4: disconnect is a listed transition requiring a coherent
@@ -1304,14 +1421,19 @@ static void broker_client_cb(argus_mqtt_broker_client_event_t broker_event,
             // leaving the six A2.10 values stale until some other event
             // happened to touch them.
             //
-            // Final-focused-pass item 2: TRANSPORT_LOST was defined in
-            // A2.10's vocabulary from the start but never actually set by
-            // any code path. This is the disconnect of the OWNING
-            // transport - argus_mqtt_session_disconnect() only returns true
-            // when the departing connection matched the current lease's or
-            // heartbeat's binding, so `changed` here already means "this was
-            // the owner's transport," not an arbitrary bystander socket.
-            set_authority_reason(argus_mqtt_authority_reason_for_disconnect());
+            // TRANSPORT_LOST only while a lease actually survives this
+            // disconnect. argus_mqtt_session_disconnect() also returns true
+            // for a socket that merely still held the heartbeat binding of
+            // an ALREADY-EXPIRED lease (tick() deliberately leaves that
+            // binding in place to keep rejecting replays). Setting the
+            // reason unconditionally overwrote CORE_LEASE_EXPIRED with
+            // TRANSPORT_LOST in that case, attributing an expiry to a
+            // transport event - and A2.11 requires expiry to republish "with
+            // an accurate reason". When no lease remains, whatever reason
+            // expiry already recorded is the accurate one; leave it.
+            if (still_owned) {
+                set_authority_reason(argus_mqtt_authority_reason_for_disconnect());
+            }
             publish_value(s_runtime.topics.state_supervisor_link, "OFFLINE", true);
             publish_authority_state();
         }
@@ -1360,16 +1482,26 @@ esp_err_t argus_mqtt_runtime_prepare_start(void)
     }
     argus_mqtt_session_core_init(&s_runtime.session, session);
     s_runtime.prepared = true;
-    xSemaphoreGive(s_runtime.mutex);
     // A2.6: the duplicate cache is scoped to the controller session. A new
     // session invalidates every previous session's requests and duplicate
     // records (A2.7); the lookup being session-keyed already guarantees a
     // stale entry can never match, but clearing it here is deliberate
     // hygiene so a fresh broker lifecycle starts from a known-empty cache
     // rather than depending on that property alone.
+    //
+    // INSIDE the mutex. This memset ran unlocked, while every other access
+    // to the table (auth_dup_find / auth_dup_store, both reached only
+    // through argus_mqtt_authority_admit) is serialised by this same mutex -
+    // and the two touch points are different tasks: prepare_start runs on
+    // the network manager's task via the broker-start callback, while the
+    // runtime task drains queued authority messages. On a broker restart
+    // with messages still queued from the previous lifecycle, the wipe could
+    // race a store and leave an entry marked in-use with a zeroed or
+    // half-written key, or reset the insert cursor mid-insert.
     argus_mqtt_runtime_reset_duplicate_cache();
     s_authority_ready_ms = 0U;
     s_fallback_window_was_open = true;
+    xSemaphoreGive(s_runtime.mutex);
     ESP_LOGI(TAG, "prepared Phase 4C MQTT root=%s session=%s",
              s_runtime.topics.root, session);
     return ESP_OK;
