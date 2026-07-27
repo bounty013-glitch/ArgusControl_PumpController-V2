@@ -688,9 +688,20 @@ Every operational command envelope gains a required field:
   "sequence": 42,
   "command_id": "…",
   "authority_epoch": 8,
-  "target_rpm_milli": 72000
+  "value": 72000
 }
 ```
+
+**Corrected 2026-07-27.** This example previously named the setpoint field
+`target_rpm_milli`. The decoder has always required `value` — the name §8
+specifies and the only one `argus_mqtt_decode_command()` accepts — so an
+envelope built from the old example was rejected `unknown_field` and,
+because the field it did need was then absent, could never be accepted at
+all. Found while building the rotary HMI's command path against this
+section: the panel would have been unable to issue a single command, and the
+failure would have looked like a permissions or authority problem rather
+than a contract typo. The five required fields are exactly `session`,
+`sequence`, `command_id`, `value`, `authority_epoch`.
 
 A command whose `authority_epoch` does not equal the controller's current
 epoch is rejected `stale_epoch` **before** the command sequence is consumed,
