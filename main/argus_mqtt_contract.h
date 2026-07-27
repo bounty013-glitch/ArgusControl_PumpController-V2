@@ -149,7 +149,7 @@ typedef struct {
 // validates.
 #define ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX 36U
 #define ARGUS_MQTT_AUTHORITY_INTENT_MAX 24U
-#define ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX 512U
+#define ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX 384U
 
 typedef struct {
     uint32_t schema;
