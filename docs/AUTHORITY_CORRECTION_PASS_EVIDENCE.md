@@ -293,18 +293,108 @@ test, rebuilt on entry to each one so no state carries between tests.
 Confirmed in the link map: `.bss.topics` is a single 0x1a88-byte (6,792 byte)
 symbol, not thirteen. The run recorded above is against the corrected build.
 
-### 2.3 Independent-review correction order — hardware run PENDING
+### 2.3 Independent-review correction order — on hardware, COM5
 
-The eleven corrections in §0 above are code-level facts: the build is clean
-with zero warnings, and the link map confirms the `.bss` figures cited
-there. **They are not yet proven on hardware.** Per this document's own
-established practice (§2.2's third run was recorded only after it actually
-happened, not written in advance), the on-target suite run — distinct test
-count, execution/pass/fail totals, isolation proof, and updated diagnostic
-task stack high-water — will be recorded here as a follow-up entry once
-Shawn has run it. Flashed and boot-verified as far as this side can confirm
-without the interactive console (see §3); the console itself still requires
-Shawn to press `t`.
+#### 2.3.1 First run (commit `215eeae`): 5 failures found
+
+```
+Distinct Tests : 322
+Repeat Passes  : 3
+Total Executed : 966
+Total Passed   : 951
+Total Failed   : 15
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 4)
+  Network State         : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State     : MUTATED (RUNNING)
+  Machine State         : UNCHANGED (UNLOCKED)
+  Task Count            : MUTATED (24 tasks)
+  AP Stations           : STEADY (1 -> 1)
+  Broker Clients        : CHANGED (0 -> 1)
+
+PHASE 4D.4 PURE UNIT TEST SUITE: FAILED
+```
+
+Diagnostic task stack high-water: before=9988, after=1028 bytes free of
+12 KB — see the watch item in §5, materially worse than previously reported.
+
+5 of 322 distinct tests failed, consistently across all three repeat passes
+(Shawn ran the suite twice; both runs failed identically):
+`test_4c_seam_decode_rejects_unknown_and_duplicate_fields`,
+`test_4c_seam_decode_rejects_missing_fields`,
+`test_4c_seam_decode_bounds_and_arguments`,
+`test_4c_seam_release_requires_named_epoch`,
+`test_4c_seam_authority_result_topic_and_schema`.
+
+**All five were test-fixture bugs introduced earlier in this same correction
+pass, not new production defects.** Root causes, fixed in `15b59d5`:
+
+- Three fixtures used placeholder `intent` strings (`"a"`/`"b"`, `"take"`,
+  `"handover"`) written before this pass added A2.2 intent-enum validation.
+  Each failed at the intent field before ever reaching what the test meant
+  to exercise. Fixed with valid enum members where only key repetition or
+  field presence mattered to the test, not the value.
+- An over-long `request_id` now correctly decodes to the new
+  `ARGUS_MQTT_DECODE_INVALID_REQUEST_ID` (added by this same pass, §0 item
+  9), not the generic `INVALID_VALUE` one test still asserted — missed when
+  the other request_id-reason call sites were updated.
+- `test_4c_seam_authority_result_topic_and_schema` reused the same
+  `request_id` for two logically separate requests (a panel's grant, then a
+  different principal's grant meant to prove `SERVICE_TOOL` is reported
+  distinctly). With the real bounded A2.6 duplicate cache now live, the
+  second call was an exact-payload replay of the first's cached
+  `LOCAL_HMI` result, not a fresh evaluation — and silently passed the
+  result-code check only because `ARGUS_MQTT_AUTHORITY_GRANTED` is enum
+  value 0, matching the outcome struct's zero-initialization. Only the
+  JSON-content assertion (still `LOCAL_HMI`, not `SERVICE_TOOL`) caught it.
+  The same request-ID-collision pattern had already been fixed in three
+  other tests earlier in this pass; this one was missed.
+
+The `MUTATED`/`CHANGED` isolation-proof deltas (task count 23→24, broker
+clients 0→1) are **not a regression**: `argus_mqtt_broker.c` spawns one
+FreeRTOS task per accepted client connection
+(`argus_mqtt_client_task`) — the HMI reconnecting to the live broker on a
+real networked bench device during the suite run, unrelated to the pure
+unit tests, which never touch the real broker or its sockets.
+
+#### 2.3.2 Second run (commit `15b59d5`): clean
+
+```
+Distinct Tests : 322
+Repeat Passes  : 3
+Total Executed : 966
+Total Passed   : 966
+Total Failed   : 0
+
+Production Isolation (Read-Only Proof):
+  Authority Generation : UNCHANGED (Gen 4)
+  Network State         : UNCHANGED (AP_DISCOVERABLE)
+  MQTT Broker State     : UNCHANGED (RUNNING)
+  Machine State         : UNCHANGED (UNLOCKED)
+  Task Count            : UNCHANGED (24 tasks)
+  AP Stations           : STEADY (1 -> 1)
+  Broker Clients        : STEADY (1 -> 1)
+
+PHASE 4D.4 PURE UNIT TEST SUITE: PASSED
+```
+
+322 distinct tests (up from 313 before this correction order — 9 net new:
+24 seam tests added in §0 minus 3 decode-laxness tests replaced by 3
+strict-rejection tests, per that section's own accounting). 966/966
+executions passed, 0 failed. Isolation proof fully clean — broker clients
+now steady at 1→1 rather than 0→1, consistent with the HMI's connection
+already being established before this second run started rather than
+arriving mid-run.
+
+Diagnostic task stack high-water: before=10028, after=1036 bytes free of
+12 KB. Consistent with the first run's 1028 (within run-to-run noise);
+**not improving.** See §5.
+
+Both runs flashed to COM5 (device identity `9&26DB8A4B` confirmed each
+time), 4× `Hash of data verified`, hard reset. Read-only serial capture
+between runs confirmed clean boot and diagnostic menu reachable. Both suite
+runs executed by Shawn at the console.
 
 ## 3. §10 hardware items 1–4, 9–10
 
@@ -380,15 +470,26 @@ rejection counterpart, and everything that depends on a command-capable panel.
 **Still requiring physical motion acceptance:** all of it. Nothing in this pass
 has moved a motor and nothing should until Phase 5.
 
-## 5. Watch item
+## 5. Watch item — now closer to a real problem than a watch item
 
-Diagnostic task stack high-water across the three runs recorded so far:
-3904 → 2652 → **1988** bytes free of a 12 KB stack, holding steady within
-the third run (1988 before and after). The independent-review correction
-order adds roughly a dozen more test functions to this same suite; its own
-effect on this number is **not yet measured** — see §2.3. The new
-duplicate-request cache (~7.7 KB) is `.bss`, not stack, and does not bear on
-this figure directly, but the additional test bodies executing on the
-diagnostic task might. `ARGUS_DIAGNOSTIC_TASK_STACK` (currently 12288) was
-already flagged as due for a raise before this pass; that recommendation
-stands and has not gotten less urgent.
+Diagnostic task stack high-water (the `after` figure — the worst-case
+minimum free stack actually reached during the run — is the one that
+matters for overflow risk):
+
+3904 → 2652 → 1988 → **1028** → **1036** bytes free of a 12 KB stack.
+
+The last two are both from the independent-review correction order
+(§2.3.1's failing run and §2.3.2's clean run), 8 bytes apart — consistent
+with each other, not noise, and not improving. The `before` figures reported
+alongside them (9988, 10028) are a different measurement (apparently
+captured near task start rather than a prior run's watermark) and are not
+directly comparable to the historical trend above; the `after` figures are.
+
+At 1028–1036 bytes free of 12288 (roughly 8%), this is no longer speculative
+headroom-watching. `ARGUS_DIAGNOSTIC_TASK_STACK` was flagged as due for a
+raise before the independent-review correction order added ~22 more test
+functions to this suite (313 → 322 net, but several of the new tests carry
+more local state — `argus_mqtt_broker_message_t`, `argus_mqtt_session_core_t`,
+`argus_mqtt_authority_outcome_t` — than the tests they sit alongside). It
+should be raised before anything else is added to this suite, and arguably
+before continuing to treat it as merely "recommended."
