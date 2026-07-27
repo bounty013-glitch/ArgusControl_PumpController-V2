@@ -1776,8 +1776,13 @@ esp_err_t test_4c_seam_decode_rejects_unknown_and_duplicate_fields(void)
         "\"authority_epoch\":1,\"authority_epoch\":2}",
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
         "\"session\":\"fedcba9876543210\",\"authority_epoch\":1}",
+        // Two distinct, individually VALID intent values - the point is the
+        // repeated key, not the value. An invalid first value (e.g. "a")
+        // would be caught by valid_intent() before the duplicate check ever
+        // runs, which is a different rejection reason and not what this
+        // case tests.
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":1,\"intent\":\"a\",\"intent\":\"b\"}",
+        "\"authority_epoch\":1,\"intent\":\"SERVICE\",\"intent\":\"FALLBACK\"}",
     };
     for (size_t i = 0; i < sizeof(duplicate) / sizeof(duplicate[0]); ++i) {
         CHECK(argus_mqtt_decode_authority_request(
@@ -1802,7 +1807,7 @@ esp_err_t test_4c_seam_decode_rejects_missing_fields(void)
         "{\"schema\":1,\"request_id\":\"r\",\"authority_epoch\":1}", // no session
         "{\"schema\":1,\"request_id\":\"r\","
         "\"session\":\"0123456789abcdef\"}",                       // no epoch
-        "{\"intent\":\"take\"}",                                   // optional only
+        "{\"intent\":\"SERVICE\"}",   // optional field present, everything else missing
     };
     for (size_t i = 0; i < sizeof(missing) / sizeof(missing[0]); ++i) {
         CHECK(argus_mqtt_decode_authority_request(
@@ -1897,14 +1902,16 @@ esp_err_t test_4c_seam_decode_bounds_and_arguments(void)
     CHECK(argus_mqtt_decode_authority_request(embedded, length, false, &out) ==
           ARGUS_MQTT_DECODE_MALFORMED);
 
-    // An over-long request_id is refused at the string bound, not truncated.
+    // An over-long request_id is refused at the string bound, not truncated -
+    // as its own dedicated reason (§6), not the generic invalid_value this
+    // asserted before that reason existed.
     const char *long_id =
         "{\"schema\":1,"
         "\"request_id\":\"0123456789012345678901234567890123456789\","
         "\"session\":\"0123456789abcdef\",\"authority_epoch\":1}";
     CHECK(argus_mqtt_decode_authority_request(
               long_id, strlen(long_id), false, &out) ==
-          ARGUS_MQTT_DECODE_INVALID_VALUE);
+          ARGUS_MQTT_DECODE_INVALID_REQUEST_ID);
     return ESP_OK;
 }
 
@@ -1928,12 +1935,12 @@ esp_err_t test_4c_seam_release_requires_named_epoch(void)
 
     const char *epoch_named =
         "{\"schema\":1,\"request_id\":\"r\",\"session\":\"0123456789abcdef\","
-        "\"authority_epoch\":7,\"intent\":\"handover\"}";
+        "\"authority_epoch\":7,\"intent\":\"SERVICE\"}";
     CHECK(argus_mqtt_decode_authority_request(
               epoch_named, strlen(epoch_named), true, &out) ==
           ARGUS_MQTT_DECODE_OK);
     CHECK(out.authority_epoch == 7U);
-    CHECK(out.has_intent && strcmp(out.intent, "handover") == 0);
+    CHECK(out.has_intent && strcmp(out.intent, "SERVICE") == 0);
     return ESP_OK;
 }
 
@@ -2637,12 +2644,21 @@ esp_err_t test_4c_seam_authority_result_topic_and_schema(void)
     // A SERVICE_TOOL owner is reported distinctly - the pre-correction
     // publish_authority_result() folded it into the same default branch
     // ARGUSCORE and OTHER shared, which would have misreported it.
+    //
+    // Distinct request_id: the dup cache above is a real global (session,
+    // request_id) cache, not per-core. Reusing SEAM_REQ_OK here made this
+    // second admit() call a byte-identical replay of the first request's
+    // cached LOCAL_HMI result, not a fresh evaluation - and because
+    // ARGUS_MQTT_AUTHORITY_GRANTED is enum value 0, the {0}-initialized
+    // outcome's request_result happened to still read GRANTED on a replay,
+    // so only the content check below (still LOCAL_HMI, not SERVICE_TOOL)
+    // caught it. Found on real hardware (Shawn's second suite run).
     argus_mqtt_session_core_t svc_core;
     argus_mqtt_session_core_init(&svc_core, SESSION);
     argus_machine_principal_t svc = seam_principal(
         "m-svc", SVC_T, SEAM_PANEL_PERMS, SEAM_SCOPE);
     argus_mqtt_broker_message_t svc_message = seam_message(
-        topics.command_request_authority, SEAM_REQ_OK, &svc);
+        topics.command_request_authority, SEAM_REQ_OK_2, &svc);
     argus_mqtt_authority_outcome_t svc_out = argus_mqtt_authority_admit(
         &svc_core, &svc_message, false, P_ALONE, false, false, 100U);
     CHECK(svc_out.request_result == ARGUS_MQTT_AUTHORITY_GRANTED);
