@@ -1,8 +1,17 @@
 # Authority Correction Pass — Evidence Record
 
 **Branch:** `atlantis-authority-integration` (both repositories)
-**Status: NOT ACCEPTED. NOT MERGED.** Recorded for checkpoint review.
-**Date:** 2026-07-26
+**Status: ACCEPTED FOR MERGE BY SHAWN.**
+**Acceptance date:** 2026-07-27
+
+Shawn accepted this checkpoint and authorized its merge into `main`. The
+three-simultaneous-authenticated-client/fourth-refusal hardware test and the
+true multi-source pending-socket exhaustion test are explicitly deferred,
+documented evidence gaps and are **non-blocking for this acceptance**. Their
+production decision seams and resource invariants are tested; their exact
+multi-client/multi-host hardware demonstrations remain future verification.
+Physical motor testing remains deferred and is not evidence produced by this
+checkpoint.
 
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
