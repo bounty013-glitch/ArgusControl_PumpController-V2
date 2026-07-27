@@ -178,7 +178,7 @@ Every path above is appended to the dynamic root.
 
 External clients may publish only to the seven exact command topics and the exact heartbeat topic. Broker policy runs before retained storage, subscriber delivery, application parsing, heartbeat mutation, or command dispatch. External publication to metadata, state, status, telemetry, event, alarm, configuration, wildcard, near-match, and legacy paths is rejected.
 
-Commands, heartbeats, and command results are never retained. Metadata, authoritative state, status, and open-loop telemetry are retained. The broker has 32 retained slots for the 25-topic baseline and refuses capacity exhaustion instead of evicting authoritative state.
+Commands, heartbeats, and command results are never retained. Metadata, authoritative state, status, and open-loop telemetry are retained. The broker has 40 retained slots for the current 34-topic baseline and refuses capacity exhaustion instead of evicting authoritative state. Required occupancy is compile-time guarded and exposed at runtime.
 
 Subscriptions are read-only observation and do not grant publication authority.
 
