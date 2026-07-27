@@ -60,7 +60,25 @@ Motor connected, **no pump head, no tubing, nothing in the flow path.**
    audible cogging step, applied RPM tracking commanded.
 3. STOP from 72 RPM. Record the deceleration time and compare against the
    configured ramp.
-4. UNLOCK, and confirm the shaft turns freely by hand.
+4. After STOP, first confirm the controller reports `HOLDING`, zero
+   applied/generated RPM, and the driver still enabled. The panel has no
+   operator-reachable UNLOCK control in this stage, so use the existing
+   **controller diagnostic serial console**:
+   - Select `N` → `5` to request `LOCAL_SERVICE` authority as the
+     diagnostic CLI.
+   - Wait for `[SERVICE ENTRY COMPLETE]`, then select `0` to return to the
+     main diagnostic menu.
+   - Select `u` to issue UNLOCK through the controller's accepted command
+     router.
+   - Confirm `UNLOCKED`, zero applied/generated RPM, driver disabled, and
+     that the shaft turns freely by hand.
+
+   Entering `LOCAL_SERVICE` deliberately ends the panel's MQTT authority and
+   may disconnect the panel. That is expected here because motion is already
+   stopped; it must not be mistaken for a communications failure. Before
+   S2-D, exit local service/reboot through the existing controlled path and
+   confirm the panel reconnects and re-acquires authority before issuing any
+   further motion command.
 
    **Why this step is here.** STOP leaves the driver energised and holding
    position — the motor is still powered and resisting rotation. UNLOCK is
