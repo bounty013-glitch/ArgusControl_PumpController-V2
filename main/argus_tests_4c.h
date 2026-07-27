@@ -78,3 +78,14 @@ esp_err_t test_4c_seam_duplicate_cache_conflict_vs_replay(void);
 esp_err_t test_4c_seam_duplicate_cache_is_bounded_and_evicts_fifo(void);
 esp_err_t test_4c_seam_authority_result_topic_and_schema(void);
 esp_err_t test_4c_seam_disconnected_lease_reports_truthful_ownership(void);
+
+// Final focused pass - correction-order items 1-4.
+esp_err_t test_4c_ffp_acquisition_epoch_semantics(void);
+esp_err_t test_4c_ffp_stale_acquisition_across_owner_states(void);
+esp_err_t test_4c_ffp_disconnect_rebind_restores_command_admission(void);
+esp_err_t test_4c_ffp_disconnect_variants(void);
+esp_err_t test_4c_ffp_authority_reason_rules(void);
+esp_err_t test_4c_ffp_policy_profile_precedes_running(void);
+esp_err_t test_4c_ffp_release_policy_matrix(void);
+esp_err_t test_4c_ffp_evicted_replay_cannot_mutate(void);
+esp_err_t test_4c_ffp_duplicate_conflict_single_canonical_record(void);

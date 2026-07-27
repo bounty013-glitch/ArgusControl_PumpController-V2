@@ -54,7 +54,12 @@
 #include <stdatomic.h>
 
 static const char *TAG = "argus_app_main";
-#define ARGUS_DIAGNOSTIC_TASK_STACK 12288U
+// Raised from 12288 (final-focused-pass item 6): measured high-water on
+// hardware across two independent-review correction-order suite runs was
+// 1028 and 1036 bytes free of the prior 12 KB - consistent, not noise, and
+// at roughly 8% headroom. 16 KB was verified on target after this change
+// (see docs/AUTHORITY_CORRECTION_PASS_EVIDENCE.md) rather than assumed safe.
+#define ARGUS_DIAGNOSTIC_TASK_STACK 16384U
 static _Atomic bool s_verbose_status = false;
 
 bool argus_app_main_get_console_verbosity(void)

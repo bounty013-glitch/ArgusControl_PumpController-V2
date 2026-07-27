@@ -7,6 +7,92 @@
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+## -1. Final focused correction pass (2026-07-27)
+
+A second independent review of the state at `1d36829` ordered six further
+bounded corrections. All six are implemented; the on-target suite run is
+recorded in §-1.1 below once it exists, per this document's practice.
+
+**Item 1 — acquisition-side epoch semantics.** The stale-epoch admission
+check existed for releases only; an acquisition carrying a nonzero,
+since-superseded epoch was arbitrated as if current. Now: nonzero mismatch
+is rejected `stale_epoch` before arbitration
+(`ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_STALE_EPOCH` in
+`argus_mqtt_authority_admit()`), zero mutation, result through the
+production `event/core/authority_result` path. A2.2 revised to match.
+
+**Item 2 — disconnect/rebind coherence.** Two real defects fixed in the pure
+core's same-principal reacquisition branch: it left `link` OFFLINE (so a
+legitimately rebinding owner's next operational command was refused
+`not_authority_holder` — precisely the outcome transport/lease separation
+exists to prevent) and left the heartbeat binding on the dead connection.
+Both now restored to the new connection. The operational-command admission
+rule was extracted from `handle_command()` into
+`argus_mqtt_command_admission_check()` (pure, exported) so the
+disconnect → rebind → command sequence is proven against the production
+gate. Authority reasons: `TRANSPORT_LOST` (defined in A2.10 since A2 but
+never set by any code path) now published on owning-transport disconnect;
+`CORE_REACQUISITION` on same-principal rebind reached while the link was
+not already online, from both the explicit-request and heartbeat entry
+points; reason decisions extracted into exported pure functions
+(`argus_mqtt_authority_reason_for_*`) tested directly.
+
+**Item 3 — policy ordering and release clarification.** Commissioning
+profile now precedes the running-transfer rule: on `STANDALONE_HMI`, an
+ArgusCore request is `denied_by_profile` in every machine state — previously
+a running pump would have answered `transfer_unsupported_running`,
+misdirecting the operator toward waiting for a stop that changes nothing.
+A2.3 revised: release admission is exactly owner + session + epoch, no
+machine state blocks a release, `denied_machine_state` is explicitly
+reserved-and-unused (this resolves the prior pass's §0 item 4, which
+reported it as needing Shawn's decision — the review's decision is that no
+trapping state exists).
+
+**Item 4 — bounded replay semantics.** The 8-entry cache's "operator-paced"
+sizing rationale is withdrawn as insufficient. The cache is now
+`2 × ARGUS_SECURITY_MAX_MACHINES` (32) entries — a bound derived from broker
+admission rules (one live connection per enrolled machine, fixed enrollment
+ceiling), not traffic estimates — with deterministic FIFO rollover and a
+monotonic admission ordinal for diagnostics. More importantly, safety no
+longer depends on cache residency at all: a TRANSFER (displacing a
+different current owner) must carry the current nonzero epoch
+(`ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED`, wire reason `stale_epoch`);
+epoch-0 transfers are refused. An evicted old acquisition redelivered after
+ownership changed is therefore structurally unable to preempt, renew,
+rebind, advance the epoch, or move the lease deadline — proven by
+`test_4c_ffp_evicted_replay_cannot_mutate` through real eviction. A
+duplicate-conflict no longer stores a second record for the same identity
+(the original stays canonical). A2.6 revised with the full argument,
+including the honest limitation: an opaque request_id cannot support a
+literal outside-window recognition, and safety is carried by admission
+instead.
+
+**Item 5 — HMI bounded receive, behaviorally tested.** The receive rules
+moved verbatim from `hmi_portal.c`'s `provision_post()` into
+`common/hmi_body_reader.c` (injectable recv/clock seams; production passes
+thin wrappers over `httpd_req_recv`/`esp_timer_get_time`). 12 host-test
+scenarios cover: one-read completion, fragmented completion, timeout-retry
+then success, total-deadline expiry with partial body (wiped), truncation,
+early peer close, negative socket error, declared-oversized refusal with
+zero reads, exact-boundary lengths, a recv over-claiming bytes (refused),
+and bad-arguments never touching the transport. Host suite: 1194/1194.
+Evidence boundary stated plainly: this is host/pure evidence of the
+production rules plus a zero-warning HMI target build; no real HTTP client
+and no authenticated authority path was exercised (deferred to #67).
+
+**Item 6 — diagnostic stack and documentation.**
+`ARGUS_DIAGNOSTIC_TASK_STACK` raised 12288 → 16384 after the measured
+1028–1036 bytes free; verified on target, not assumed (see §-1.1).
+`MQTT_STANDARDS.md` in BOTH repos corrected: authority is no longer
+described as a connection-created/heartbeat-created lease; heartbeat is
+lease maintenance only. A2.2/A2.3/A2.6/A2.8 revised as above; HMI frozen
+snapshot re-refreshed with provenance; this record updated.
+
+### -1.1 Hardware evidence — PENDING
+
+Recorded after Shawn runs the suite (`t` at the COM5 console), per this
+document's standing practice of never writing results before they exist.
+
 ## 0. Independent-review correction order (2026-07-27)
 
 **Commit:** `215eeae` (code and tests). This document's own update is a
@@ -493,3 +579,11 @@ more local state — `argus_mqtt_broker_message_t`, `argus_mqtt_session_core_t`,
 `argus_mqtt_authority_outcome_t` — than the tests they sit alongside). It
 should be raised before anything else is added to this suite, and arguably
 before continuing to treat it as merely "recommended."
+
+**RESOLVED by the final focused pass (§-1 item 6):**
+`ARGUS_DIAGNOSTIC_TASK_STACK` raised 12288 → 16384 in `app_main.c`, chosen
+so the measured worst case (~11.3 KB consumed) keeps roughly 5 KB of
+headroom even as this pass adds nine more test functions. The post-raise
+high-water and the boot-path memory evidence (Wi-Fi/network/AP/broker/HTTP
+startup unimpaired by the extra 4 KB allocation) are recorded in §-1.1 from
+the actual hardware run, not assumed.

@@ -290,6 +290,14 @@ Authorized by Shawn in the authority-protocol correction order, 2026-07-26.
 The accepted tag is not rewritten; this amends forward on the integration
 branch.
 
+**Revision 2026-07-27 (final focused correction pass):** A2.2 (acquisition
+epoch semantics and the transfer-epoch rule), A2.3 (release admission
+clarified; `denied_machine_state` reserved and unused), A2.6 (bounded replay
+semantics made explicit), and A2.8 (commissioning-profile precedence stated)
+were revised in place. Each revised passage is marked. The revisions close
+implementation-review findings; they do not change accepted ownership,
+transfer, fail-operational, or commissioning policy.
+
 A1 established that authority is acquired explicitly and that a heartbeat
 renews rather than grants. A1 did **not** define the wire protocol, and the
 first implementation shipped with the payload ignored and the topics
@@ -344,8 +352,26 @@ without parsing.
 | `schema` | uint | yes | Must be `1`. Anything else → `schema_unsupported`. |
 | `request_id` | string | yes | 1–36 chars, `[A-Za-z0-9._-]` only. |
 | `session` | string | yes | Exactly the controller's current 16-char lowercase-hex command session. |
-| `authority_epoch` | uint32 | yes | The epoch the request is predicated on. `0` means "no assumption" and is permitted **for requests only**. |
+| `authority_epoch` | uint32 | yes | The epoch the request is predicated on. See the epoch rules below. |
 | `intent` | string | no | One of `OPERATOR_INTENT`, `SUPERVISORY_START`, `SERVICE`, `FALLBACK`. Advisory; recorded in audit, never affects admission. |
+
+**Acquisition epoch rules (revised 2026-07-27):**
+
+- `authority_epoch: 0` means the requester makes **no epoch assumption**.
+- A **nonzero** `authority_epoch` is a predicate against the controller's
+  current authority epoch. If it does not match, the request is rejected
+  `stale_epoch` **before arbitration**, with zero mutation of owner, epoch,
+  lease, deadline, sequence, or machine state. This applies to acquisition
+  requests exactly as it always applied to releases — a request composed
+  against a since-superseded epoch must not be evaluated as if current.
+- A request that would **transfer** the lease away from a *different*
+  current owner must carry the current nonzero epoch. `0` is not accepted
+  for a transfer (rejected `stale_epoch`): the requester must demonstrate it
+  knows the ownership state it is displacing. This is what makes a delayed
+  or replayed old acquisition permanently harmless — once ownership has
+  changed, its epoch (zero or stale-nonzero) can never satisfy this rule.
+  Requests that displace no one — a grant onto an unowned lease, or a
+  same-principal renewal/rebind — remain valid with `0`.
 
 Unknown fields are **rejected**, not ignored (`unknown_field`), matching the
 existing strict command decoder. Wrong types are rejected `invalid_value`.
@@ -361,11 +387,19 @@ Identical shape and limits, with one difference that matters:
 This is what stops a delayed release from a previous owner releasing a later
 owner's authority.
 
-A release is valid only when **all** hold:
+A release is valid when **all** hold (revised 2026-07-27):
 - the sender is the authenticated current owner (`not_owner` otherwise);
 - the session matches (`session_mismatch`);
-- the epoch matches exactly (`stale_epoch`);
-- machine-state and profile policy admit it (`denied_machine_state`).
+- the epoch matches exactly (`stale_epoch`).
+
+That list is complete. **No machine state blocks a release** — a correctly
+authenticated current owner may release in any machine state, including
+while the pump is running, because releasing changes only who may issue the
+next accepted command and never touches what the pump is doing. A rule that
+trapped the current owner in authority would serve nothing and was never
+implemented. `denied_machine_state` remains **reserved** in the A2.5
+vocabulary for a future, explicitly defined policy; **no current release
+path produces it**, and clients must not expect it.
 
 **Releasing authority does not stop the pump**, clear RUN intent, clear the
 accepted setpoint, or alter output or trajectory. It changes only who may
@@ -415,7 +449,7 @@ must not be renamed or repurposed.
 
 **Success:** `granted`, `already_held`, `released`
 
-## A2.6 Duplicate handling
+## A2.6 Duplicate handling and bounded replay (revised 2026-07-27)
 
 Keyed on `(session, request_id)`.
 
@@ -424,10 +458,34 @@ Keyed on `(session, request_id)`.
   makes QoS 1 redelivery idempotent.
 - **Conflicting repeat** — same key, different payload: rejected
   `duplicate_conflict` with zero mutation. A request id is not reusable for
-  a different request.
+  a different request, and the conflict does **not** create a second record —
+  the original stays the single canonical entry for its identity, and every
+  redelivered conflict is re-detected against it.
 
 The duplicate record is scoped to the controller session and is discarded on
 session change.
+
+**The replay window is bounded, and its bound is a protocol property.** The
+response cache holds `2 × MAX_MACHINES` (currently 32) entries, evicted
+strictly FIFO. The bound derives from the broker's own admission rules — at
+most one live connection per enrolled machine (§5 duplicate-client-ID
+rejection) against a fixed enrollment ceiling — not from an estimate of
+traffic. Rollover is deterministic: the oldest entry is displaced, the same
+rule at every wrap.
+
+**Outside the window, safety does not depend on the cache.** An opaque
+client-chosen `request_id` carries no ordering, so once an entry is evicted
+the controller cannot distinguish "never seen" from "forgotten" — no bounded
+memory can. A redelivery that misses the cache therefore re-enters full
+admission, where the A2.2 epoch rules make every dangerous outcome
+unreachable: a stale nonzero epoch is refused `stale_epoch`, and an epoch-0
+request cannot transfer from the owner that exists now. The only requests
+that can re-arbitrate after eviction are those that displace no one — a
+grant onto an unowned lease or a same-principal renewal — and re-evaluating
+either is harmless. Reconnection never replays authority requests: rebinding
+is not acquisition (A2.11), and the operational-command path has its own
+session/sequence/epoch replay protection (§9, A2.9), which this cache
+neither replaces nor weakens.
 
 ## A2.7 Session and epoch change behaviour
 
@@ -447,10 +505,20 @@ exist yet.
 | Grant when unowned, profile permits | **Yes** |
 | Same principal re-requests while holding | **Yes** — `already_held`, epoch unchanged |
 | Owner releases | **Yes** |
-| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **not** running | **Yes** — epoch advances |
-| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **running** | **No** — rejected `transfer_unsupported_running` |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **not** running (`ARGUSCORE_PREFERRED` only) | **Yes** — epoch advances; must carry the current epoch (A2.2) |
+| `ARGUSCORE` takes from `LOCAL_HMI`/`SERVICE_TOOL`, pump **running** (`ARGUSCORE_PREFERRED` only) | **No** — rejected `transfer_unsupported_running` |
+| `ARGUSCORE` requests anything on a `STANDALONE_HMI` unit, any machine state | **No** — `denied_by_profile` |
 | `LOCAL_HMI` takes from a healthy `ARGUSCORE` lease | **No** — `denied_held_by_other` |
 | Any client takes from a same- or higher-standing holder | **No** — `denied_held_by_other` |
+
+**Policy precedence (revised 2026-07-27): the commissioned profile is
+evaluated first.** A requester the commissioned profile forbids outright is
+refused `denied_by_profile` regardless of machine state — on a
+`STANDALONE_HMI` unit an ArgusCore request is `denied_by_profile` even while
+the pump is running and an HMI holds authority, never
+`transfer_unsupported_running`. The reason string is operator guidance: the
+remedy for a profile denial is recommissioning, and reporting a machine-state
+reason would send the operator to wait for a stop that changes nothing.
 
 Live running transfer awaits proven bumpless PID tracking. Until then it is
 **deferred, not simulated**: the request is rejected with a defined reason,

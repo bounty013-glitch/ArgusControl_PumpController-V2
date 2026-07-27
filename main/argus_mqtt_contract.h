@@ -167,6 +167,18 @@ typedef enum {
     // then it is deferred, not simulated, and the current owner keeps
     // authority while the pump keeps running.
     ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING,
+    // Final-focused-pass item 4. A request that would TRANSFER the lease
+    // away from a different, currently-recorded owner must name the epoch
+    // it is transferring from - "no assumption" (epoch 0) is only valid for
+    // a request that cannot displace anyone (granting an unowned lease, or
+    // a same-principal renewal). This is what closes the gap where a stale,
+    // evicted, epoch-0 redelivery of an old transfer request could
+    // re-preempt whoever holds authority now: once the real owner has
+    // changed, the epoch has advanced, so an epoch-0 replay is refused here
+    // and a same-epoch replay is refused earlier, at admission, by the
+    // ordinary stale-epoch check. See argus_mqtt_runtime.c's duplicate-cache
+    // documentation for the full argument.
+    ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED,
 } argus_mqtt_authority_result_t;
 
 typedef struct {
@@ -242,24 +254,40 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
     uint8_t authority_profile, bool core_window_open, uint64_t now_ms);
 
 // Thin, additive wrapper around argus_mqtt_session_request_authority() that
-// adds the one machine-state-aware rule the wire contract defines (A2.8):
-// an ArgusCore transfer from LOCAL_HMI/SERVICE_TOOL is refused while the pump
-// is actively driving the motor, without mutating anything. `machine_running`
-// is the caller's own judgement of "actively driving" (STARTING, RUNNING, or
-// DECELERATING) - this core has no state-manager coupling and is not the
-// place that decision belongs.
+// adds the machine-state- and epoch-aware rules the wire contract requires
+// before a TRANSFER (taking the lease from a different, currently-recorded
+// owner) may proceed, without mutating anything until the base function's
+// own admission runs. `machine_running` is the caller's own judgement of
+// "actively driving" (STARTING, RUNNING, or DECELERATING) - this core has no
+// state-manager coupling and is not the place that decision belongs.
+// `supplied_epoch` is the request's own `authority_epoch` field, already
+// known by the caller to be either 0 or equal to the current epoch - a
+// nonzero MISMATCH is rejected earlier, at admission, before arbitration is
+// ever reached (final-focused-pass item 1).
+//
+// Ordering matters and is deliberate: commissioning-profile permission is
+// checked FIRST. A requester the commissioned profile forbids outright
+// (e.g. ArgusCore against a unit commissioned STANDALONE_HMI) must be
+// refused `denied_by_profile` regardless of machine state or epoch - neither
+// "the pump is running" nor "you didn't name an epoch" is the real remedy,
+// and reporting either would misdirect the operator. Only a requester the
+// profile WOULD permit is evaluated against the running-transfer and
+// transfer-epoch rules; everyone else falls straight through to the base
+// function, which reproduces the same profile check and returns
+// DENIED_PROFILE on its own.
 //
 // Deliberately NOT folded into the base function: the base function is
 // exercised directly by dozens of existing tests that have no notion of
-// machine state, and every one of them is implicitly "not running", which is
-// still a real and current case (A2.8's "not running" row). Duplicating the
-// arbitration logic here would risk the two drifting; this wrapper delegates
-// entirely to the base function once the running-transfer check clears.
+// machine state or this wrapper's epoch argument, and every one of them is
+// implicitly "not running, no assumption", which is still a real and current
+// case. Duplicating the arbitration logic here would risk the two drifting;
+// this wrapper delegates entirely to the base function once its own checks
+// clear.
 argus_mqtt_authority_result_t argus_mqtt_session_request_authority_with_state(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
     const char *machine_id, uint8_t client_type,
     uint8_t authority_profile, bool core_window_open, bool machine_running,
-    uint64_t now_ms);
+    uint32_t supplied_epoch, uint64_t now_ms);
 
 // Voluntary release by the current holder. Advances the epoch, so commands
 // still in flight from the releasing owner become invalid immediately.

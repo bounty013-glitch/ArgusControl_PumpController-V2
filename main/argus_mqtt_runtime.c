@@ -83,6 +83,7 @@ static void publish_number(const char *topic, int64_t value)
 }
 
 static void publish_authority_state(void);
+static void set_authority_reason(const char *reason);
 
 static void publish_operational_snapshot(void)
 {
@@ -258,6 +259,12 @@ static void handle_heartbeat(const argus_mqtt_broker_message_t *message)
         // a steady stream of retained republishes for values that did not
         // change.
         if (!was_online) {
+            // Final-focused-pass item 2: the same rebind the explicit
+            // request path reports as CORE_REACQUISITION, reached here via
+            // heartbeat instead. Either entry point can be how a principal
+            // reconnects; the reason must agree regardless of which one it
+            // used.
+            set_authority_reason("CORE_REACQUISITION");
             publish_authority_state();
         }
     }
@@ -323,6 +330,95 @@ static bool s_fallback_window_was_open = true;
 static const char *s_authority_reason = "STARTUP";
 static void set_authority_reason(const char *reason) { s_authority_reason = reason; }
 
+const char *argus_mqtt_runtime_get_authority_reason(void)
+{
+    return s_authority_reason;
+}
+
+// Pure A2.10 authority_reason decision rules (final-focused-pass item 2),
+// extracted so a test can assert the exact transition independent of the
+// runtime wiring (mutex, queue, broker) that invokes set_authority_reason()
+// with whatever these return. A NULL return means "leave the current reason
+// alone" - a denial does not describe who owns things now, so it must not
+// overwrite whatever reason correctly describes the state that denial left
+// unchanged.
+const char *argus_mqtt_authority_reason_for_request(
+    argus_mqtt_authority_result_t result, bool was_online_before,
+    uint8_t requester_client_type, uint8_t authority_profile)
+{
+    if (result == ARGUS_MQTT_AUTHORITY_GRANTED) {
+        if (requester_client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND) {
+            return "CORE_ACQUISITION";
+        }
+        return authority_profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI
+                   ? "STANDALONE_ACQUISITION" : "OPERATOR_TRANSFER";
+    }
+    if (result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD && !was_online_before) {
+        // A same-principal reacquisition reached while the link was NOT
+        // already ONLINE is a rebind after transport loss, not an ordinary
+        // renewal - the contract names this transition distinctly.
+        return "CORE_REACQUISITION";
+    }
+    return NULL;
+}
+
+const char *argus_mqtt_authority_reason_for_release(bool released)
+{
+    return released ? "RELEASED" : NULL;
+}
+
+// Always TRANSPORT_LOST: argus_mqtt_session_disconnect() only reports
+// `changed` when the departing connection matched the CURRENT lease's or
+// heartbeat's binding, so a caller that already checked `changed` has
+// nothing further to decide. A function rather than a literal at the call
+// site so the two share one place to change if that ever needs a condition.
+const char *argus_mqtt_authority_reason_for_disconnect(void)
+{
+    return "TRANSPORT_LOST";
+}
+
+const char *argus_mqtt_authority_reason_for_expiry(void)
+{
+    return "CORE_LEASE_EXPIRED";
+}
+
+// The session-side admission rule for an operational command, verbatim from
+// what handle_command() used to inline - see argus_mqtt_runtime.h for why it
+// is exported. Order matters and is contract surface: session binding first
+// (a prior-session command is meaningless regardless of who sent it), holder
+// identity + live-connection binding second, and the A2.9 epoch check LAST -
+// after identity, before anything that consumes state - so a stale-epoch
+// command must already have been the bound holder's, and its rejection burns
+// no sequence number.
+argus_mqtt_command_admission_t argus_mqtt_command_admission_check(
+    const argus_mqtt_session_core_t *core, const char *principal_identifier,
+    uint64_t connection_id, const argus_mqtt_command_t *command)
+{
+    if (core == NULL || principal_identifier == NULL || command == NULL ||
+        strcmp(command->session, core->session) != 0) {
+        return ARGUS_MQTT_COMMAND_ADMIT_SESSION_MISMATCH;
+    }
+    // The lease belongs to the authenticated principal; the connection id
+    // proves that holder is still on this socket. Both must agree, so a
+    // second connection authenticated as the same machine cannot command
+    // alongside the holder.
+    if (core->link != ARGUS_MQTT_LINK_ONLINE ||
+        core->lease_machine_id[0] == '\0' ||
+        strcmp(core->lease_machine_id, principal_identifier) != 0 ||
+        core->lease_connection_id != connection_id) {
+        return ARGUS_MQTT_COMMAND_ADMIT_NOT_HOLDER;
+    }
+    // A2.9 epoch admission. Supplements the checks above, replaces none.
+    // This catches what the identity gate alone cannot: a principal that
+    // lost authority and later regained it under a NEW epoch would otherwise
+    // have a delayed command from its OWN previous epoch accepted, because
+    // identity and connection binding both match again.
+    if (command->authority_epoch != core->authority_epoch) {
+        return ARGUS_MQTT_COMMAND_ADMIT_STALE_EPOCH;
+    }
+    return ARGUS_MQTT_COMMAND_ADMIT_OK;
+}
+
 void argus_mqtt_runtime_mark_authority_ready(void)
 {
     // Only on a transition into readiness with no owner. A broker restart
@@ -372,6 +468,13 @@ static const char *authority_result_reason(argus_mqtt_authority_result_t r)
     case ARGUS_MQTT_AUTHORITY_DENIED_PROFILE: return "denied_by_profile";
     case ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING:
         return "transfer_unsupported_running";
+    case ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED:
+        // Reuses the existing "stale_epoch" wire reason rather than minting
+        // new contract surface: from the requester's point of view this IS
+        // a stale-epoch refusal - it never had a valid current epoch to
+        // supply in the first place, which is the same defect a mismatched
+        // nonzero epoch reports.
+        return "stale_epoch";
     default:
         // Reachable only through argument validation inside the pure core
         // (null/empty machine_id, out-of-range profile) - not through any
@@ -459,39 +562,13 @@ static void authority_status_snapshot(char *lease_status_out, size_t lease_statu
                                local_status_out, local_status_cap);
 }
 
-// A2.6 duplicate cache: bounded, fixed-size, FIFO-evicted, keyed on
-// (session, request_id).
+// A2.6 duplicate/replay cache: bounded, fixed-size, FIFO-evicted, keyed on
+// (session, request_id), each entry tagged with a monotonic admission
+// ordinal.
 //
-// The single-slot version this replaced could only ever remember the ONE
-// most recently seen (session, request_id). Two requests interleaved on the
-// wire - A, then B, then a QoS 1 redelivery of A - would have B silently
-// overwrite A's remembered entry, so the redelivery of A would be
-// re-arbitrated as if new rather than replayed. That is exactly what A2.6
-// forbids ("no arbitration, no epoch change" for an identical repeat) and it
-// is a plausible real sequence, not a contrived one: two panels, or a panel
-// and ArgusCore, requesting close together is the ordinary case A2.6 exists
-// to make QoS 1 redelivery idempotent under.
-//
-// EVICTION, stated explicitly: round-robin over ARGUS_MQTT_AUTH_DUP_CACHE_SIZE
-// slots. When the cache is full, the OLDEST entry (by insertion order, not by
-// last use) is overwritten regardless of whether it is still "in flight".
-// This bounds memory to a fixed, small footprint - it does not grow with
-// traffic - at the cost that a redelivery arriving after
-// ARGUS_MQTT_AUTH_DUP_CACHE_SIZE other distinct requests have been evaluated
-// will no longer be recognized as a duplicate and will be re-arbitrated. That
-// is a deliberately accepted bound, not an oversight: authority requests are
-// operator-paced, not a high-rate stream, and re-arbitrating an old
-// redelivery is safe (it goes through full admission again) even though it
-// is not the A2.6-idempotent path. Session-scoping is implicit: every lookup
-// requires an exact session match, so an entry from a prior controller
-// session can never be mistaken for a match against the current one and does
-// not need to be actively purged on session change - though prepare_start()
-// clears the table anyway, for hygiene and so a fresh boot starts from a
-// known-empty cache rather than relying on that property alone.
-#define ARGUS_MQTT_AUTH_DUP_CACHE_SIZE 8U
-
 typedef struct {
     bool in_use;
+    uint32_t ordinal;
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
     char request_id[ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX + 1U];
     char payload[ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX + 1U];
@@ -501,11 +578,22 @@ typedef struct {
 
 static auth_dup_entry_t s_auth_dup_cache[ARGUS_MQTT_AUTH_DUP_CACHE_SIZE];
 static size_t s_auth_dup_next;
+// Monotonic count of every DISTINCT (session, request_id) ever admitted past
+// decode+session-check, whether or not it is still cache-resident. Exposed
+// for tests and diagnostics; the honest limit on what it can prove is
+// documented on argus_mqtt_runtime_duplicate_admission_count() below.
+static uint32_t s_auth_dup_ordinal_next;
 
 void argus_mqtt_runtime_reset_duplicate_cache(void)
 {
     memset(s_auth_dup_cache, 0, sizeof(s_auth_dup_cache));
     s_auth_dup_next = 0U;
+    s_auth_dup_ordinal_next = 0U;
+}
+
+uint32_t argus_mqtt_runtime_duplicate_admission_count(void)
+{
+    return s_auth_dup_ordinal_next;
 }
 
 static auth_dup_entry_t *auth_dup_find(const char *session, const char *request_id)
@@ -520,6 +608,36 @@ static auth_dup_entry_t *auth_dup_find(const char *session, const char *request_
     return NULL;
 }
 
+// EVICTION, stated explicitly: round-robin over ARGUS_MQTT_AUTH_DUP_CACHE_SIZE
+// slots. When the cache is full, the OLDEST entry (by insertion order, not by
+// last use) is overwritten regardless of whether it is still "in flight" -
+// deterministic, and the same rule at every rollover, not a special case.
+//
+// RESIDUAL LIMITATION, stated honestly rather than glossed over: an opaque,
+// client-chosen `request_id` string carries no ordering information of its
+// own. Once an entry is evicted, the controller has no way to tell "a
+// request_id I have genuinely never seen" apart from "a request_id whose
+// prior entry I have forgotten" - that distinction is fundamentally
+// unavailable without either unbounded memory or a client-supplied monotonic
+// field the current A2.2 schema does not define. This function therefore
+// cannot implement a literal "outside-window" refusal for an arbitrary
+// evicted key, and does not claim to.
+//
+// What IS bounded-safe, and is the actual answer to the dangerous case
+// (final-focused-pass item 4's "old ArgusCore acquisition redelivery after
+// HMI fallback acquisition" scenario): a cache-miss falls through to full,
+// ordinary admission - including the item-1 stale-epoch check and the
+// TRANSFER_EPOCH_REQUIRED rule in argus_mqtt_session_request_authority_with_state().
+// A stale, evicted redelivery that would TRANSFER the lease away from
+// whoever holds it now is refused there regardless of whether its cache
+// entry survived: a nonzero epoch that no longer matches is stale (item 1);
+// an epoch of 0 cannot transfer at all once a different owner exists (item
+// 4's TRANSFER_EPOCH_REQUIRED). Only requests that could NOT disturb an
+// existing different owner - a grant onto an unowned lease, or a
+// same-principal renewal - can succeed on a cache-miss, and neither of those
+// outcomes is dangerous to re-arbitrate. See
+// argus_mqtt_session_request_authority_with_state()'s own comment for the
+// full argument.
 static void auth_dup_store(const char *session, const char *request_id,
                            const char *payload, size_t payload_len,
                            const char *result)
@@ -527,6 +645,7 @@ static void auth_dup_store(const char *session, const char *request_id,
     auth_dup_entry_t *slot = &s_auth_dup_cache[s_auth_dup_next];
     s_auth_dup_next = (s_auth_dup_next + 1U) % ARGUS_MQTT_AUTH_DUP_CACHE_SIZE;
     memset(slot, 0, sizeof(*slot));
+    slot->ordinal = s_auth_dup_ordinal_next++;
     strlcpy(slot->session, session, sizeof(slot->session));
     strlcpy(slot->request_id, request_id, sizeof(slot->request_id));
     if (payload_len < sizeof(slot->payload)) {
@@ -641,8 +760,14 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
             &req, core, authority_profile, core_window_open, now_ms,
             "REJECTED", "duplicate_conflict");
         out.published = true;
-        auth_dup_store(req.session, req.request_id, message->payload,
-                       message->payload_len, out.result_json);
+        // Deliberately NOT stored (final-focused-pass item 4): the ORIGINAL
+        // record stays the single canonical entry for this request identity.
+        // Storing the conflict too would create a second record under the
+        // same key - and once the original was evicted, the surviving
+        // conflict record would quietly become canonical, replaying a
+        // REJECTED result for the identity's legitimate original payload.
+        // A redelivered conflict simply re-detects against the original and
+        // gets the same refusal - idempotent without being cached.
         return out;
     }
 
@@ -675,10 +800,29 @@ argus_mqtt_authority_outcome_t argus_mqtt_authority_admit(
         return out;
     }
 
+    // Final-focused-pass item 1: this check previously existed for releases
+    // only. A2.2 defines the same predicate for acquisition requests -
+    // epoch 0 means "no assumption" and is always permitted; a NONZERO
+    // epoch is a claim about the current epoch, and if it does not match,
+    // the request is stale and must be refused before arbitration or
+    // mutation, exactly like a stale release. This is what stops a request
+    // built against a since-superseded epoch from being evaluated as if it
+    // were current.
+    if (req.authority_epoch != 0U && req.authority_epoch != core->authority_epoch) {
+        out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_STALE_EPOCH;
+        build_authority_result_json(out.result_json, sizeof(out.result_json),
+            &req, core, authority_profile, core_window_open, now_ms,
+            "REJECTED", "stale_epoch");
+        out.published = true;
+        auth_dup_store(req.session, req.request_id, message->payload,
+                       message->payload_len, out.result_json);
+        return out;
+    }
+
     argus_mqtt_authority_result_t result = argus_mqtt_session_request_authority_with_state(
         core, message->connection_id, message->principal.identifier,
         message->principal.client_type, authority_profile, core_window_open,
-        machine_running, now_ms);
+        machine_running, req.authority_epoch, now_ms);
     out.stage = ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED;
     out.request_result = result;
     bool accepted = (result == ARGUS_MQTT_AUTHORITY_GRANTED ||
@@ -728,6 +872,10 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
     uint64_t now = now_ms();
 
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    // Captured BEFORE admit() so a rebind (ALREADY_HELD reached while the
+    // link was not already ONLINE) can be told apart from an ordinary
+    // renewal - see the CORE_REACQUISITION handling below.
+    bool was_online_before = s_runtime.session.link == ARGUS_MQTT_LINK_ONLINE;
     argus_mqtt_authority_outcome_t outcome = argus_mqtt_authority_admit(
         &s_runtime.session, message, release, profile, window_open,
         machine_running, now);
@@ -753,8 +901,10 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
                  message->principal.identifier,
                  outcome.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED
                      ? "accepted" : "refused_not_holder");
-        if (outcome.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED) {
-            set_authority_reason("RELEASED");
+        {
+            const char *reason = argus_mqtt_authority_reason_for_release(
+                outcome.stage == ARGUS_MQTT_AUTHORITY_ADMIT_RELEASE_ACCEPTED);
+            if (reason != NULL) set_authority_reason(reason);
         }
         break;
     case ARGUS_MQTT_AUTHORITY_ADMIT_REQUEST_EVALUATED:
@@ -762,12 +912,11 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
                  message->principal.identifier, (unsigned)message->principal.client_type,
                  authority_result_reason(outcome.request_result), (unsigned)profile,
                  (int)window_open, (int)machine_running);
-        if (outcome.request_result == ARGUS_MQTT_AUTHORITY_GRANTED) {
-            set_authority_reason(
-                message->principal.client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND
-                    ? "CORE_ACQUISITION"
-                    : (profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI
-                           ? "STANDALONE_ACQUISITION" : "OPERATOR_TRANSFER"));
+        {
+            const char *reason = argus_mqtt_authority_reason_for_request(
+                outcome.request_result, was_online_before,
+                message->principal.client_type, profile);
+            if (reason != NULL) set_authority_reason(reason);
         }
         break;
     default:
@@ -856,39 +1005,25 @@ static void handle_command(const argus_mqtt_broker_message_t *message,
     char cached_result[ARGUS_MQTT_BROKER_PAYLOAD_CAP] = {0};
     argus_mqtt_sequence_result_t sequence;
     xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
-    if (strcmp(command.session, s_runtime.session.session) != 0) {
-        xSemaphoreGive(s_runtime.mutex);
-        reject_decoded(&command, "session_mismatch");
-        return;
-    }
-    // The lease belongs to the authenticated principal; the connection id
-    // proves that holder is still on this socket. Both must agree, so a
-    // second connection authenticated as the same machine cannot command
-    // alongside the holder.
-    if (s_runtime.session.link != ARGUS_MQTT_LINK_ONLINE ||
-        s_runtime.session.lease_machine_id[0] == '\0' ||
-        strcmp(s_runtime.session.lease_machine_id,
-               message->principal.identifier) != 0 ||
-        s_runtime.session.lease_connection_id != message->connection_id) {
-        xSemaphoreGive(s_runtime.mutex);
-        reject_decoded(&command, "not_authority_holder");
-        return;
-    }
-    // A2.9 epoch admission. Placed AFTER identity/session/binding and BEFORE
-    // check_sequence(), which is the first thing that consumes state: a
-    // stale-epoch command must not burn a sequence number, touch the cached
-    // result, or reach dispatch. Supplements the checks above, replaces none.
-    //
-    // This catches what the identity gate alone cannot: a principal that lost
-    // authority and later regained it under a NEW epoch would otherwise have a
-    // delayed command from its OWN previous epoch accepted, because identity
-    // and connection binding both match again.
-    if (command.authority_epoch != s_runtime.session.authority_epoch) {
+    argus_mqtt_command_admission_t admission = argus_mqtt_command_admission_check(
+        &s_runtime.session, message->principal.identifier,
+        message->connection_id, &command);
+    if (admission != ARGUS_MQTT_COMMAND_ADMIT_OK) {
         uint32_t current = s_runtime.session.authority_epoch;
         xSemaphoreGive(s_runtime.mutex);
-        ESP_LOGW(TAG, "command rejected: stale authority epoch %" PRIu32
-                 " (current %" PRIu32 ")", command.authority_epoch, current);
-        reject_decoded(&command, "stale_epoch");
+        switch (admission) {
+        case ARGUS_MQTT_COMMAND_ADMIT_SESSION_MISMATCH:
+            reject_decoded(&command, "session_mismatch");
+            break;
+        case ARGUS_MQTT_COMMAND_ADMIT_NOT_HOLDER:
+            reject_decoded(&command, "not_authority_holder");
+            break;
+        default:
+            ESP_LOGW(TAG, "command rejected: stale authority epoch %" PRIu32
+                     " (current %" PRIu32 ")", command.authority_epoch, current);
+            reject_decoded(&command, "stale_epoch");
+            break;
+        }
         return;
     }
     sequence = argus_mqtt_session_check_sequence(
@@ -1141,6 +1276,15 @@ static void broker_client_cb(argus_mqtt_broker_client_event_t broker_event,
             // previously only state/supervisor/link was republished here,
             // leaving the six A2.10 values stale until some other event
             // happened to touch them.
+            //
+            // Final-focused-pass item 2: TRANSPORT_LOST was defined in
+            // A2.10's vocabulary from the start but never actually set by
+            // any code path. This is the disconnect of the OWNING
+            // transport - argus_mqtt_session_disconnect() only returns true
+            // when the departing connection matched the current lease's or
+            // heartbeat's binding, so `changed` here already means "this was
+            // the owner's transport," not an arbitrary bystander socket.
+            set_authority_reason(argus_mqtt_authority_reason_for_disconnect());
             publish_value(s_runtime.topics.state_supervisor_link, "OFFLINE", true);
             publish_authority_state();
         }
@@ -1243,7 +1387,7 @@ void argus_mqtt_runtime_tick(void)
         // republish. Previously nothing here touched the six A2.10 topics at
         // all - core_lease_status would sit at its pre-expiry value (ACTIVE
         // or EXPIRING) until some unrelated event happened to republish it.
-        set_authority_reason("CORE_LEASE_EXPIRED");
+        set_authority_reason(argus_mqtt_authority_reason_for_expiry());
         publish_authority_state();
     }
 

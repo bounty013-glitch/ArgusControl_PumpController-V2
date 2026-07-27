@@ -587,8 +587,26 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
         // Already ours. Rebind to the current socket and refresh liveness, but
         // do NOT advance the epoch - nothing changed hands, and bumping it
         // would invalidate our own in-flight commands.
+        //
+        // FIX (final-focused-pass item 2): this used to leave `link` and the
+        // heartbeat binding untouched. A principal reacquiring after a
+        // transport disconnect arrives here with link == OFFLINE (disconnect
+        // preserves the lease but not the transport state), and every
+        // subsequent operational command is admitted only when
+        // link == ONLINE - so a legitimately reacquiring owner's very next
+        // command would have been rejected "not_authority_holder" purely
+        // because the OLD connection had gone away, which is exactly the
+        // outcome the transport/lease separation exists to prevent. The
+        // heartbeat binding moves to the new connection for the same
+        // coherence reason, with the counter cleared so the guard's
+        // per-connection scope starts fresh - the same rule
+        // argus_mqtt_session_accept_heartbeat() applies when a holder
+        // reclaims on a new socket.
         core->lease_connection_id = connection_id;
+        core->heartbeat_connection_id = connection_id;
+        core->heartbeat_counter = 0U;
         core->last_heartbeat_ms = now_ms;
+        core->link = ARGUS_MQTT_LINK_ONLINE;
         return ARGUS_MQTT_AUTHORITY_ALREADY_HELD;
     }
 
@@ -613,27 +631,51 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority_with_state(
     argus_mqtt_session_core_t *core, uint64_t connection_id,
     const char *machine_id, uint8_t client_type,
     uint8_t authority_profile, bool core_window_open, bool machine_running,
-    uint64_t now_ms)
+    uint32_t supplied_epoch, uint64_t now_ms)
 {
     // Peeks the same held/preempt facts the base function would compute, and
-    // does so WITHOUT mutating: if this turns out not to be a running
-    // transfer, control falls through to the base function, which performs
-    // its own complete (and independently tested) admission from scratch.
-    // Duplicating that logic here, rather than reusing may_preempt(), would
-    // let the two definitions of "who may take from whom" drift apart.
+    // does so WITHOUT mutating: if this turns out not to be an admissible
+    // transfer situation, control falls through to the base function, which
+    // performs its own complete (and independently tested) admission from
+    // scratch. Duplicating that logic here, rather than reusing
+    // may_preempt(), would let the two definitions of "who may take from
+    // whom" drift apart.
     //
     // The expiry check is repeated from the base function deliberately: a
     // lease past its deadline is unowned there even before tick() has run,
     // and this peek must agree, or a legitimately unowned lease (deadline
-    // passed, nobody ticked yet) would be misread as a running transfer and
+    // passed, nobody ticked yet) would be misread as a transfer attempt and
     // refused when the base function would in fact have granted it.
     bool expired = core != NULL &&
                    (now_ms - core->last_heartbeat_ms) >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS;
-    if (core != NULL && core->lease_machine_id[0] != '\0' && !expired &&
-        !lease_held_by(core, machine_id) &&
-        may_preempt(client_type, core->lease_client_type) &&
-        machine_running) {
-        return ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING;
+    bool held_by_other = core != NULL && core->lease_machine_id[0] != '\0' && !expired &&
+                         !lease_held_by(core, machine_id);
+
+    // Item 3 (policy ordering): commissioning-profile permission is decided
+    // FIRST. If the profile forbids this requester type outright, neither
+    // of the checks below applies - falling through reproduces the same
+    // profile check and returns DENIED_PROFILE, which is the true and only
+    // reason, regardless of machine state or epoch.
+    bool profile_would_permit =
+        profile_permits(authority_profile, client_type, core_window_open);
+    bool would_transfer = profile_would_permit && held_by_other &&
+                         may_preempt(client_type, core->lease_client_type);
+
+    if (would_transfer) {
+        // Item 4: a transfer changes who owns the lease, unlike a grant onto
+        // an unowned lease or a same-principal renewal, neither of which
+        // disturbs an existing DIFFERENT owner. "No assumption" (epoch 0) is
+        // therefore not valid for a transfer - the requester must show it
+        // knows the epoch it is transferring from. By the time control
+        // reaches here, admit() has already rejected any NONZERO epoch that
+        // does not match the current one, so the only case left to close is
+        // exactly-zero.
+        if (supplied_epoch == 0U) {
+            return ARGUS_MQTT_AUTHORITY_TRANSFER_EPOCH_REQUIRED;
+        }
+        if (machine_running) {
+            return ARGUS_MQTT_AUTHORITY_TRANSFER_UNSUPPORTED_RUNNING;
+        }
     }
     return argus_mqtt_session_request_authority(
         core, connection_id, machine_id, client_type, authority_profile,
