@@ -119,6 +119,30 @@ typedef struct {
     uint32_t counter;
 } argus_mqtt_heartbeat_t;
 
+// Amendment A2.2/A2.3 request envelope. Bounded and strictly typed; a
+// publish to the right topic is not a request until this decodes and
+// validates.
+#define ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX 36U
+#define ARGUS_MQTT_AUTHORITY_INTENT_MAX 24U
+#define ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX 512U
+
+typedef struct {
+    uint32_t schema;
+    char request_id[ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX + 1U];
+    char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
+    uint32_t authority_epoch;
+    char intent[ARGUS_MQTT_AUTHORITY_INTENT_MAX + 1U];
+    bool has_intent;
+} argus_mqtt_authority_request_t;
+
+// Strict decode of an authority request or release. `is_release` tightens
+// the epoch rule: a request may carry 0 meaning "no assumption", a release
+// may not - it must name the epoch it is releasing, so a delayed release
+// from a previous owner cannot release a later one.
+argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
+    const char *payload, size_t payload_len, bool is_release,
+    argus_mqtt_authority_request_t *out);
+
 // Outcome of an explicit authority request. Every denial is distinct because
 // the operator-facing reason differs: "another interface has control" and
 // "this installation is commissioned standalone" call for different actions.

@@ -335,6 +335,41 @@ static const char *authority_result_reason(argus_mqtt_authority_result_t r)
 }
 
 
+// A2.6 duplicate record, scoped to the controller session and discarded on
+// session change. An identical repeat republishes the cached result so QoS 1
+// redelivery is idempotent; a same-id request with different content is
+// refused rather than silently treated as the original.
+static char s_auth_last_session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
+static char s_auth_last_request_id[ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX + 1U];
+static char s_auth_last_payload[ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX + 1U];
+static char s_auth_last_result[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+
+static void publish_authority_result(const argus_mqtt_authority_request_t *req,
+                                     const char *outcome, const char *reason)
+{
+    char owner_kind[24];
+    uint32_t epoch;
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    epoch = s_runtime.session.authority_epoch;
+    strlcpy(owner_kind,
+            s_runtime.session.lease_machine_id[0] == '\0' ? "NONE"
+              : (s_runtime.session.lease_client_type == ARGUS_MACHINE_CLIENT_HMI ? "LOCAL_HMI"
+              : (s_runtime.session.lease_client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND ? "ARGUSCORE"
+              : "OTHER")),
+            sizeof(owner_kind));
+    xSemaphoreGive(s_runtime.mutex);
+
+    char result[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+    int written = snprintf(result, sizeof(result),
+        "{\"schema\":1,\"request_id\":\"%s\",\"session\":\"%s\",\"outcome\":\"%s\""
+        ",\"reason\":\"%s\",\"control_owner\":\"%s\",\"authority_epoch\":%" PRIu32 "}",
+        req != NULL ? req->request_id : "", s_runtime.session.session,
+        outcome, reason, owner_kind, epoch);
+    if (written < 0 || (size_t)written >= sizeof(result)) return;
+    if (req != NULL) strlcpy(s_auth_last_result, result, sizeof(s_auth_last_result));
+    publish_value(s_runtime.topics.command_result, result, false);
+}
+
 static void handle_authority_request(const argus_mqtt_broker_message_t *message,
                                      bool release)
 {
@@ -349,7 +384,61 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
         return;
     }
 
+    // A2.1: a retained request would let the broker replay an acquisition
+    // after a session change. Refused before anything else is considered.
+    if (message->retain) {
+        ESP_LOGW(TAG, "authority request refused: retained");
+        return;
+    }
+    if (message->qos != 1U) {
+        ESP_LOGW(TAG, "authority request refused: qos_1_required");
+        return;
+    }
+
+    argus_mqtt_authority_request_t req;
+    argus_mqtt_decode_result_t decode = argus_mqtt_decode_authority_request(
+        message->payload, message->payload_len, release, &req);
+    if (decode != ARGUS_MQTT_DECODE_OK) {
+        ESP_LOGW(TAG, "authority request rejected: %s", decode_reason(decode));
+        publish_authority_result(NULL, "REJECTED", decode_reason(decode));
+        return;
+    }
+
+    // Session binding. A request naming a previous controller session is
+    // rejected with zero mutation.
+    if (strcmp(req.session, s_runtime.session.session) != 0) {
+        publish_authority_result(&req, "REJECTED", "session_mismatch");
+        return;
+    }
+
+    // A2.6 duplicate handling, before any arbitration.
+    if (strcmp(s_auth_last_session, req.session) == 0 &&
+        strcmp(s_auth_last_request_id, req.request_id) == 0) {
+        if (strncmp(s_auth_last_payload, message->payload, message->payload_len) == 0 &&
+            strlen(s_auth_last_payload) == message->payload_len) {
+            publish_value(s_runtime.topics.command_result, s_auth_last_result, false);
+            return;   // idempotent replay: no arbitration, no epoch change
+        }
+        publish_authority_result(&req, "REJECTED", "duplicate_conflict");
+        return;
+    }
+    strlcpy(s_auth_last_session, req.session, sizeof(s_auth_last_session));
+    strlcpy(s_auth_last_request_id, req.request_id, sizeof(s_auth_last_request_id));
+    if (message->payload_len < sizeof(s_auth_last_payload)) {
+        memcpy(s_auth_last_payload, message->payload, message->payload_len);
+        s_auth_last_payload[message->payload_len] = '\0';
+    }
+
     if (release) {
+        // A2.3: the epoch must match exactly, so a delayed release from a
+        // previous owner cannot release a later holder.
+        xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+        bool epoch_ok = (req.authority_epoch == s_runtime.session.authority_epoch);
+        xSemaphoreGive(s_runtime.mutex);
+        if (!epoch_ok) {
+            publish_authority_result(&req, "REJECTED", "stale_epoch");
+            return;
+        }
         xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
         bool released = argus_mqtt_session_release_authority(
             &s_runtime.session, message->principal.identifier);
@@ -360,6 +449,8 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
                  message->principal.identifier,
                  released ? "accepted" : "refused_not_holder",
                  (unsigned long)epoch);
+        publish_authority_result(&req, released ? "ACCEPTED" : "REJECTED",
+                                 released ? "released" : "not_owner");
         if (released) {
             publish_value(s_runtime.topics.state_supervisor_link, "OFFLINE", true);
             publish_authority_state();
@@ -384,6 +475,15 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
              message->principal.identifier, (unsigned)message->principal.client_type,
              authority_result_reason(result), (unsigned)profile, (int)window_open,
              (unsigned long)epoch);
+
+    static const char *const reasons[] = {
+        "granted", "already_held", "denied_held_by_other",
+        "denied_by_commissioned_profile", "denied_invalid",
+    };
+    publish_authority_result(&req,
+        (result == ARGUS_MQTT_AUTHORITY_GRANTED ||
+         result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD) ? "ACCEPTED" : "REJECTED",
+        reasons[(int)result <= 4 ? (int)result : 4]);
 
     if (result == ARGUS_MQTT_AUTHORITY_GRANTED) {
         set_authority_reason(

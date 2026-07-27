@@ -340,6 +340,88 @@ argus_mqtt_decode_result_t argus_mqtt_decode_command(
     return ARGUS_MQTT_DECODE_OK;
 }
 
+static bool valid_request_id(const char *id)
+{
+    size_t len = strlen(id);
+    if (len == 0U || len > ARGUS_MQTT_AUTHORITY_REQUEST_ID_MAX) return false;
+    for (size_t i = 0; i < len; ++i) {
+        char ch = id[i];
+        bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+argus_mqtt_decode_result_t argus_mqtt_decode_authority_request(
+    const char *payload, size_t payload_len, bool is_release,
+    argus_mqtt_authority_request_t *out)
+{
+    if (out == NULL) return ARGUS_MQTT_DECODE_INVALID_ARGUMENT;
+    if (payload_len > ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX) {
+        return ARGUS_MQTT_DECODE_TOO_LARGE;
+    }
+    argus_mqtt_authority_request_t decoded = {0};
+    char copy[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+    argus_mqtt_decode_result_t pre =
+        validate_payload(payload, payload_len, copy, sizeof(copy));
+    if (pre != ARGUS_MQTT_DECODE_OK) return pre;
+    json_cursor_t cursor = {.p = copy, .end = copy + payload_len};
+    if (!consume(&cursor, '{')) return ARGUS_MQTT_DECODE_MALFORMED;
+    uint8_t fields = 0;
+    while (true) {
+        skip_ws(&cursor);
+        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        char key[24];
+        if (!parse_string(&cursor, key, sizeof(key)) || !consume(&cursor, ':')) {
+            return ARGUS_MQTT_DECODE_MALFORMED;
+        }
+        uint8_t bit = 0;
+        bool valid = false;
+        if (strcmp(key, "schema") == 0) {
+            bit = 1U;
+            valid = parse_u32(&cursor, &decoded.schema);
+        } else if (strcmp(key, "request_id") == 0) {
+            bit = 2U;
+            valid = parse_string(&cursor, decoded.request_id,
+                                 sizeof(decoded.request_id)) &&
+                    valid_request_id(decoded.request_id);
+        } else if (strcmp(key, "session") == 0) {
+            bit = 4U;
+            valid = parse_string(&cursor, decoded.session, sizeof(decoded.session)) &&
+                    valid_session(decoded.session);
+        } else if (strcmp(key, "authority_epoch") == 0) {
+            bit = 8U;
+            valid = parse_u32(&cursor, &decoded.authority_epoch);
+        } else if (strcmp(key, "intent") == 0) {
+            bit = 16U;   // optional
+            valid = parse_string(&cursor, decoded.intent, sizeof(decoded.intent));
+            decoded.has_intent = valid;
+        } else {
+            return ARGUS_MQTT_DECODE_UNKNOWN_FIELD;
+        }
+        if ((fields & bit) != 0U) return ARGUS_MQTT_DECODE_DUPLICATE_FIELD;
+        if (!valid) return ARGUS_MQTT_DECODE_INVALID_VALUE;
+        fields |= bit;
+        skip_ws(&cursor);
+        if (cursor.p < cursor.end && *cursor.p == ',') { cursor.p++; continue; }
+        if (cursor.p < cursor.end && *cursor.p == '}') { cursor.p++; break; }
+        return ARGUS_MQTT_DECODE_MALFORMED;
+    }
+    skip_ws(&cursor);
+    if (cursor.p != cursor.end) return ARGUS_MQTT_DECODE_MALFORMED;
+    // 15 = schema|request_id|session|authority_epoch. intent is optional.
+    if ((fields & 15U) != 15U) return ARGUS_MQTT_DECODE_MISSING_FIELD;
+    if (decoded.schema != 1U) return ARGUS_MQTT_DECODE_INVALID_VALUE;
+    // A2.3: a release must name the epoch it releases. 0 is "no assumption",
+    // which is meaningless for a release and is refused.
+    if (is_release && decoded.authority_epoch == 0U) {
+        return ARGUS_MQTT_DECODE_INVALID_VALUE;
+    }
+    *out = decoded;
+    return ARGUS_MQTT_DECODE_OK;
+}
+
 void argus_mqtt_session_core_init(argus_mqtt_session_core_t *core,
                                   const char *session)
 {
