@@ -4,8 +4,20 @@
 #
 #   idf.py -B build_production \
 #          -DSDKCONFIG=sdkconfig.production \
-#          -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.production.defaults" \
+#          -DSDKCONFIG_DEFAULTS="sdkconfig;sdkconfig.production.defaults" \
 #          build
+#
+# The base is the LIVE, gitignored sdkconfig - not sdkconfig.defaults.
+#
+# This was wrong until 2026-07-27 and the error was invisible until the image
+# was actually flashed: sdkconfig.defaults carries no credentials, so the
+# production image was built with an empty CONFIG_ARGUS_SERVICE_AP_PASS and
+# aborted in app_main at the AP-secret bootstrap, boot-looping on the bench.
+# The previous pass built this image and proved its exclusions from the link
+# map, but never flashed it, so nothing caught it. Chaining the live sdkconfig
+# keeps every credential in the single gitignored file it already lives in and
+# lets the production overlay win for the flags below, because later entries
+# in SDKCONFIG_DEFAULTS override earlier ones.
 #
 # Turning ARGUS_DIAGNOSTIC_MODE off does two things that must stay in step:
 #   - app_main does not create the diagnostic task (16 KB of heap) and does

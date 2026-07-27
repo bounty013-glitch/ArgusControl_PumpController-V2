@@ -45,20 +45,51 @@ static const char *TAG = "argus_mqtt_broker";
  * 4D.4 directory tests need ~13 KB CONTIGUOUS. That suite is therefore only
  * safe to run with at most ONE connected client. It is not a production
  * limit. */
-#define ARGUS_MQTT_MAX_CLIENTS 4
+#define ARGUS_MQTT_MAX_CLIENTS 3
 
-/* Sockets accepted but not yet authenticated, bounded SEPARATELY from the
- * authenticated pool above. Previously a pre-CONNECT socket consumed one of
- * the same slots an authenticated client needed, so ten silent sockets
- * denied MQTT to the real HMI for the whole grace period at zero cost to the
- * attacker. Keeping the pools separate means unauthenticated load can never
- * consume authenticated capacity. */
-#define ARGUS_MQTT_MAX_PRECONNECT 4
+/* Sockets accepted but not yet authenticated.
+ *
+ * The previous pass bounded this with its own counter but left both pools
+ * drawing from the SAME clients[ARGUS_MQTT_MAX_CLIENTS] array, so four silent
+ * sockets still filled every physical slot and the real HMI could not
+ * reconnect. A counter that guards a resource it does not own guarantees
+ * nothing; the separation below is physical. */
+#define ARGUS_MQTT_MAX_PRECONNECT 3
+
+/* Of the pre-connect pool, the most that sources with NO recent successful
+ * machine authentication may hold at once. The remainder is reserved for
+ * proven sources, so filling the pool with hostile sockets cannot deny the
+ * rotary HMI a pre-connect slot when it reconnects.
+ *
+ * "Proven" means: this source address completed a successful machine
+ * authentication within argus_machine_service_source_is_proven()'s window. It
+ * is a source-address reservation, NOT an identity guarantee - see the
+ * residual limitation recorded with that function and in the contract. */
+#define ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN 2
 
 /* Per-source cap on PRE-CONNECT sockets, so one address cannot occupy the
- * pre-connect pool on its own. Two allows a legitimate client to retry while
- * its previous socket is still closing; it does not allow a flood. */
-#define ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE 2
+ * pre-connect pool on its own. One in-flight CONNECT per address: a real
+ * client opens one socket and sends CONNECT immediately, and an authenticated
+ * client's existing socket is CONNECTED, so it does not consume this pool. */
+#define ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE 1
+
+/* Connection records. Sized so the two pools cannot cannibalise each other:
+ *
+ *   pending        = count(in_use && !connected) <  ARGUS_MQTT_MAX_PRECONNECT
+ *                    (enforced at accept, before a slot is taken)
+ *   authenticated  = count(in_use &&  connected) <= ARGUS_MQTT_MAX_CLIENTS
+ *                    (enforced by session-slot ownership, see below)
+ *   in_use = pending + authenticated
+ *          <= (MAX_PRECONNECT - 1) + MAX_CLIENTS
+ *          =  ARGUS_MQTT_MAX_CONNECTIONS - 1
+ *
+ * so an arrival that passes pre-connect admission ALWAYS finds a free record,
+ * and a pending socket that completes CONNECT always finds authenticated
+ * capacity if fewer than ARGUS_MQTT_MAX_CLIENTS sessions exist - whatever the
+ * other pool is doing. That is the property the counters alone did not have.
+ */
+#define ARGUS_MQTT_MAX_CONNECTIONS \
+    (ARGUS_MQTT_MAX_CLIENTS + ARGUS_MQTT_MAX_PRECONNECT)
 
 #define ARGUS_MQTT_MAX_SUBS_PER_CLIENT 8
 
@@ -71,6 +102,19 @@ _Static_assert(ARGUS_MQTT_MAX_PRECONNECT ==
 _Static_assert(ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE ==
                    ARGUS_MQTT_BROKER_MAX_PRECONNECT_PER_SOURCE_DECLARED,
                "declared per-source budget out of sync with implementation");
+_Static_assert(ARGUS_MQTT_MAX_CONNECTIONS ==
+                   ARGUS_MQTT_BROKER_MAX_CONNECTIONS_DECLARED,
+               "declared connection budget out of sync with implementation");
+_Static_assert(ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN ==
+                   ARGUS_MQTT_BROKER_MAX_PRECONNECT_UNPROVEN_DECLARED,
+               "declared unproven pre-connect share out of sync");
+_Static_assert(ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE <=
+                   ARGUS_MQTT_MAX_PRECONNECT,
+               "per-source pre-connect cap cannot exceed the pool");
+_Static_assert(ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN <
+                   ARGUS_MQTT_MAX_PRECONNECT,
+               "at least one pre-connect slot must stay reserved for proven "
+               "sources, or the reservation is not a reservation");
 #define ARGUS_MQTT_MAX_RETAINED ARGUS_MQTT_BROKER_RETAINED_CAPACITY
 #define ARGUS_MQTT_MAX_TOPIC_LEN ARGUS_MQTT_BROKER_TOPIC_CAP
 #define ARGUS_MQTT_MAX_PAYLOAD_LEN ARGUS_MQTT_BROKER_PAYLOAD_CAP
@@ -114,8 +158,13 @@ typedef struct {
     uint8_t receiving_interface;
     char client_id[ARGUS_MQTT_BROKER_CLIENT_ID_CAP];
     argus_machine_principal_t principal;
-    char subscriptions[ARGUS_MQTT_MAX_SUBS_PER_CLIENT][ARGUS_MQTT_MAX_TOPIC_LEN];
-    size_t subscription_count;
+    /* Index into s_broker.sessions, or -1 while this record is PENDING.
+     * Owning a session slot IS the authenticated capacity: there are exactly
+     * ARGUS_MQTT_MAX_CLIENTS of them, a record cannot become `connected`
+     * without claiming one, and subscriptions can only live in one. The
+     * authenticated limit is therefore a physical resource rather than a
+     * counter that happens to be compared against a number. */
+    int session_slot;
     /* Keep-alive liveness (2026-07-26). The CONNECT keep-alive was parsed
      * but never enforced, so a peer that died without a clean DISCONNECT
      * (device reset, power loss, Wi-Fi drop) left its slot and its client ID
@@ -132,6 +181,17 @@ typedef struct {
     uint16_t keep_alive_s;
     uint64_t last_activity_us;
 } argus_mqtt_client_t;
+
+/* The authenticated-session resource. One per supported authenticated client;
+ * see argus_mqtt_client_t::session_slot. Kept out of the connection record so
+ * that pre-connect sockets - which cannot subscribe, the packet gate rejects
+ * every non-CONNECT packet before authentication - do not carry the
+ * subscription table's cost. */
+typedef struct {
+    bool in_use;
+    size_t subscription_count;
+    char subscriptions[ARGUS_MQTT_MAX_SUBS_PER_CLIENT][ARGUS_MQTT_MAX_TOPIC_LEN];
+} argus_mqtt_session_t;
 
 typedef struct {
     bool in_use;
@@ -163,9 +223,24 @@ typedef struct {
     argus_mqtt_broker_subscribe_policy_cb_t subscribe_policy;
     argus_mqtt_broker_client_cb_t on_client_event;
     void *user_ctx;
-    argus_mqtt_client_t clients[ARGUS_MQTT_MAX_CLIENTS];
+    argus_mqtt_client_t clients[ARGUS_MQTT_MAX_CONNECTIONS];
+    argus_mqtt_session_t sessions[ARGUS_MQTT_MAX_CLIENTS];
     argus_mqtt_retained_t retained[ARGUS_MQTT_MAX_RETAINED];
     argus_mqtt_invalidation_journal_t invalidations;
+
+    /* Admission observability. These exist so the capacity claim can be
+     * measured on hardware instead of asserted: the previous pass declared a
+     * client budget nothing had ever exercised. Read via
+     * argus_mqtt_broker_get_capacity(). */
+    _Atomic uint32_t peak_pending;
+    _Atomic uint32_t peak_authenticated;
+    _Atomic uint32_t refused_preconnect_pool;
+    _Atomic uint32_t refused_preconnect_source;
+    _Atomic uint32_t refused_preconnect_reserved;
+    _Atomic uint32_t refused_session_pool;
+    /* Smallest stack margin any client task has reported, in bytes. Seeded
+     * to the configured stack size and only ever lowered. */
+    _Atomic uint32_t client_stack_min_free;
 } argus_mqtt_broker_t;
 
 static argus_mqtt_broker_t s_broker;
@@ -452,15 +527,18 @@ static size_t argus_mqtt_collect_subscribers_locked(
     const char *topic, int *sockets, size_t capacity)
 {
     size_t count = 0U;
-    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
         argus_mqtt_client_t *client = &s_broker.clients[i];
-        if (!client->in_use || !client->connected || client->sock < 0) {
+        if (!client->in_use || !client->connected || client->sock < 0 ||
+            client->session_slot < 0) {
             continue;
         }
+        const argus_mqtt_session_t *session =
+            &s_broker.sessions[client->session_slot];
 
         bool matched = false;
-        for (size_t sub = 0; sub < client->subscription_count; ++sub) {
-            if (argus_mqtt_topic_matches(client->subscriptions[sub], topic)) {
+        for (size_t sub = 0; sub < session->subscription_count; ++sub) {
+            if (argus_mqtt_topic_matches(session->subscriptions[sub], topic)) {
                 matched = true;
                 break;
             }
@@ -490,7 +568,7 @@ static void argus_mqtt_deliver_to_sockets(
 static bool argus_mqtt_duplicate_client_id_locked(
     const argus_mqtt_client_t *requester, const char *client_id)
 {
-    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
         const argus_mqtt_client_t *other = &s_broker.clients[i];
         if (other != requester && other->in_use && other->connected &&
             strcmp(other->client_id, client_id) == 0) {
@@ -595,6 +673,51 @@ static bool argus_mqtt_client_close_allowed_locked(
     return client != NULL && !client->shutdown_claimed;
 }
 
+/* ===========================================================================
+ * Authenticated-session slots  (the authenticated capacity, physically)
+ * =========================================================================*/
+
+/* Claim the authenticated resource for a record that is completing CONNECT.
+ * Returns false when every session slot is held - which is exactly the
+ * "one client beyond the supported limit" case, and is answered with a clean
+ * CONNACK refusal rather than a failed allocation somewhere else. Called
+ * under client_lock. */
+static bool argus_mqtt_session_claim_locked(argus_mqtt_client_t *client)
+{
+    if (client->session_slot >= 0) return true;
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        if (!s_broker.sessions[i].in_use) {
+            memset(&s_broker.sessions[i], 0, sizeof(s_broker.sessions[i]));
+            s_broker.sessions[i].in_use = true;
+            client->session_slot = (int)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Called under client_lock. Safe to call for a record that never had one. */
+static void argus_mqtt_session_release_locked(argus_mqtt_client_t *client)
+{
+    if (client->session_slot < 0) return;
+    memset(&s_broker.sessions[client->session_slot], 0,
+           sizeof(s_broker.sessions[client->session_slot]));
+    client->session_slot = -1;
+}
+
+/* Current occupancy of each pool. Called under client_lock. */
+static void argus_mqtt_occupancy_locked(size_t *pending, size_t *authenticated)
+{
+    size_t p = 0U, a = 0U;
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
+        const argus_mqtt_client_t *c = &s_broker.clients[i];
+        if (!c->in_use) continue;
+        if (c->connected) a++; else p++;
+    }
+    if (pending != NULL) *pending = p;
+    if (authenticated != NULL) *authenticated = a;
+}
+
 static esp_err_t argus_mqtt_handle_connect(
     argus_mqtt_client_t *client, const uint8_t *packet, uint32_t len)
 {
@@ -645,20 +768,45 @@ static esp_err_t argus_mqtt_handle_connect(
         &s_broker.invalidations, client, expected_connection_id,
         auth.principal.identifier,
         captured_invalidation_generation, duplicate_client_id);
+    /* Authenticated capacity is claimed HERE, not at accept: a valid
+     * credential is necessary but not sufficient, and the pre-connect pool
+     * this record came from is a different resource. When every session slot
+     * is held the peer is refused cleanly below with CONNACK 0x03 (server
+     * unavailable) - the honest answer - instead of being admitted into a
+     * pool that cannot hold it. */
+    bool capacity = false;
     if (bind_allowed) {
+        capacity = argus_mqtt_session_claim_locked(client);
+    }
+    if (bind_allowed && capacity) {
         strlcpy(client->client_id, request.client_id,
                 sizeof(client->client_id));
         client->principal = auth.principal;
-        client->subscription_count = 0U;
         client->connected = true;
         /* Adopt the client's declared keep-alive so the liveness sweep in
          * argus_mqtt_client_task() can reap this connection if the peer
          * stops talking. Zero means "no timeout" per MQTT 3.1.1. */
         client->keep_alive_s = request.keep_alive_s;
         client->last_activity_us = (uint64_t)esp_timer_get_time();
+        size_t authenticated = 0U;
+        argus_mqtt_occupancy_locked(NULL, &authenticated);
+        if (authenticated > atomic_load(&s_broker.peak_authenticated)) {
+            atomic_store(&s_broker.peak_authenticated, (uint32_t)authenticated);
+        }
     }
     xSemaphoreGive(s_broker.client_lock);
     argus_password_zeroize(&request, sizeof(request));
+    if (bind_allowed && !capacity) {
+        atomic_fetch_add(&s_broker.refused_session_pool, 1U);
+        ESP_LOGW(TAG,
+                 "refusing authenticated MQTT client: all %u session slots in "
+                 "use", (unsigned)ARGUS_MQTT_MAX_CLIENTS);
+        const uint8_t connack_unavailable[] =
+            {0x20U, 0x02U, 0x00U, 0x03U};
+        (void)send(client->sock, connack_unavailable,
+                   sizeof(connack_unavailable), 0);
+        return ESP_ERR_NO_MEM;
+    }
     if (!bind_allowed) {
         const uint8_t connack_bad_id[] =
             {0x20U, 0x02U, 0x00U, 0x02U};
@@ -752,13 +900,17 @@ static esp_err_t argus_mqtt_handle_subscribe(argus_mqtt_client_t *client, const 
         return ESP_ERR_NOT_ALLOWED;
     }
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    argus_mqtt_session_t *session =
+        client->session_slot >= 0 ? &s_broker.sessions[client->session_slot]
+                                  : NULL;
     bool capacity =
         argus_mqtt_client_admitted_locked(client, info.connection_id) &&
-        client->subscription_count + request->count <=
+        session != NULL &&
+        session->subscription_count + request->count <=
             ARGUS_MQTT_MAX_SUBS_PER_CLIENT;
     if (capacity) {
         for (size_t i = 0U; i < request->count; ++i) {
-            strlcpy(client->subscriptions[client->subscription_count++],
+            strlcpy(session->subscriptions[session->subscription_count++],
                     request->filters[i], ARGUS_MQTT_MAX_TOPIC_LEN);
         }
     }
@@ -967,7 +1119,9 @@ static void argus_mqtt_close_client(argus_mqtt_client_t *client)
     client->security_invalidated = false;
     client->shutdown_claimed = false;
     client->in_use = false;
-    client->subscription_count = 0;
+    /* Returning the session slot is what actually frees authenticated
+     * capacity for the next CONNECT. */
+    argus_mqtt_session_release_locked(client);
     argus_password_zeroize(&client->principal, sizeof(client->principal));
     xSemaphoreGive(s_broker.client_lock);
 
@@ -994,6 +1148,20 @@ static void argus_mqtt_close_client(argus_mqtt_client_t *client)
  * Per-client task  (protocol loop unchanged; exit path hardened)
  * =========================================================================*/
 
+/* uxTaskGetStackHighWaterMark returns the smallest FREE margin the task has
+ * ever had, in bytes on ESP-IDF. Keep the minimum across all client tasks. */
+static void argus_mqtt_record_client_stack_margin(void)
+{
+    uint32_t free_bytes = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+    uint32_t observed = atomic_load(&s_broker.client_stack_min_free);
+    while (free_bytes < observed) {
+        if (atomic_compare_exchange_weak(
+                &s_broker.client_stack_min_free, &observed, free_bytes)) {
+            break;
+        }
+    }
+}
+
 static void argus_mqtt_client_task(void *arg)
 {
     argus_mqtt_client_t *client = (argus_mqtt_client_t *)arg;
@@ -1002,6 +1170,14 @@ static void argus_mqtt_client_task(void *arg)
     /* Start the liveness clock at accept, so a socket that never sends
      * CONNECT is reaped by the grace deadline below. */
     client->last_activity_us = (uint64_t)esp_timer_get_time();
+
+    /* Record the worst stack margin any client task has ever reached. The
+     * 8 KB stack was inherited, never measured, and it is the single largest
+     * per-connection cost - so it decides how many connections the device can
+     * physically hold. Sampling it here, on the real protocol path with a
+     * real client, is what turns the client budget from arithmetic into a
+     * measurement. */
+    argus_mqtt_record_client_stack_margin();
 
     while (true) {
         uint8_t fixed_header = 0;
@@ -1033,6 +1209,7 @@ static void argus_mqtt_client_task(void *arg)
             }
 
             if (idle_us < deadline_us) {
+                argus_mqtt_record_client_stack_margin();
                 continue;
             }
             ESP_LOGW(TAG,
@@ -1144,7 +1321,10 @@ static void argus_mqtt_client_task(void *arg)
     }
 
 done:
-    ESP_LOGI(TAG, "client disconnected: %s", client->client_id[0] ? client->client_id : "(unknown)");
+    argus_mqtt_record_client_stack_margin();
+    ESP_LOGI(TAG, "client disconnected: %s (stack margin low-water %u bytes)",
+             client->client_id[0] ? client->client_id : "(unknown)",
+             (unsigned)atomic_load(&s_broker.client_stack_min_free));
     argus_mqtt_close_client(client);
     vTaskDelete(NULL);
 }
@@ -1164,26 +1344,69 @@ done:
  * A client that completes CONNECT is promoted out of the pre-connect count
  * (argus_mqtt_promote_authenticated_locked), freeing its pre-connect slot for
  * the next arrival. Called under client_lock. */
+/* The rule, separated from the counting so it can be driven directly. The
+ * reserved share is a SOURCE-ADDRESS reservation: it does not identify a
+ * legitimate client - nothing in MQTT CONNECT can, before credential
+ * verification - and it gives nothing against a flood that originates from or
+ * spoofs a proven address, nor after a reboot until the first success. Those
+ * limits are stated in the contract and asserted in the suite; do not restate
+ * them here as a guarantee. */
+argus_mqtt_preconnect_decision_t argus_mqtt_broker_preconnect_decide(
+    size_t pending, size_t pending_from_source, bool source_proven)
+{
+    if (pending >= ARGUS_MQTT_MAX_PRECONNECT) {
+        return ARGUS_MQTT_PRECONNECT_REFUSE_POOL;
+    }
+    if (pending >= ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN && !source_proven) {
+        return ARGUS_MQTT_PRECONNECT_REFUSE_RESERVED;
+    }
+    if (pending_from_source >= ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE) {
+        return ARGUS_MQTT_PRECONNECT_REFUSE_SOURCE;
+    }
+    return ARGUS_MQTT_PRECONNECT_ADMIT;
+}
+
 static bool argus_mqtt_preconnect_admit_locked(uint32_t peer_key)
 {
     size_t pending = 0U;
     size_t pending_from_source = 0U;
-    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
         const argus_mqtt_client_t *c = &s_broker.clients[i];
         if (!c->in_use || c->connected) continue;
         pending++;
         if (c->peer_key == peer_key) pending_from_source++;
     }
-    if (pending >= ARGUS_MQTT_MAX_PRECONNECT) {
+    /* Only consulted when the reserved share is actually in play, so the
+     * common path does not take the machine-service mutex. */
+    bool proven = pending >= ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN &&
+                  argus_machine_service_source_is_proven(peer_key);
+    switch (argus_mqtt_broker_preconnect_decide(
+                pending, pending_from_source, proven)) {
+    case ARGUS_MQTT_PRECONNECT_REFUSE_POOL:
+        atomic_fetch_add(&s_broker.refused_preconnect_pool, 1U);
         ESP_LOGW(TAG, "refusing MQTT socket: pre-connect pool full (%u)",
                  (unsigned)pending);
         return false;
-    }
-    if (pending_from_source >= ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE) {
+    case ARGUS_MQTT_PRECONNECT_REFUSE_RESERVED:
+        atomic_fetch_add(&s_broker.refused_preconnect_reserved, 1U);
+        ESP_LOGW(TAG,
+                 "refusing MQTT socket: unproven source, %u of %u pre-connect "
+                 "slots reserved for recently authenticated sources",
+                 (unsigned)(ARGUS_MQTT_MAX_PRECONNECT -
+                            ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN),
+                 (unsigned)ARGUS_MQTT_MAX_PRECONNECT);
+        return false;
+    case ARGUS_MQTT_PRECONNECT_REFUSE_SOURCE:
+        atomic_fetch_add(&s_broker.refused_preconnect_source, 1U);
         ESP_LOGW(TAG,
                  "refusing MQTT socket: source already holds %u pre-connect sockets",
                  (unsigned)pending_from_source);
         return false;
+    default:
+        break;
+    }
+    if (pending + 1U > atomic_load(&s_broker.peak_pending)) {
+        atomic_store(&s_broker.peak_pending, (uint32_t)(pending + 1U));
     }
     return true;
 }
@@ -1194,11 +1417,12 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(
     if (!argus_mqtt_preconnect_admit_locked(peer_key)) {
         return NULL;
     }
-    for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+    for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
         if (!s_broker.clients[i].in_use) {
             argus_mqtt_client_t *client = &s_broker.clients[i];
             memset(client, 0, sizeof(*client));
             client->in_use = true;
+            client->session_slot = -1;
             client->sock = sock;
             client->connection_id = atomic_fetch_add(&s_broker.next_connection_id, 1U) + 1U;
             client->peer_key = peer_key;
@@ -1206,6 +1430,13 @@ static argus_mqtt_client_t *argus_mqtt_alloc_client_locked(
             return client;
         }
     }
+    /* Unreachable by the sizing argument on ARGUS_MQTT_MAX_CONNECTIONS: an
+     * arrival that passed pre-connect admission always has a free record.
+     * Logged rather than silently refused, because reaching it would mean the
+     * pool invariant - not merely the policy - has been broken. */
+    ESP_LOGE(TAG,
+             "connection-pool invariant violated: admitted a pre-connect "
+             "socket with no free record");
     return NULL;
 }
 
@@ -1241,9 +1472,15 @@ static uint8_t argus_mqtt_receiving_interface(int sock)
     case ARGUS_NET_IFACE_STA:
         return ARGUS_MACHINE_INTERFACE_STA;
     case ARGUS_NET_IFACE_AMBIGUOUS:
-        ESP_LOGE(TAG,
-                 "MQTT socket interface AMBIGUOUS (AP/STA address overlap); "
-                 "refusing interface-scoped admission");
+        /* Rate-limited: a misconfigured or hostile network produces one of
+         * these per connection attempt, and the condition is already
+         * published as an authoritative fault. */
+        if (argus_net_mgr_interface_conflict_log_due()) {
+            ESP_LOGE(TAG,
+                     "MQTT socket interface AMBIGUOUS (AP/STA address "
+                     "overlap); refusing interface-scoped admission. %s",
+                     argus_net_mgr_interface_conflict_action());
+        }
         return 0U;
     default:
         return 0U;
@@ -1292,7 +1529,7 @@ static void argus_mqtt_server_task(void *arg)
         return;
     }
 
-    if (listen(listen_sock, ARGUS_MQTT_MAX_CLIENTS) != 0) {
+    if (listen(listen_sock, ARGUS_MQTT_MAX_CONNECTIONS) != 0) {
         ESP_LOGE(TAG, "listen failed: errno=%d", errno);
         close(listen_sock);
         xSemaphoreTake(s_broker.lifecycle_mutex, portMAX_DELAY);
@@ -1403,7 +1640,7 @@ static void argus_mqtt_server_task(void *arg)
             xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
             client->sock = -1;
             client->in_use = false;
-            client->subscription_count = 0;
+            argus_mqtt_session_release_locked(client);
             xSemaphoreGive(s_broker.client_lock);
             atomic_fetch_sub(&s_broker.active_client_count, 1);
             close(sock);
@@ -1503,7 +1740,19 @@ esp_err_t argus_mqtt_broker_start(const argus_mqtt_broker_config_t *config)
     s_broker.startup_error = ESP_OK;
     atomic_store(&s_broker.active_client_count, 0);
     memset(s_broker.clients, 0, sizeof(s_broker.clients));
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
+        s_broker.clients[i].session_slot = -1;
+    }
+    memset(s_broker.sessions, 0, sizeof(s_broker.sessions));
     memset(s_broker.retained, 0, sizeof(s_broker.retained));
+    atomic_store(&s_broker.peak_pending, 0U);
+    atomic_store(&s_broker.peak_authenticated, 0U);
+    atomic_store(&s_broker.refused_preconnect_pool, 0U);
+    atomic_store(&s_broker.refused_preconnect_source, 0U);
+    atomic_store(&s_broker.refused_preconnect_reserved, 0U);
+    atomic_store(&s_broker.refused_session_pool, 0U);
+    atomic_store(&s_broker.client_stack_min_free,
+                 (uint32_t)ARGUS_MQTT_CLIENT_TASK_STACK);
     argus_mqtt_invalidation_init(&s_broker.invalidations);
 
     /* Clear event bits before launching the task. */
@@ -1602,13 +1851,75 @@ esp_err_t argus_mqtt_broker_publish(const char *topic, const char *payload, bool
     return ESP_OK;
 }
 
+esp_err_t argus_mqtt_broker_get_capacity(argus_mqtt_broker_capacity_t *out)
+{
+    if (out == NULL) return ESP_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    out->max_connections = (uint16_t)ARGUS_MQTT_MAX_CONNECTIONS;
+    out->max_authenticated = (uint16_t)ARGUS_MQTT_MAX_CLIENTS;
+    out->max_pending = (uint16_t)ARGUS_MQTT_MAX_PRECONNECT;
+    out->max_pending_unproven = (uint16_t)ARGUS_MQTT_MAX_PRECONNECT_UNPROVEN;
+    out->max_pending_per_source =
+        (uint16_t)ARGUS_MQTT_MAX_PRECONNECT_PER_SOURCE;
+    out->client_task_stack_bytes = (uint32_t)ARGUS_MQTT_CLIENT_TASK_STACK;
+    out->connection_record_bytes = (uint32_t)sizeof(argus_mqtt_client_t);
+    out->session_record_bytes = (uint32_t)sizeof(argus_mqtt_session_t);
+    out->broker_static_bytes = (uint32_t)sizeof(s_broker);
+    out->peak_pending = (uint16_t)atomic_load(&s_broker.peak_pending);
+    out->peak_authenticated =
+        (uint16_t)atomic_load(&s_broker.peak_authenticated);
+    out->refused_pending_pool =
+        atomic_load(&s_broker.refused_preconnect_pool);
+    out->refused_pending_source =
+        atomic_load(&s_broker.refused_preconnect_source);
+    out->refused_pending_reserved =
+        atomic_load(&s_broker.refused_preconnect_reserved);
+    out->refused_session_pool = atomic_load(&s_broker.refused_session_pool);
+    out->client_stack_min_free_bytes =
+        atomic_load(&s_broker.client_stack_min_free);
+    out->retained_capacity = (uint16_t)ARGUS_MQTT_MAX_RETAINED;
+    if (s_broker.client_lock == NULL) return ESP_OK;
+    size_t pending = 0U, authenticated = 0U;
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    argus_mqtt_occupancy_locked(&pending, &authenticated);
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_RETAINED; ++i) {
+        if (s_broker.retained[i].in_use) out->retained_used++;
+    }
+    xSemaphoreGive(s_broker.client_lock);
+    out->pending = (uint16_t)pending;
+    out->authenticated = (uint16_t)authenticated;
+    return ESP_OK;
+}
+
+esp_err_t argus_mqtt_broker_get_retained(
+    const char *topic, char *out, size_t out_size)
+{
+    if (topic == NULL || out == NULL || out_size == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+    if (s_broker.client_lock == NULL) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_RETAINED; ++i) {
+        if (s_broker.retained[i].in_use &&
+            strcmp(s_broker.retained[i].topic, topic) == 0) {
+            strlcpy(out, s_broker.retained[i].payload, out_size);
+            err = ESP_OK;
+            break;
+        }
+    }
+    xSemaphoreGive(s_broker.client_lock);
+    return err;
+}
+
 esp_err_t argus_mqtt_broker_disconnect_machine(const char *identifier)
 {
     if (identifier == NULL || identifier[0] == '\0' ||
         s_broker.client_lock == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    argus_mqtt_disconnect_target_t targets[ARGUS_MQTT_MAX_CLIENTS] = {0};
+    argus_mqtt_disconnect_target_t targets[ARGUS_MQTT_MAX_CONNECTIONS] = {0};
     size_t count = 0U;
     bool matched = false;
     bool shutdown_failed = false;
@@ -1616,7 +1927,7 @@ esp_err_t argus_mqtt_broker_disconnect_machine(const char *identifier)
         argus_mqtt_broker_fence_machine_authentication(identifier);
     if (fence != ESP_OK) return fence;
     xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-    for (size_t i = 0U; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+    for (size_t i = 0U; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
         argus_mqtt_client_t *client = &s_broker.clients[i];
         if (!argus_mqtt_disconnect_matches_locked(client, identifier)) continue;
         matched = true;
@@ -1662,7 +1973,7 @@ esp_err_t argus_mqtt_broker_fence_machine_authentication(
     bool recorded = argus_mqtt_invalidation_record(
         &s_broker.invalidations, identifier);
     if (recorded) {
-        for (size_t i = 0U; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        for (size_t i = 0U; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
             argus_mqtt_client_t *client = &s_broker.clients[i];
             if (argus_mqtt_disconnect_matches_locked(
                     client, identifier)) {
@@ -1813,19 +2124,19 @@ esp_err_t argus_mqtt_broker_stop(void)
      * Wait for that bounded operation before retiring sockets so stop cannot
      * close and recycle a descriptor still claimed by the invalidator.
      */
-    int sockets[ARGUS_MQTT_MAX_CLIENTS];
+    int sockets[ARGUS_MQTT_MAX_CONNECTIONS];
     size_t socket_count = 0U;
     for (;;) {
         bool claim_active = false;
         xSemaphoreTake(s_broker.client_lock, portMAX_DELAY);
-        for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+        for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
             if (s_broker.clients[i].shutdown_claimed) {
                 claim_active = true;
                 break;
             }
         }
         if (!claim_active) {
-            for (size_t i = 0; i < ARGUS_MQTT_MAX_CLIENTS; ++i) {
+            for (size_t i = 0; i < ARGUS_MQTT_MAX_CONNECTIONS; ++i) {
                 if (s_broker.clients[i].in_use &&
                     s_broker.clients[i].sock >= 0) {
                     sockets[socket_count++] = s_broker.clients[i].sock;

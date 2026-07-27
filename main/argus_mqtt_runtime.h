@@ -18,6 +18,20 @@ void argus_mqtt_runtime_mark_authority_ready(void);
 void argus_mqtt_runtime_tick(void);
 esp_err_t argus_mqtt_runtime_get_session(char *out, size_t out_size);
 
+/**
+ * @brief Read back what is actually RETAINED on the two admission-condition
+ *        topics, using the runtime's own topic table.
+ *
+ * Lets an operator and the acceptance procedure confirm that the network
+ * fault and the authentication throttle reached the authoritative status
+ * path, rather than only being computed internally. Either output is set to
+ * "(not published)" when nothing is retained on that topic.
+ */
+void argus_mqtt_runtime_get_published_conditions(
+    char *fault, size_t fault_size,
+    char *action, size_t action_size,
+    char *throttle, size_t throttle_size);
+
 // Correction order §7. What stage of admission an authority request/release
 // reached. Named for the OUTCOME, not the gate, so a test asserts "this is
 // what happened" rather than reproducing the gate's internal control flow.

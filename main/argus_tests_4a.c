@@ -5641,6 +5641,9 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d4_iface_ambiguity_fails_closed);
     RUN_TEST(test_4d4_kdf_global_bound_is_source_independent);
     RUN_TEST(test_4d4_admission_budgets_are_self_consistent);
+    RUN_TEST(test_4d4_proven_source_reservation_bounds_the_flood);
+    RUN_TEST(test_4d4_pending_pool_cannot_starve_authenticated);
+    RUN_TEST(test_4d4_authenticated_pool_refuses_beyond_limit);
     }
 
     int total_executions = passed_executions + failed_executions;

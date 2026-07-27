@@ -591,6 +591,30 @@ argus_net_iface_t argus_net_mgr_classify_interface(
 bool argus_net_mgr_interface_conflict_detected(void);
 void argus_net_mgr_clear_interface_conflict(void);
 
+/**
+ * @brief Observable state of the AP/STA address-conflict fault.
+ *
+ * The fault is published on the authoritative status path, not merely held
+ * internally, so that refused AP-only access is explained rather than
+ * mysterious. Assertion and clearing are deterministic - see the rule stated
+ * at the definition in argus_net_mgr.c.
+ */
+typedef struct {
+    bool active;
+    uint32_t observations;
+    uint64_t first_observed_us;
+    uint64_t last_observed_us;
+} argus_net_iface_conflict_status_t;
+
+void argus_net_mgr_get_interface_conflict(
+    argus_net_iface_conflict_status_t *out);
+
+/** @brief True at most once per minute while the fault holds; gates logging. */
+bool argus_net_mgr_interface_conflict_log_due(void);
+
+/** @brief Operator-facing corrective action for the conflict fault. */
+const char *argus_net_mgr_interface_conflict_action(void);
+
 #ifdef __cplusplus
 }
 #endif

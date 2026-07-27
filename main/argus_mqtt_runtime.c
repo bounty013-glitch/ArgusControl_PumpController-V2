@@ -84,6 +84,106 @@ static void publish_number(const char *topic, int64_t value)
     publish_value(topic, payload, true);
 }
 
+/* Retained conditions that must be VISIBLE but must not flood telemetry.
+ *
+ * The operational snapshot republishes everything on every cycle, which is
+ * fine for values that change constantly. These two are faults: they change
+ * rarely and can be asserted by a hostile peer at connection rate, so they
+ * are published only on transition. They are retained, so a client that
+ * subscribes later still receives the current value from the broker's
+ * retained store - change-gating loses nothing.
+ *
+ * Reset by publish_baseline() so a broker restart re-publishes them. */
+static char s_last_network_fault[32];
+static char s_last_auth_throttle[16];
+
+static bool publish_on_change(const char *topic, const char *payload,
+                              char *cache, size_t cache_size)
+{
+    if (strncmp(cache, payload, cache_size) == 0 && cache[0] != '\0') {
+        return false;
+    }
+    bool was_known = cache[0] != '\0';
+    strlcpy(cache, payload, cache_size);
+    publish_value(topic, payload, true);
+    return was_known;
+}
+
+static void publish_admission_conditions(void)
+{
+    argus_net_iface_conflict_status_t conflict = {0};
+    argus_net_mgr_get_interface_conflict(&conflict);
+    const char *fault =
+        conflict.active ? "AP_STA_ADDRESS_CONFLICT" : "NONE";
+    bool changed = strcmp(s_last_network_fault, fault) != 0;
+    /* Logged on TRANSITION only, in both builds. A production image has no
+     * diagnostic menu, so without this the only production evidence of a
+     * network-configuration fault would be the MQTT topic - which is exactly
+     * the surface an operator cannot reach when the fault is what is blocking
+     * their access. Bounded by construction: one line per transition. */
+    if (publish_on_change(s_runtime.topics.status_network_fault, fault,
+                          s_last_network_fault,
+                          sizeof(s_last_network_fault))) {
+        if (conflict.active) {
+            ESP_LOGE(TAG, "NETWORK FAULT asserted: %s. %s", fault,
+                     argus_net_mgr_interface_conflict_action());
+        } else {
+            ESP_LOGW(TAG, "network fault cleared: AP and station interfaces "
+                          "observed without overlap");
+        }
+    }
+    if (changed) {
+        /* The action text is only meaningful alongside an active fault, and
+         * is published on the same transition so the two never disagree. */
+        publish_value(s_runtime.topics.status_network_fault_action,
+                      conflict.active
+                          ? argus_net_mgr_interface_conflict_action()
+                          : "",
+                      true);
+    }
+
+    argus_machine_auth_throttle_status_t throttle = {0};
+    argus_machine_service_get_throttle_status(&throttle);
+    if (publish_on_change(s_runtime.topics.status_auth_throttle,
+                          throttle.throttle_active ? "ACTIVE" : "CLEAR",
+                          s_last_auth_throttle,
+                          sizeof(s_last_auth_throttle))) {
+        if (throttle.throttle_active) {
+            ESP_LOGW(TAG,
+                     "machine authentication THROTTLED: %" PRIu32 " refusals "
+                     "(%" PRIu32 " by the KDF budget, %" PRIu32
+                     " sources in lockout); clears in %" PRIu32 " s",
+                     throttle.refusals, throttle.global_refusals,
+                     throttle.blocked_sources, throttle.seconds_until_clear);
+        } else {
+            ESP_LOGI(TAG, "machine authentication throttle cleared");
+        }
+    }
+}
+
+void argus_mqtt_runtime_get_published_conditions(
+    char *fault, size_t fault_size,
+    char *action, size_t action_size,
+    char *throttle, size_t throttle_size)
+{
+    struct {
+        const char *topic;
+        char *out;
+        size_t size;
+    } wanted[] = {
+        {s_runtime.topics.status_network_fault, fault, fault_size},
+        {s_runtime.topics.status_network_fault_action, action, action_size},
+        {s_runtime.topics.status_auth_throttle, throttle, throttle_size},
+    };
+    for (size_t i = 0U; i < sizeof(wanted) / sizeof(wanted[0]); ++i) {
+        if (wanted[i].out == NULL || wanted[i].size == 0U) continue;
+        if (argus_mqtt_broker_get_retained(
+                wanted[i].topic, wanted[i].out, wanted[i].size) != ESP_OK) {
+            strlcpy(wanted[i].out, "(not published)", wanted[i].size);
+        }
+    }
+}
+
 static void publish_authority_state(void);
 static void set_authority_reason(const char *reason);
 static void compose_authority_result_json(
@@ -144,10 +244,16 @@ static void publish_operational_snapshot(void)
     publish_number(s_runtime.topics.telemetry_step_count, state.generated_step_count);
     publish_value(s_runtime.topics.telemetry_feedback_available,
                   state.feedback_available ? "true" : "false", true);
+
+    publish_admission_conditions();
 }
 
 static void publish_baseline(void)
 {
+    /* Force the change-gated conditions to republish onto a fresh retained
+     * store. */
+    s_last_network_fault[0] = '\0';
+    s_last_auth_throttle[0] = '\0';
     publish_value(s_runtime.topics.metadata_device_name,
                   s_runtime.identity.device_name, true);
     publish_value(s_runtime.topics.metadata_model,

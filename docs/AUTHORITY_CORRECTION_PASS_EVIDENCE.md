@@ -7,6 +7,375 @@
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+## -4. MQTT admission isolation and capacity proof (2026-07-27)
+
+Shawn's final closure order, acting on independent review of `81fb3ed`. That
+commit is preserved as the restoration point. Six items; all implemented,
+both configurations built with zero warnings, **both flashed to COM5**, and
+verified on hardware under load.
+
+Read §-3 first: this section corrects claims made there.
+
+### What §-3 got wrong, and how
+
+**The pools were never separated.** §-3 said "unauthenticated sockets are now
+bounded SEPARATELY from authenticated clients" and set
+`MAX_PRECONNECT = 4` against `MAX_CLIENTS = 4`. Both counters indexed the
+same `s_broker.clients[4]` array. Four silent sockets therefore filled every
+physical record, and the rotary HMI could not reconnect at all — the exact
+denial the change was written to prevent. The test that was supposed to cover
+it asserted `MAX_PRECONNECT <= MAX_CLIENTS` and passed happily throughout,
+because it encoded the fig leaf rather than the property. This is the same
+failure mode as `epoch_survives_reconnect_blip`: a green test proving nothing.
+
+**The client budget was arithmetic, not measurement.** §-3 recorded
+"~13.0 KB per client" and declared `MAX_CLIENTS = 4` from it, and said so
+plainly — but the dominant term, the 8192-byte client task stack, had never
+been measured. It could as easily have been 3 KB (making 4 cheap) or 7.5 KB
+(making 4 unsafe). It is now instrumented and measured.
+
+**The production image had never been flashed.** §-3 proved its exclusions
+from the link map and said explicitly that it was not flashed. Flashing it in
+this pass immediately boot-looped — see the finding below.
+
+### 1. Physically separate pending and authenticated pools
+
+`s_broker.clients[]` is now sized `MAX_CLIENTS + MAX_PRECONNECT` and the
+subscription table moved out of the connection record into a separate
+`sessions[MAX_CLIENTS]` array. **Owning a session record IS the authenticated
+capacity**: there are exactly `MAX_CLIENTS` of them, a record cannot become
+`connected` without claiming one, and subscriptions can only live in one.
+
+The invariant that makes this physical rather than clerical:
+
+```
+pending        <  MAX_PRECONNECT      (checked before a record is taken)
+authenticated  <= MAX_CLIENTS         (session-slot ownership)
+=> in_use      <= MAX_CONNECTIONS - 1
+```
+
+so an admitted arrival always has a free record, and a pending socket that
+completes CONNECT always finds authenticated capacity when fewer than
+`MAX_CLIENTS` sessions exist — whatever the other pool is doing.
+`test_4d4_pending_pool_cannot_starve_authenticated` drives
+`argus_mqtt_broker_preconnect_decide()` — the function production calls, not
+a transcription — across every reachable `(pending, authenticated)` pair and
+asserts the invariant at each.
+
+**No reserved reconnect slot is claimed any more.** §-3's comment promised
+"one reconnect overlapping its own stale slot"; nothing reserved anything.
+A stale slot is recovered by keep-alive reaping, and the contract now says so.
+
+Final limits: `MAX_CLIENTS = 3`, `MAX_PRECONNECT = 3`, unproven share 2,
+per-source 1, `MAX_CONNECTIONS = 6`, grace 3 s.
+
+### 2. Measured per-connection cost — the numbers the budget rests on
+
+Measured on target, diagnostic build, HMI connected and authenticated:
+
+| Quantity | Measured |
+|---|---|
+| Client task stack | 8192 B configured; **worst free margin 2504 B** → 5688 B used |
+| Heap per connection | 56,544 → 44,736 free with one extra pending socket = **11,808 B** |
+| Task count per connection | 24 → 25 |
+| Connection record | 344 B × 6 |
+| Session record | 1288 B × 3 |
+| Broker static (`s_broker`) | 29,424 B (link map `.bss.s_broker` 0x72f0) |
+| Recovery after release | 56,924 B free, 24 tasks — **no slot or task leak** |
+
+**The stack must not be cut.** I expected 8192 to be inherited and generous
+and intended to halve it; the measurement says 5688 bytes are actually used,
+so 8192 leaves ~30% margin and is correct. This is the direct reason
+`MAX_CLIENTS` is 3 and not 4: at 11.8 KB per connection, six connections cost
+~71 KB, which the production heap supports with headroom and a seventh would
+not.
+
+### 3. Adversarial pending-socket exhaustion — what was and was not shown
+
+**Demonstrated on hardware, single source (192.168.50.172):** six sockets
+opened simultaneously → **1 admitted, 5 refused** by the per-source cap
+(`per_source=5` in the refusal counters). Peak pending 1. The authenticated
+HMI was unaffected throughout (`Authenticated 1/3` steady). After release and
+grace expiry, pending returned to 0, tasks to 24, heap to 56,924.
+
+**Demonstrated on hardware, sustained mixed flood** (silent sockets +
+bogus CONNECTs, 1441 sockets / 867 CONNECTs over 200 s), with the chip reset
+mid-flood so the HMI was forced to drop and reconnect **while the flood was
+running**:
+
+- HMI re-authenticated at **16.3 s** (diagnostic image) / **19.9 s and 22.7 s
+  and 32.1 s** across production runs.
+- 128 and 793 pre-connect refusals logged.
+- The **reserved share fired on hardware**: `reserved=41` refusals, i.e.
+  unproven sockets turned away to keep a slot available to a proven source.
+- Zero panics, zero watchdogs, zero `NO_MEM`, zero client-task creation
+  failures, zero pool-invariant violations, zero `active_client_count`
+  underflows.
+- Wi-Fi, SoftAP, MQTT, HTTP and the network manager all stayed up; HTTP
+  answered (`HTTP/1.1 403 Forbidden` — the AP-only policy correctly refusing
+  a station-side request to the portal, i.e. the server is alive and
+  enforcing).
+
+**NOT demonstrated on hardware, and this is a real gap:** the multi-source
+case. The bench host has exactly one routable address (192.168.50.172 on
+Ethernet 2; WSL and Hyper-V switches are NAT'd behind it, Wi-Fi is
+disconnected). With `MAX_PRECONNECT_PER_SOURCE = 1`, **one host cannot hold
+more than one pending socket by design**, so it cannot fill the pool. Adding
+an IP alias to the host is a system network-settings change I did not make.
+The multi-source behaviour is covered exhaustively through the production
+decision function instead, and is labelled seam-verified below, not
+hardware-demonstrated. Shawn's bounded action to close it is listed at the
+end.
+
+I kept `PER_SOURCE = 1` on merit rather than loosening it for testability: it
+is the stronger bound, and a legitimate client's existing socket is
+`connected`, so it does not consume this pool.
+
+### 4. Sustained authentication flood — the honest answer
+
+**Inspection result.** Within the existing protocol, nothing can identify a
+legitimate client before credential verification: client id and username in
+CONNECT are attacker-chosen text, so reserving capacity "for the HMI's
+identifier" reserves it for whoever types that identifier. The only
+pre-verification signals are the source address, the receiving interface, and
+history. Source address is not authenticated either, but it is not free — the
+peer must complete a TCP handshake from it.
+
+**What was implemented.** A proven-source reservation: an address that
+completed a successful machine authentication within 10 minutes keeps a
+reserved share of both the pre-connect pool (1 of 3) and the KDF budget
+(3 of 8). Entries are created **only** by a successful authentication, and the
+table is deliberately separate from the LRU failure buckets so that an
+attacker cycling addresses cannot evict one. No wire change; no new credential
+exchange; no architecture change.
+
+**Exact supported guarantee.** A flood from addresses that have never
+authenticated cannot consume the whole pre-connect pool or the whole KDF
+budget; a recently authenticated client retains a share and reconnects with
+bounded delay. Measured: 16–32 s to re-authenticate under continuous flood.
+
+**Residual limitation, asserted in the suite so it cannot quietly become a
+claim** (`test_4d4_proven_source_reservation_bounds_the_flood`):
+
+- Nothing against a flood originating from or spoofing a proven address — the
+  test drives exactly that case and asserts the proven source is refused.
+- Nothing before the first successful authentication after a reboot; the
+  table is empty and the HMI competes as unproven. Every hardware reconnect
+  measured above was in precisely this state.
+- No identification of a legitimate client, at all.
+
+**Future protocol work, named and not attempted:** a pre-authentication
+challenge (TLS-PSK, or an HMAC cookie in CONNECT) is what would actually
+distinguish a legitimate client. Wire-protocol change; out of scope.
+
+**Operator-visible condition.** `status/core/auth_throttle` is published
+`ACTIVE`/`CLEAR` on transition, and each transition is logged so it is visible
+on a production image with no diagnostic menu.
+
+Two corrections were made to this condition after watching it on hardware:
+
+1. It first keyed only on the global KDF budget. Against a single-address
+   CONNECT flood the **per-source failure lockout fires long before the
+   budget does** — 1803 of 1840 attempts were refused by the lockout and the
+   global bucket never engaged, so the published condition stayed `CLEAR`
+   through a sustained flood. It now covers every reason authentication is
+   being refused.
+2. It then asserted when the budget was merely *spent*, producing the log line
+   `THROTTLED: 0 refusals` — which is not a throttle. Five legitimate
+   reconnects reach that state on an ordinary power-up storm. It now keys on
+   refusals **within the current window**.
+
+Final hardware evidence, production image:
+
+```
+W (13876) machine authentication THROTTLED: 6 refusals (6 by the KDF budget,
+          0 sources in lockout); clears in 2 s
+I (15878) machine authentication throttle cleared
+W (17881) machine authentication THROTTLED: 32 refusals (32 by the KDF budget,
+          1 sources in lockout); clears in 28 s
+I (46016) machine authentication throttle cleared
+```
+
+**Also corrected:** the comment in `argus_machine_service_authenticate()`
+claimed the global bound was consulted "before any per-source decision". It is
+not — the per-source failure lockout runs first. The comment now states the
+real order and why it is acceptable.
+
+### 5. AP/STA ambiguity published as an authoritative network fault
+
+`status/core/network_fault` (`NONE` | `AP_STA_ADDRESS_CONFLICT`) and
+`status/core/network_fault_action` are published on transition, retained, and
+logged. Clearing is deterministic and requires **positive evidence** — a
+classification observing both interfaces valid and non-overlapping — never a
+timer and never an interface merely going away. Ambiguous log lines are
+rate-limited to one per minute; the fault is a state, not an event, and the
+state is published.
+
+Nothing suspect survives a clear: while the fault holds, ambiguous sockets are
+refused admission, so there is no session admitted under ambiguity to keep
+distrusting afterwards.
+
+**Demonstrated end to end on hardware through the production seam** — the
+same `argus_net_mgr_classify_interface()` the broker and HTTP server call,
+the same 1 Hz publisher, and the retained value read back from the broker:
+
+```
+1. cleared            : latch=CLEAR published=NONE
+2. overlap            : classify=AMBIGUOUS (SOFTAP would be a defect) latch=SET
+3. published          : AP_STA_ADDRESS_CONFLICT
+   action             : AP and station interfaces report the same IP address...
+   AP-only admission for an ambiguous socket: REFUSED
+4. persists           : latch=SET (interface down is not evidence of health)
+5. cleared by evidence: latch=CLEAR published=NONE
+```
+
+The published state agreed with the classifier latch at every step. A genuine
+AP/STA collision needs a rogue DHCP server on the plant segment, which the
+bench does not have, so the addresses are fed to the production classifier by
+a diagnostic-only console action rather than staged on the network — stated
+plainly rather than presented as a live network event.
+
+### 6. Retained-store overflow — found on hardware, not in review
+
+Adding three retained topics pushed the retained store past its 32-slot
+capacity. The broker did the right thing (`retained capacity exhausted;
+refusing to evict authoritative state`) but the consequence was silent:
+`network_fault_action` and `auth_throttle` never became retained, so a client
+subscribing later would not have learned about a live fault.
+
+At 32 the store was **already only one slot clear of the 31 retained topics
+the contract publishes** — a latent fragility that predates this pass.
+
+Fixed: capacity 32 → 40, `ARGUS_MQTT_RETAINED_TOPICS_REQUIRED = 34` declared
+in the contract header, a static assertion tying them together, live
+occupancy exposed via `argus_mqtt_broker_get_capacity()`, and a suite check
+that the store keeps headroom. Hardware confirms **34 / 40**.
+
+### 7. Production image — boot-looped on first flash
+
+`sdkconfig.production.defaults` documented the build as
+`-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.production.defaults"`.
+`sdkconfig.defaults` carries no credentials — Shawn's Wi-Fi passphrase, AP
+secret and machine secret live only in the gitignored generated `sdkconfig`.
+So the production image was built with an empty `CONFIG_ARGUS_SERVICE_AP_PASS`
+and aborted in `app_main` at the AP-secret bootstrap:
+
+```
+ESP_ERROR_CHECK failed: esp_err_t 0x102 (ESP_ERR_INVALID_ARG)
+file: "./main/app_main.c" line 1012   expression: ap_bootstrap_err
+```
+
+Continuous boot loop, no network, no serial application output. The §-3 pass
+built this image and proved its exclusions from the link map, but never
+flashed it, so nothing caught it. The `.gitignore` comment asserting that
+`sdkconfig.production` "inherits everything in the gitignored sdkconfig
+chain" was simply false.
+
+Corrected to chain the **live** config: `-DSDKCONFIG_DEFAULTS="sdkconfig;
+sdkconfig.production.defaults"`. Later entries override earlier ones, so the
+production overlay still wins for `CONFIG_ARGUS_DIAGNOSTIC_MODE=n`, and every
+credential stays in the single gitignored file it already lived in. No secret
+was read, copied, printed or logged at any point.
+
+### Build results — both configurations, zero warnings
+
+| | `.bss` | `.data` | Image | `argus_tests` refs | `4a_run_all` | `bss.topics` | diagnostic task |
+|---|---|---|---|---|---|---|---|
+| Diagnostic | 84,040 | 20,156 | 1,285,473 | **2218** | 6 | 1 | 3 |
+| Production | 74,312 | 20,140 | 1,053,641 | **0** | 0 | 0 | 0 |
+
+`.bss.s_broker` is 0x72f0 (29,424 B) in both.
+
+### Hardware — production image, flashed to COM5
+
+Services on boot: MQTT broker listening, HTTP server, Wi-Fi driver, SoftAP,
+network manager, MQTT runtime — all present. Diagnostic surface absent:
+0 menu banners, 0 test-suite banners, 0 capacity reports.
+
+| Run | Load | HMI re-auth | Refusals | Faults |
+|---|---|---|---|---|
+| prod2 | mixed flood, 407 sockets / 208 CONNECTs | 32.1 s | 793 pre-connect | none |
+| prod3 | CONNECT flood, 1196 attempts | 22.7 s | 5 throttle assertions | none |
+| prod4 | CONNECT flood, 1088 attempts | 19.9 s | 5 assertions / 4 clears | none |
+
+Every run: 0 panics, 0 watchdogs, 0 `NO_MEM`, 0 task-creation failures,
+0 pool-invariant violations, 0 count underflows; HTTP answered throughout.
+
+### Hardware — diagnostic image, three suite runs under load
+
+HMI connected and authenticated for all three (`Broker Clients STEADY 1 → 1`,
+`AP Stations STEADY 1 → 1`, `Task Count UNCHANGED 24`), every isolation field
+clean (`Authority Generation UNCHANGED Gen 3`, `Network State UNCHANGED
+AP_DISCOVERABLE`, `Machine State UNCHANGED UNLOCKED`).
+
+| Run | Distinct | Executed | Passed | Failed | Heap before | Heap after | Largest block | Diagnostic stack free |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 341 | 1023 | 1023 | 0 | 56,480 | 56,960 | 31,744 | 3,696 / 16,384 |
+| 2 | 341 | 1023 | 1023 | 0 | 58,132 | 57,076 | 31,744 | 3,840 / 16,384 |
+| 3 | 341 | 1023 | 1023 | 0 | 58,096 | 55,472 | 29,696 | 3,844 / 16,384 |
+
+An earlier run in this pass, before the retained-store fix, also returned
+1023/1023 — the overflow was a warning-level failure invisible to the suite,
+which is why the suite now checks retained-store headroom.
+
+### Evidence classification — derived vs seam-verified vs hardware-demonstrated
+
+**Hardware-demonstrated:** per-connection heap and task cost; client task
+stack low-water; per-source pre-connect cap; reserved-share refusal;
+sustained-flood survival with HMI reconnect on both images; throttle
+assertion, breakdown and clearing; AP/STA fault assertion, persistence,
+publication and evidence-based clearing; retained-store occupancy; production
+service startup and diagnostic-surface absence; no leaks after load.
+
+**Seam-verified only (production functions, not live traffic):** the
+multi-source pre-connect case and the reserved share across two or more
+source addresses; the authenticated-pool refusal of one client beyond the
+limit (CONNACK 0x03); the proven-source residual limitations.
+
+**Derived, not observed:** that `MAX_CLIENTS = 3` and `MAX_PRECONNECT = 3`
+can be occupied *simultaneously* within the production heap. The arithmetic
+is 6 × 11.8 KB ≈ 71 KB against a production free heap of roughly 80 KB at one
+client, but full occupancy was never reached, because reaching it needs three
+enrolled machine credentials.
+
+### Two items requiring Shawn — exact bounded actions
+
+Machine enrollment is reachable only through the authenticated browser
+security API (`enroll_machines` permission). I hold no portal credential and
+did not attempt to obtain one.
+
+**A. Prove 3 authenticated clients and clean refusal of the 4th.**
+1. Browser portal → Security → enroll two machines, e.g. `m-test-a`,
+   `m-test-b`, transport MQTT, interface STA, permission `view_status` only
+   (no motion, no authority). The portal shows each secret once.
+2. Run three concurrent MQTT clients (rotary HMI + the two test machines),
+   then a fourth. Expect: three connected, the fourth answered
+   **CONNACK 0x03**, `session_pool` refusal counter incremented.
+3. Console `[b]` before and after for heap, largest block, task count and
+   both pool occupancies.
+4. Revoke `m-test-a` and `m-test-b` afterwards.
+
+**B. Fill the pending pool from two or more sources.**
+Copy `flood_worker.py` to a second machine on the plant LAN and run it
+against `192.168.50.236` for 60 s while the first host also runs it, then
+reset the controller so the HMI reconnects mid-flood. Expect: pending reaches
+2 from unproven sources, the third refused with `reserved` as the reason, and
+the HMI still reconnects.
+
+Neither is a defect; both are measurements I could not take without a
+credential or a second host.
+
+### Files changed
+
+`main/argus_mqtt_broker.c/.h`, `main/argus_machine_service.c/.h`,
+`main/argus_net_mgr.c/.h`, `main/argus_mqtt_runtime.c/.h`,
+`main/argus_mqtt_contract.c/.h`, `main/app_main.c`,
+`main/argus_tests_4d4.c/.h`, `main/argus_tests_4a.c`,
+`sdkconfig.production.defaults`, `docs/PHASE_4C_MQTT_CONTRACT.md`,
+this record. HMI repository unchanged.
+
+---
+
 ## -3. Network admission and resource-budget closure (2026-07-27)
 
 Shawn's work order, acting on the §-2.2 findings. Six items; all implemented,

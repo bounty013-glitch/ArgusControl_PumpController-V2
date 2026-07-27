@@ -555,6 +555,10 @@ static void argus_diagnostic_menu_task(void *pvParameters)
             printf("[c] Clear/Reset E-STOP latch (returns to HOLDING/UNLOCKED)\n");
             printf("[r] Diagnostic RECOVERY (resets faulted state)\n");
             printf("[t] Run ALL PURE unit tests (Mock backends)\n");
+            printf("[b] Display MQTT admission pools, capacity and refusals\n");
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+            printf("[B] Exercise AP/STA conflict fault through the production seam\n");
+#endif
             printf("[k] Display sanitized security status and KDF benchmark\n");
             printf("[K] Diagnostic-only recovery cleanup and reboot\n");
             printf("[N] Network & Authority Acceptance Submenu\n");
@@ -719,6 +723,168 @@ static void argus_diagnostic_menu_task(void *pvParameters)
                        (unsigned)esp_get_free_heap_size(),
                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
                 break;
+            case 'b': {
+                /* Read-only admission and capacity report. Reports the two
+                 * pools SEPARATELY because they are separate resources; a
+                 * single "client count" is what hid the shared-array defect.
+                 *
+                 * This whole menu is diagnostic-only - it lives inside the
+                 * CONFIG_ARGUS_DIAGNOSTIC_MODE block above - so this report
+                 * is NOT reachable on a production image. Production
+                 * observability of the same conditions is the retained MQTT
+                 * status topics plus the transition log in
+                 * argus_mqtt_runtime.c, both of which exist in both builds. */
+                argus_mqtt_broker_capacity_t cap;
+                argus_machine_auth_throttle_status_t throttle;
+                argus_net_iface_conflict_status_t conflict;
+                argus_mqtt_broker_get_capacity(&cap);
+                argus_machine_service_get_throttle_status(&throttle);
+                argus_net_mgr_get_interface_conflict(&conflict);
+                printf("\n--- MQTT Admission and Capacity ---\n");
+                printf("Pending sockets    : %u / %u (unproven share %u, "
+                       "per-source %u) peak %u\n",
+                       (unsigned)cap.pending, (unsigned)cap.max_pending,
+                       (unsigned)cap.max_pending_unproven,
+                       (unsigned)cap.max_pending_per_source,
+                       (unsigned)cap.peak_pending);
+                printf("Authenticated      : %u / %u  peak %u\n",
+                       (unsigned)cap.authenticated,
+                       (unsigned)cap.max_authenticated,
+                       (unsigned)cap.peak_authenticated);
+                printf("Connection records : %u (%u bytes each)\n",
+                       (unsigned)cap.max_connections,
+                       (unsigned)cap.connection_record_bytes);
+                printf("Session records    : %u (%u bytes each)\n",
+                       (unsigned)cap.max_authenticated,
+                       (unsigned)cap.session_record_bytes);
+                printf("Broker static      : %u bytes\n",
+                       (unsigned)cap.broker_static_bytes);
+                printf("Retained values    : %u / %u\n",
+                       (unsigned)cap.retained_used,
+                       (unsigned)cap.retained_capacity);
+                printf("Client task stack  : %u bytes, worst free margin %u\n",
+                       (unsigned)cap.client_task_stack_bytes,
+                       (unsigned)cap.client_stack_min_free_bytes);
+                printf("Refusals           : pending_pool=%u per_source=%u "
+                       "reserved=%u session_pool=%u\n",
+                       (unsigned)cap.refused_pending_pool,
+                       (unsigned)cap.refused_pending_source,
+                       (unsigned)cap.refused_pending_reserved,
+                       (unsigned)cap.refused_session_pool);
+                printf("Auth throttle      : %s (spent %u/%u, unproven share "
+                       "%u, clears in %us)\n",
+                       throttle.throttle_active ? "ACTIVE" : "CLEAR",
+                       (unsigned)throttle.window_spent,
+                       (unsigned)throttle.window_burst,
+                       (unsigned)throttle.unproven_burst,
+                       (unsigned)throttle.seconds_until_clear);
+                printf("Auth refusals      : total=%u kdf_budget=%u "
+                       "locked_out_sources=%u\n",
+                       (unsigned)throttle.refusals,
+                       (unsigned)throttle.global_refusals,
+                       (unsigned)throttle.blocked_sources);
+                printf("Proven sources     : %u\n",
+                       (unsigned)throttle.proven_sources);
+                printf("Network fault      : %s (observations %u)\n",
+                       conflict.active ? "AP_STA_ADDRESS_CONFLICT" : "NONE",
+                       (unsigned)conflict.observations);
+                {
+                    /* What is actually RETAINED, read back from the broker.
+                     * A condition computed correctly but never reaching the
+                     * status path is not published, and that failure is
+                     * silent - it happened in this pass, so it is checked
+                     * here rather than assumed. */
+                    char pub_fault[40];
+                    char pub_action[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+                    char pub_throttle[24];
+                    argus_mqtt_runtime_get_published_conditions(
+                        pub_fault, sizeof(pub_fault),
+                        pub_action, sizeof(pub_action),
+                        pub_throttle, sizeof(pub_throttle));
+                    printf("Published fault    : %s\n", pub_fault);
+                    printf("Published throttle : %s\n", pub_throttle);
+                    if (conflict.active) {
+                        printf("Published action   : %s\n", pub_action);
+                    }
+                }
+                printf("Tasks              : %u   Heap free=%u "
+                       "largest_block=%u\n",
+                       (unsigned)uxTaskGetNumberOfTasks(),
+                       (unsigned)esp_get_free_heap_size(),
+                       (unsigned)heap_caps_get_largest_free_block(
+                           MALLOC_CAP_8BIT));
+                break;
+            }
+#ifdef CONFIG_ARGUS_DIAGNOSTIC_MODE
+            case 'B': {
+                /* Exercises the AP/STA conflict fault end to end THROUGH THE
+                 * PRODUCTION SEAM: the same argus_net_mgr_classify_interface()
+                 * the broker and the HTTP server call, then the same 1 Hz
+                 * runtime publication, then the retained value read back.
+                 *
+                 * Diagnostic-only, and read-only with respect to the network:
+                 * it passes addresses to the classifier, it does not
+                 * reconfigure an interface. Needed because a genuine AP/STA
+                 * address collision requires a rogue DHCP server on the plant
+                 * segment, which the bench does not have. */
+                const uint32_t ap = 0x0104A8C0U;   /* 192.168.4.1 */
+                const uint32_t sta = 0x3A32A8C0U;  /* 192.168.50.58 */
+                char fault[40];
+                char action[ARGUS_MQTT_BROKER_PAYLOAD_CAP];
+                char throttle[24];
+                printf("\n--- AP/STA conflict fault, production seam ---\n");
+                argus_net_mgr_clear_interface_conflict();
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                argus_mqtt_runtime_get_published_conditions(
+                    fault, sizeof(fault), action, sizeof(action),
+                    throttle, sizeof(throttle));
+                printf("1. cleared        : latch=%s published=%s\n",
+                       argus_net_mgr_interface_conflict_detected() ? "SET"
+                                                                  : "CLEAR",
+                       fault);
+
+                argus_net_iface_t decided = argus_net_mgr_classify_interface(
+                    ap, true, ap, true, ap);
+                printf("2. overlap        : classify=%s (SOFTAP would be a "
+                       "defect) latch=%s\n",
+                       decided == ARGUS_NET_IFACE_AMBIGUOUS ? "AMBIGUOUS"
+                                                            : "NOT_AMBIGUOUS",
+                       argus_net_mgr_interface_conflict_detected() ? "SET"
+                                                                  : "CLEAR");
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                argus_mqtt_runtime_get_published_conditions(
+                    fault, sizeof(fault), action, sizeof(action),
+                    throttle, sizeof(throttle));
+                printf("3. published      : %s\n", fault);
+                printf("   action         : %s\n", action);
+                printf("   AP-only admission for an ambiguous socket: %s\n",
+                       decided == ARGUS_NET_IFACE_SOFTAP ? "ALLOWED (DEFECT)"
+                                                         : "REFUSED");
+
+                /* Persistence: it must NOT clear on a further ambiguous
+                 * observation, nor on an interface merely going away. */
+                (void)argus_net_mgr_classify_interface(sta, false, 0U, true,
+                                                       sta);
+                printf("4. persists       : latch=%s (interface down is not "
+                       "evidence of health)\n",
+                       argus_net_mgr_interface_conflict_detected() ? "SET"
+                                                                  : "CLEAR");
+
+                /* Valid clearing: positive evidence of a healthy config. */
+                (void)argus_net_mgr_classify_interface(sta, true, ap, true,
+                                                       sta);
+                vTaskDelay(pdMS_TO_TICKS(1500));
+                argus_mqtt_runtime_get_published_conditions(
+                    fault, sizeof(fault), action, sizeof(action),
+                    throttle, sizeof(throttle));
+                printf("5. cleared by evidence: latch=%s published=%s\n",
+                       argus_net_mgr_interface_conflict_detected() ? "SET"
+                                                                  : "CLEAR",
+                       fault);
+                argus_net_mgr_clear_interface_conflict();
+                break;
+            }
+#endif
             case 'k': {
                 argus_security_store_status_t security;
                 argus_machine_directory_status_t machines;

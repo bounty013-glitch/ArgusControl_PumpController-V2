@@ -59,6 +59,48 @@ extern "C" {
 #define ARGUS_MACHINE_AUTH_KDF_GLOBAL_BURST 8U
 #define ARGUS_MACHINE_AUTH_KDF_GLOBAL_WINDOW_US UINT64_C(10000000)
 
+// PROVEN-SOURCE RESERVATION - and precisely what it is not.
+//
+// The bucket above bounds total work but says nothing about WHO gets it. An
+// attacker that keeps the bucket empty starves every other caller equally,
+// including the rotary HMI trying to reconnect. Review asked whether bounded,
+// technically sound admission fairness is possible inside the existing
+// protocol. It is - but only weakly, and the weakness must be stated rather
+// than dressed up.
+//
+// What is available before credential verification: the source address, the
+// receiving interface, and history. Everything in MQTT CONNECT itself -
+// client id, username - is attacker-chosen text, so reserving capacity for
+// "the HMI's identifier" reserves it for whoever types that identifier.
+// Source address is not authenticated either, but it is not free: the peer
+// must complete a TCP handshake from it, so it must actually receive at that
+// address on this L2 segment.
+//
+// So: an address that has completed a SUCCESSFUL machine authentication
+// within _PROVEN_TTL_US is "proven", and proven sources keep a reserved share
+// of both the KDF budget and the pre-connect socket pool. Entries can only be
+// created by a successful authentication, and the table is separate from the
+// LRU failure buckets precisely so that an attacker cycling addresses cannot
+// evict one.
+//
+// SUPPORTED GUARANTEE: a flood from addresses that have never authenticated
+// cannot consume the whole KDF budget or the whole pre-connect pool; a
+// recently authenticated client retains a share and reconnects with bounded
+// delay.
+// NOT GUARANTEED, and not claimed anywhere: anything against a flood that
+// originates from - or successfully spoofs - a proven address; anything
+// before the first successful authentication after boot, when the table is
+// empty and the HMI competes as an unproven source; any identification of a
+// legitimate client. Distinguishing one before credential verification needs
+// a pre-authentication challenge (TLS-PSK, or an HMAC cookie carried in
+// CONNECT). That is a wire-protocol change and is recorded as future work,
+// not attempted here.
+#define ARGUS_MACHINE_AUTH_PROVEN_SOURCES 2U
+#define ARGUS_MACHINE_AUTH_PROVEN_TTL_US UINT64_C(600000000)
+// Of _GLOBAL_BURST, the most that unproven sources may spend per window. The
+// remainder is reachable only by proven sources.
+#define ARGUS_MACHINE_AUTH_KDF_UNPROVEN_BURST 5U
+
 typedef struct {
     char display_name[ARGUS_SECURITY_DISPLAY_MAX + 1U];
     argus_machine_client_type_t client_type;
@@ -142,8 +184,44 @@ esp_err_t argus_machine_service_revalidate(
 // the bound holds independently of source address. Not part of the
 // production call path beyond authenticate()'s own use.
 bool argus_machine_service_kdf_global_admit_for_test(
-    uint64_t now_us, uint32_t *retry_after_s);
+    uint32_t peer_key, uint64_t now_us, uint32_t *retry_after_s);
 void argus_machine_service_kdf_global_reset_for_test(void);
+
+/**
+ * @brief True when this source authenticated successfully within the TTL.
+ *
+ * Used by the MQTT broker to keep part of the pre-connect socket pool out of
+ * reach of never-authenticated sources. Read the reservation's exact
+ * guarantee - and its limits - on ARGUS_MACHINE_AUTH_PROVEN_SOURCES before
+ * relying on it for anything.
+ */
+bool argus_machine_service_source_is_proven(uint32_t peer_key);
+void argus_machine_service_mark_source_proven_for_test(
+    uint32_t peer_key, uint64_t now_us);
+void argus_machine_service_clear_proven_sources_for_test(void);
+
+/**
+ * @brief Operator-visible authentication-throttle condition.
+ *
+ * Asserted while the global KDF budget is refusing work, so a flood is a
+ * reported condition rather than an unexplained inability to connect.
+ */
+typedef struct {
+    /** Any machine authentication is currently being refused: the global KDF
+     *  budget is exhausted, or at least one source is in failure lockout. */
+    bool throttle_active;
+    uint32_t refusals;             /**< Cumulative THROTTLED outcomes. */
+    uint32_t global_refusals;      /**< Of those, refused by the KDF budget. */
+    uint32_t blocked_sources;      /**< Sources currently in failure lockout. */
+    uint32_t seconds_until_clear;  /**< 0 when not throttled. */
+    uint32_t window_spent;
+    uint32_t window_burst;
+    uint32_t unproven_burst;
+    uint32_t proven_sources;
+} argus_machine_auth_throttle_status_t;
+
+void argus_machine_service_get_throttle_status(
+    argus_machine_auth_throttle_status_t *out);
 
 bool argus_machine_service_scope_contains(
     const char *actor_scope, const char *target_scope);

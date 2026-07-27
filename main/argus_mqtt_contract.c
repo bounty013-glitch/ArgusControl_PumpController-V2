@@ -78,6 +78,18 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(status_uptime_s, "status/core/uptime_s");
     MAKE_TOPIC(status_command_session, "status/core/command_session");
     MAKE_TOPIC(status_last_accepted_sequence, "status/core/last_accepted_sequence");
+    /* Admission conditions an operator has to be able to SEE. Both were
+     * previously internal-only, so a refused AP-only login or a reconnect
+     * blocked by the authentication throttle looked like an unexplained
+     * failure of the controller. */
+    _Static_assert(ARGUS_MQTT_BROKER_RETAINED_CAPACITY >=
+                       ARGUS_MQTT_RETAINED_TOPICS_REQUIRED,
+                   "retained store cannot hold every retained contract topic; "
+                   "the broker will correctly refuse to evict authoritative "
+                   "state and the excess topics will never be retained");
+    MAKE_TOPIC(status_network_fault, "status/core/network_fault");
+    MAKE_TOPIC(status_network_fault_action, "status/core/network_fault_action");
+    MAKE_TOPIC(status_auth_throttle, "status/core/auth_throttle");
     MAKE_TOPIC(telemetry_configured_target, "telemetry/pump1/configured_target_rpm_milli");
     MAKE_TOPIC(telemetry_trajectory_target, "telemetry/pump1/trajectory_target_rpm_milli");
     MAKE_TOPIC(telemetry_applied, "telemetry/pump1/applied_rpm_milli");

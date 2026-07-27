@@ -115,7 +115,45 @@ status/core/authority_owner
 status/core/uptime_s
 status/core/command_session
 status/core/last_accepted_sequence
+status/core/network_fault
+status/core/network_fault_action
+status/core/auth_throttle
 ```
+
+**Retained-store sizing.** These retained topics are not free: each occupies
+one slot in the broker's retained store for the life of the connection. The
+count is fixed at **34** (`ARGUS_MQTT_RETAINED_TOPICS_REQUIRED`) and the store
+holds **40** (`ARGUS_MQTT_BROKER_RETAINED_CAPACITY`), tied together by a
+static assertion. At the previous value of 32 the store was already one slot
+clear of the contract, and the three admission-condition topics overflowed it
+on hardware: the broker correctly refused to evict authoritative state, and
+`network_fault_action` and `auth_throttle` simply never became retained, so a
+client subscribing afterwards would not have learned about a live fault. Add a
+retained topic and you must raise both numbers.
+
+**`status/core/network_fault`** — `NONE` | `AP_STA_ADDRESS_CONFLICT`.
+Asserted when the AP and station interfaces are observed reporting the same
+IP address, which makes every socket's interface ambiguous. While it holds,
+ambiguous sockets are refused AP-only admission and SoftAP-scoped machine
+records cannot authenticate — ambiguity never resolves to SOFTAP, which is
+the more privileged answer. Clearing is deterministic and requires POSITIVE
+evidence: a classification observing both interfaces valid and NOT
+overlapping, or an explicit operator clear. It never clears on a timer and
+never because an interface went away, and it re-asserts on the next
+overlapping observation. `status/core/network_fault_action` carries the
+operator-facing corrective action while the fault holds and is empty
+otherwise; the two are published on the same transition so they cannot
+disagree.
+
+**`status/core/auth_throttle`** — `ACTIVE` | `CLEAR`. Asserted while machine
+authentication is actually being refused, for either reason: the global KDF
+budget is denying work, or at least one source is in failure lockout. It keys
+on refusals within the current window, not on the budget merely being spent —
+five legitimate reconnects exhaust the unproven share without anything being
+denied, and asserting there would cry wolf on an ordinary power-up storm.
+
+Both are published on TRANSITION only, and each transition is also logged, so
+the conditions are visible on a production image that has no diagnostic menu.
 
 Controller-owned retained open-loop telemetry:
 
@@ -151,6 +189,78 @@ Each accepted socket receives a monotonically allocated 64-bit connection identi
 Simultaneously active duplicate MQTT client IDs are rejected deterministically.
 
 **Amended by A1.** As accepted, this paragraph stated that lease ownership uses the connection identity rather than the client ID, so that a recycled slot or repeated name could not impersonate an earlier socket. That protection is retained but re-based: **lease ownership uses the authenticated machine principal**, and the connection identity proves that principal is still on the far end of a live socket. Impersonation is prevented by authentication rather than by socket identity, which is strictly stronger — a repeated client ID never reaches lease arbitration unauthenticated. Keying solely to the connection also had an operational defect: a supervisor that dropped and reconnected was refused its own lease until the heartbeat timeout expired, opening a window in which another client could take control. See §7.
+
+## 5a. Network Admission Pools and Capacity (revised 2026-07-27)
+
+Two **physically separate** pools. The previous revision bounded them with
+separate counters while both drew from the same `clients[MAX_CLIENTS]` array,
+so filling the pending pool filled every physical record and the rotary HMI
+could not reconnect. A counter that guards a resource it does not own
+guarantees nothing.
+
+| Resource | Limit | What it is |
+|---|---|---|
+| Connection records | 6 | `MAX_CLIENTS + MAX_PRECONNECT`, 344 bytes each |
+| Authenticated sessions | 3 | Session records, 1288 bytes each — owning one **is** the authenticated capacity |
+| Pending (pre-CONNECT) sockets | 3 | Accepted, not yet authenticated |
+| — of which reachable by unproven sources | 2 | The remainder is reserved |
+| Pending per source address | 1 | One in-flight CONNECT per address |
+| CONNECT grace deadline | 3 s | Silent socket is reaped |
+
+**The sizing invariant.** `pending < MAX_PRECONNECT` is enforced before a
+record is taken and `authenticated <= MAX_CLIENTS` is enforced by session-slot
+ownership, so `in_use <= MAX_CONNECTIONS - 1`: an arrival that passes
+pre-connect admission **always** finds a free record, and a pending socket
+that completes CONNECT **always** finds authenticated capacity when fewer than
+`MAX_CLIENTS` sessions exist — whatever the other pool is doing.
+
+**Measured cost, on target, in this firmware.** One connection costs
+**≈ 11.8 KB of heap**: an 8192-byte client task stack plus ≈ 3.6 KB of lwIP
+socket state and TCB. The task stack is measured, not inherited — the worst
+free margin any client task has reached is **2504 bytes of 8192** (5688 used),
+so it is not over-provisioned and must not be cut. The broker's static
+allocation is **29,424 bytes**. `MAX_CLIENTS = 3` is what the measured budget
+supports with headroom, and covers the two roles the deployment has (rotary
+HMI, ArgusCore) plus one service tool.
+
+**There is no reserved reconnect slot, and none is claimed.** A stale
+authenticated slot is recovered by keep-alive reaping (1.5 × the client's
+declared keep-alive, MQTT 3.1.1 §3.1.2.10), not by holding capacity in
+reserve.
+
+**Refusal is clean and named.** A CONNECT that authenticates successfully but
+finds every session slot held is answered with **CONNACK 0x03** (server
+unavailable) and counted, rather than being admitted into a pool that cannot
+hold it or failing an allocation somewhere unrelated.
+
+### Proven-source reservation — exact guarantee and residual limitation
+
+Part of the pending pool and part of the KDF budget are reserved for source
+addresses that have completed a **successful machine authentication** within
+10 minutes. Only a successful authentication creates an entry, and the table
+is separate from the LRU failure buckets precisely so that an attacker
+cycling addresses cannot evict one.
+
+**Supported guarantee.** A flood from addresses that have never authenticated
+cannot consume the whole pre-connect pool or the whole KDF budget. A recently
+authenticated client retains a share and reconnects with bounded delay.
+
+**Residual limitation — not guaranteed, and not claimed anywhere:**
+
+- Nothing against a flood that originates from, or successfully spoofs, a
+  proven address. The reservation keys on an **unauthenticated** source
+  address; it does not identify anyone.
+- Nothing before the first successful authentication after a reboot, when the
+  table is empty and even the rotary HMI competes as an unproven source.
+- No identification of a legitimate client. Nothing in MQTT CONNECT can
+  distinguish one before credential verification: client id and username are
+  attacker-chosen text.
+
+**Future protocol work, deliberately not attempted here.** Distinguishing a
+legitimate client before credential verification requires a
+pre-authentication challenge — TLS-PSK, or an HMAC cookie carried in CONNECT.
+That is a wire-protocol change affecting every client and is out of scope for
+an admission-hardening pass.
 
 ## 6. Broker Command Session
 

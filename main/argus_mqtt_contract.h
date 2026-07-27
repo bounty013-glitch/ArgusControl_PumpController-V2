@@ -101,6 +101,9 @@ typedef struct {
     char status_uptime_s[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_command_session[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_last_accepted_sequence[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_network_fault[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_network_fault_action[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_auth_throttle[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char telemetry_configured_target[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char telemetry_trajectory_target[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char telemetry_applied[ARGUS_MQTT_BROKER_TOPIC_CAP];
@@ -109,6 +112,19 @@ typedef struct {
     char telemetry_feedback_available[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char command_result[ARGUS_MQTT_BROKER_TOPIC_CAP];
 } argus_mqtt_topics_t;
+
+/* Distinct topics the runtime publishes with retain=true. Each one occupies a
+ * slot in the broker's retained store for the life of the connection, so that
+ * store must be sized from this number and not guessed - see the note on
+ * ARGUS_MQTT_BROKER_RETAINED_CAPACITY. Update BOTH when adding a retained
+ * topic; the static assertion in argus_mqtt_contract.c then catches an
+ * overflow at compile time, which is where it belongs and not on a bench
+ * under load, which is where this one was found.
+ *
+ *   4 metadata + 1 command_session + 6 authority + 7 state + 7 status
+ * + 6 telemetry + 3 admission conditions = 34
+ */
+#define ARGUS_MQTT_RETAINED_TOPICS_REQUIRED 34U
 
 typedef struct {
     char session[ARGUS_MQTT_SESSION_HEX_LEN + 1U];
