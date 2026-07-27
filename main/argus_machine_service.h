@@ -164,6 +164,42 @@ esp_err_t argus_machine_service_rotate(
     argus_machine_credential_once_t *out);
 esp_err_t argus_machine_service_set_enabled(
     const argus_principal_t *actor, const char *identifier, bool enabled);
+
+/**
+ * @brief Replace an enrolled machine's permission set in place.
+ *
+ * Added 2026-07-27. Until now the only way to change what a deployed machine
+ * may do was to delete it and enrol a replacement, which mints a new secret
+ * and therefore requires physically re-provisioning the device. For a rotary
+ * HMI on a skid that means a trip to the panel to change one capability -
+ * the operation a real installation needs most and could least afford.
+ *
+ * Deliberately NOT a new authorization model. It reuses the rules enrolment
+ * already applies, because granting a capability to an existing machine is
+ * the same act as granting it at enrolment:
+ *   - the actor must hold ENROLL_MACHINES (granting is at least as
+ *     privileged as creating);
+ *   - the actor may not grant what it cannot delegate;
+ *   - a machine may never hold an administrative permission;
+ *   - the actor's scope must contain the target's.
+ *
+ * @p permissions REPLACES the existing set rather than merging into it, so a
+ * caller that means "add motion" must send the full intended set. Merge
+ * semantics would make removal impossible to express and would turn a
+ * dropped field into a silent grant.
+ *
+ * Bumps principal_revision, which is what invalidates any live session the
+ * machine currently holds - argus_machine_service_revalidate() compares it on
+ * every publish and subscribe, so both a grant and a REDUCTION take effect on
+ * an already-connected client immediately rather than at its next reconnect.
+ *
+ * @return ESP_OK, ESP_ERR_NOT_ALLOWED (authorization or delegation refused),
+ *         ESP_ERR_NOT_FOUND, or ESP_ERR_INVALID_ARG.
+ */
+esp_err_t argus_machine_service_set_permissions(
+    const argus_principal_t *actor, const char *identifier,
+    argus_permission_set_t permissions,
+    argus_permission_set_t *out_previous);
 esp_err_t argus_machine_service_revoke(
     const argus_principal_t *actor, const char *identifier);
 esp_err_t argus_machine_service_delete(

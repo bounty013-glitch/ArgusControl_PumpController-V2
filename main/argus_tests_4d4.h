@@ -1,4 +1,4 @@
-#ifndef ARGUS_TESTS_4D4_H
+﻿#ifndef ARGUS_TESTS_4D4_H
 #define ARGUS_TESTS_4D4_H
 
 #include "esp_err.h"
@@ -33,6 +33,8 @@ esp_err_t test_4d4_invalidated_connection_is_inert(void);
 esp_err_t test_4d4_iface_ambiguity_fails_closed(void);
 esp_err_t test_4d4_kdf_global_bound_is_source_independent(void);
 esp_err_t test_4d4_admission_budgets_are_self_consistent(void);
+esp_err_t test_4d4_permission_edit_cannot_escalate(void);
+esp_err_t test_4d4_permission_edit_invalidates_live_sessions(void);
 esp_err_t test_4d4_proven_source_reservation_bounds_the_flood(void);
 esp_err_t test_4d4_pending_pool_cannot_starve_authenticated(void);
 esp_err_t test_4d4_authenticated_pool_refuses_beyond_limit(void);

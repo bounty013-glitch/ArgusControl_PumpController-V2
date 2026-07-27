@@ -402,6 +402,72 @@ esp_err_t argus_machine_service_set_enabled(
     return err;
 }
 
+esp_err_t argus_machine_service_set_permissions(
+    const argus_principal_t *actor, const char *identifier,
+    argus_permission_set_t permissions,
+    argus_permission_set_t *out_previous)
+{
+    if (out_previous != NULL) *out_previous = 0U;
+    // Undefined bits are refused before anything is read. A permission set
+    // carrying a bit this firmware does not define cannot be authorised
+    // against, so admitting it would store a capability nobody can reason
+    // about.
+    if ((permissions & ~ARGUS_PERMISSION_DEFINED_MASK) != 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    argus_machine_directory_snapshot_t *snapshot = NULL;
+    size_t index;
+    // Gated on ENROLL_MACHINES, not REVOKE_MACHINES: this operation GRANTS,
+    // and granting is at least as privileged as creating. REVOKE_MACHINES is
+    // the weaker "can take away" capability and must not become a route to
+    // handing out MOTION.
+    esp_err_t err = mutable_target(
+        actor, identifier, ARGUS_PERMISSION_ENROLL_MACHINES,
+        &snapshot, &index);
+    if (err != ESP_OK) return err;
+    argus_security_machine_record_t *record =
+        &snapshot->payload.machines[index];
+
+    // The same rule enrolment applies, against the target's OWN scope rather
+    // than a caller-supplied one - the record already exists, so its scope is
+    // a fact, not a request. actor_can_manage() carries the delegation guard
+    // (nothing may be granted that the actor cannot delegate) and the
+    // machine-permission ceiling (no administrative permission may ever land
+    // on a machine).
+    if (!actor_can_manage(actor, ARGUS_PERMISSION_ENROLL_MACHINES,
+                          record->scope, permissions)) {
+        snapshot_free(snapshot);
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    // A revoked record is not a permission-management target. Re-arming one
+    // by editing its permissions would resurrect an identity an operator
+    // deliberately retired.
+    if (record->revoked != 0U) {
+        snapshot_free(snapshot);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (out_previous != NULL) *out_previous = record->permissions;
+
+    // REPLACES rather than merges. Merge semantics would make removal
+    // inexpressible and would turn an omitted field into a silent grant.
+    record->permissions = permissions;
+    // The revision bump is what makes this take effect on a LIVE session:
+    // revalidate() compares it on every publish and subscribe, so a
+    // reduction bites exactly as fast as a grant. The credential is
+    // untouched - the device keeps its secret and needs no re-provisioning,
+    // which is the entire point of this operation existing.
+    record->principal_revision++;
+    if (record->principal_revision == 0U) record->principal_revision = 1U;
+    record->record_security_epoch = snapshot->generation + 1U;
+    err = argus_machine_directory_commit(
+        &snapshot->payload, snapshot->generation);
+    snapshot_free(snapshot);
+    return err;
+}
+
 esp_err_t argus_machine_service_revoke(
     const argus_principal_t *actor, const char *identifier)
 {

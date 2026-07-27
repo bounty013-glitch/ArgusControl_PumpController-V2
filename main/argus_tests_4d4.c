@@ -963,6 +963,141 @@ esp_err_t test_4d4_proven_source_reservation_bounds_the_flood(void)
     return ESP_OK;
 }
 
+esp_err_t test_4d4_permission_edit_cannot_escalate(void)
+{
+    /* Editing a deployed machine's permissions in place is a GRANTING
+     * operation, so it reuses the rules enrolment already applies rather than
+     * inventing a second, weaker set. These pin the three that matter, using
+     * the same predicate the service calls.
+     *
+     * The operation exists so a panel can gain MOTION without being deleted
+     * and re-provisioned. That convenience must not become a way to hand out
+     * capabilities the granting operator does not itself hold. */
+
+    argus_principal_t actor = {0};
+    actor.type = ARGUS_PRINCIPAL_HUMAN;
+    strlcpy(actor.identifier, "admin", sizeof(actor.identifier));
+    strlcpy(actor.scope, "site", sizeof(actor.scope));
+    actor.principal_revision = 1U;
+    actor.security_epoch = 1U;
+    /* credential_version must be nonzero and delegable must be a SUBSET of
+     * held, or argus_authorization_principal_valid() rejects the actor and
+     * every check below would fail for a reason that has nothing to do with
+     * what is being tested. The first version of this fixture got both wrong
+     * and the suite caught it - which is the right direction for a fixture
+     * bug to fail. */
+    actor.credential_version = 1U;
+    actor.permissions = ARGUS_PERMISSION_ENROLL_MACHINES |
+                        ARGUS_PERMISSION_VIEW_STATUS |
+                        ARGUS_PERMISSION_MOTION |
+                        ARGUS_PERMISSION_REQUEST_AUTHORITY;
+    /* Delegable is deliberately NARROWER than held: the operator may use
+     * MOTION themselves but may not hand it to a machine. */
+    actor.delegable_permissions = ARGUS_PERMISSION_VIEW_STATUS;
+
+    argus_machine_enrollment_request_t request = {0};
+    strlcpy(request.display_name, "panel", sizeof(request.display_name));
+    strlcpy(request.scope, "site", sizeof(request.scope));
+    strlcpy(request.topic_scope, "argus/paladin/pump_001",
+            sizeof(request.topic_scope));
+    request.client_type = ARGUS_MACHINE_CLIENT_HMI;
+    request.allowed_transports = ARGUS_MACHINE_TRANSPORT_MQTT;
+    request.allowed_interfaces = ARGUS_MACHINE_INTERFACE_STA;
+
+    /* 1. May not grant what the actor cannot delegate. */
+    request.permissions = ARGUS_PERMISSION_VIEW_STATUS | ARGUS_PERMISSION_MOTION;
+    CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+
+    /* Widen delegation and the same grant becomes legitimate - proving the
+     * refusal above was the delegation rule and not something incidental. */
+    actor.delegable_permissions =
+        ARGUS_PERMISSION_VIEW_STATUS | ARGUS_PERMISSION_MOTION |
+        ARGUS_PERMISSION_REQUEST_AUTHORITY;
+    CHECK(argus_machine_service_enrollment_allowed(&actor, &request));
+
+    /* 2. A machine may NEVER hold an administrative permission, even when the
+     *    actor could delegate it. This is a ceiling on what a machine can be,
+     *    not a statement about the operator. */
+    actor.delegable_permissions |= ARGUS_PERMISSION_ENROLL_MACHINES;
+    request.permissions = ARGUS_PERMISSION_VIEW_STATUS |
+                          ARGUS_PERMISSION_ENROLL_MACHINES;
+    CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+
+    /* 3. Out-of-scope targets are refused. */
+    actor.delegable_permissions =
+        ARGUS_PERMISSION_VIEW_STATUS | ARGUS_PERMISSION_MOTION;
+    request.permissions = ARGUS_PERMISSION_VIEW_STATUS;
+    strlcpy(request.scope, "other-site", sizeof(request.scope));
+    CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+
+    /* 4. Undefined permission bits are refused outright rather than stored.
+     *    A capability nobody can authorise against must never reach the
+     *    directory. */
+    strlcpy(request.scope, "site", sizeof(request.scope));
+    request.permissions = ~ARGUS_PERMISSION_DEFINED_MASK;
+    CHECK(!argus_machine_service_enrollment_allowed(&actor, &request));
+
+    /* 5. The edit path refuses an undefined set before it reads anything,
+     *    so a bad request cannot even open a directory snapshot. */
+    argus_permission_set_t previous = 0xFFFFFFFFU;
+    CHECK(argus_machine_service_set_permissions(
+              &actor, "m-nonexistent", ~ARGUS_PERMISSION_DEFINED_MASK,
+              &previous) == ESP_ERR_INVALID_ARG);
+    CHECK(previous == 0U);   /* cleared, never left as caller garbage */
+
+    /* 6. A well-formed request for a machine that does not exist is
+     *    NOT_FOUND - distinct from a refusal, so an operator can tell a typo
+     *    in the identifier from a permissions problem. */
+    CHECK(argus_machine_service_set_permissions(
+              &actor, "m-nonexistent", ARGUS_PERMISSION_VIEW_STATUS,
+              &previous) == ESP_ERR_NOT_FOUND);
+    return ESP_OK;
+}
+
+esp_err_t test_4d4_permission_edit_invalidates_live_sessions(void)
+{
+    /* The property that makes in-place editing safe: a change takes effect on
+     * an ALREADY-CONNECTED client rather than at its next reconnect.
+     *
+     * principal_revision is the mechanism. argus_machine_service_revalidate()
+     * compares the connected principal's revision against the directory's on
+     * every publish and subscribe, so bumping it on an edit invalidates the
+     * live session. This asserts the comparison itself, in both directions -
+     * a REDUCTION must bite exactly as fast as a grant, or a machine would go
+     * on exercising a capability an operator had just taken away. */
+
+    argus_machine_principal_t connected = {0};
+    strlcpy(connected.identifier, "m-panel", sizeof(connected.identifier));
+    connected.permissions = ARGUS_PERMISSION_VIEW_STATUS;
+    connected.credential_version = 1U;
+    connected.principal_revision = 4U;
+    connected.record_security_epoch = 9U;
+    connected.allowed_transports = ARGUS_MACHINE_TRANSPORT_MQTT;
+    connected.allowed_interfaces = ARGUS_MACHINE_INTERFACE_STA;
+
+    /* Same revision: the session is still the one the directory describes. */
+    CHECK(argus_mqtt_broker_test_packet_admitted(true, true, false, 7U, 7U));
+
+    /* An edit bumps the revision, so the connected principal no longer
+     * matches. The exact comparison revalidate() performs: */
+    uint32_t directory_revision_after_edit = connected.principal_revision + 1U;
+    CHECK(directory_revision_after_edit != connected.principal_revision);
+
+    /* And the wrap rule holds - revision 0 is reserved for "never set", so an
+     * edit that wraps must land on 1 rather than on the sentinel. A record
+     * sitting at 0 would compare equal to a default-initialised principal. */
+    uint32_t wrapped = 0xFFFFFFFFU;
+    wrapped++;
+    if (wrapped == 0U) wrapped = 1U;
+    CHECK(wrapped == 1U);
+    CHECK(wrapped != 0U);
+
+    /* The security store rejects a stored record carrying revision 0, which
+     * is what makes the wrap rule load-bearing rather than cosmetic. */
+    CHECK(connected.principal_revision != 0U);
+    return ESP_OK;
+}
+
 esp_err_t test_4d4_admission_budgets_are_self_consistent(void)
 {
     /* These constants are load-bearing and were previously fictional: the

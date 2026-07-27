@@ -1492,7 +1492,29 @@ static esp_err_t machine_action_post(httpd_req_t *req)
             root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) &&
         string_field(root, "action", &action, 16U, false);
     bool rotation = valid && strcmp(action, "rotate") == 0;
-    if (rotation &&
+    bool set_permissions = valid && strcmp(action, "set_permissions") == 0;
+    argus_permission_set_t requested_permissions = 0U;
+    if (set_permissions &&
+        !permission_array(cJSON_GetObjectItemCaseSensitive(root, "permissions"),
+                          &requested_permissions)) {
+        // An unrecognised or duplicated permission name fails the WHOLE
+        // request rather than granting a subset. A partial grant that looked
+        // like a success is the failure this endpoint must not have.
+        cJSON_Delete(root);
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_permissions\"}");
+    }
+    // Recent re-authentication is required for BOTH minting a secret and
+    // changing what a machine may do. For rotation the reason is that a
+    // credential is being issued. For a permission change the reason Shawn
+    // gave is better and is the one recorded here: it is a confirmation
+    // step, not an access control. Granting MOTION is the difference between
+    // a panel that watches a pump and a panel that can move one, and the
+    // expensive mistake is the accidental click on the wrong row - not an
+    // attacker who already holds an administrative session.
+    if ((rotation || set_permissions) &&
         !argus_session_manager_recently_reauthenticated(
             security.session_index)) {
         cJSON_Delete(root);
@@ -1516,7 +1538,8 @@ static esp_err_t machine_action_post(httpd_req_t *req)
     }
     cJSON_Delete(root);
     if (!valid ||
-        (!rotation && strcmp(action_copy, "enable") != 0 &&
+        (!rotation && !set_permissions &&
+         strcmp(action_copy, "enable") != 0 &&
          strcmp(action_copy, "disable") != 0 &&
          strcmp(action_copy, "revoke") != 0 &&
          strcmp(action_copy, "delete") != 0)) {
@@ -1525,7 +1548,11 @@ static esp_err_t machine_action_post(httpd_req_t *req)
             req, "400 Bad Request",
             "{\"ok\":false,\"error\":\"invalid_request\"}");
     }
-    argus_permission_set_t required = rotation
+    // set_permissions GRANTS, so it needs the enrolment capability rather
+    // than the weaker revoke capability - "can take away" must not become a
+    // route to handing out MOTION. The service enforces this again; both
+    // checks are deliberate.
+    argus_permission_set_t required = (rotation || set_permissions)
         ? ARGUS_PERMISSION_ENROLL_MACHINES
         : ARGUS_PERMISSION_REVOKE_MACHINES;
     if (argus_authorization_require(&security.principal, required) !=
@@ -1537,8 +1564,22 @@ static esp_err_t machine_action_post(httpd_req_t *req)
     }
 
     argus_security_audit_mutation_t mutation;
+    // For a permission change the bare verb is not a useful audit record:
+    // "set_permissions" cannot answer "when did this panel get MOTION". The
+    // audit therefore carries the REQUESTED set as hex. The previous set is
+    // returned by the service and echoed in the response, because it is not
+    // knowable here - the audit opens before the mutation reads the record,
+    // and reading the directory twice to pre-fetch it would race the commit.
+    char audit_action[17];
+    argus_permission_set_t previous_permissions = 0U;
+    if (set_permissions) {
+        snprintf(audit_action, sizeof(audit_action), "perm:%08lx",
+                 (unsigned long)requested_permissions);
+    } else {
+        strlcpy(audit_action, action_copy, sizeof(audit_action));
+    }
     esp_err_t err = begin_admin_audit(
-        &security, event, id_copy, action_copy, &mutation);
+        &security, event, id_copy, audit_action, &mutation);
     argus_machine_credential_once_t credential = {0};
     argus_security_http_machine_action_decision_t decision = {0};
     if (err == ESP_OK) {
@@ -1555,6 +1596,10 @@ static esp_err_t machine_action_post(httpd_req_t *req)
                    strcmp(action_copy, "disable") == 0) {
             mutation_error = argus_machine_service_set_enabled(
                 &security.principal, id_copy, false);
+        } else if (mutation_error == ESP_OK && set_permissions) {
+            mutation_error = argus_machine_service_set_permissions(
+                &security.principal, id_copy, requested_permissions,
+                &previous_permissions);
         } else if (mutation_error == ESP_OK &&
                    strcmp(action_copy, "revoke") == 0) {
             mutation_error = argus_machine_service_revoke(
@@ -1598,6 +1643,21 @@ static esp_err_t machine_action_post(httpd_req_t *req)
         return response;
     }
     memset(&actor, 0, sizeof(actor));
+    if (set_permissions) {
+        // Echo BOTH sets. The operator's confirmation is then the resulting
+        // state rather than their own intent - which is the whole reason
+        // this endpoint exists in a form an operator drives by hand.
+        char body[96];
+        int written = snprintf(
+            body, sizeof(body),
+            "{\"ok\":true,\"previous_permissions\":\"%08lx\","
+            "\"permissions\":\"%08lx\"}",
+            (unsigned long)previous_permissions,
+            (unsigned long)requested_permissions);
+        if (written > 0 && (size_t)written < sizeof(body)) {
+            return send_json(req, "200 OK", body);
+        }
+    }
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 

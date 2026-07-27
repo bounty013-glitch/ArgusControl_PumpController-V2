@@ -1941,11 +1941,32 @@ esp_err_t test_4c_seam_decode_bounds_and_arguments(void)
               oversize, sizeof(oversize), false, &out) ==
           ARGUS_MQTT_DECODE_TOO_LARGE);
 
-    // Inside the contract ceiling but past the transport buffer: still refused,
-    // and refused as TOO_LARGE rather than being silently truncated.
-    CHECK(ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX > ARGUS_MQTT_BROKER_PAYLOAD_CAP);
+    // The contract ceiling now sits AT OR BELOW the transport buffer, and
+    // that ordering is the point rather than an accident.
+    //
+    // This assertion was inverted (MAX > CAP) and became false when the
+    // authority payload ceiling was corrected 512 -> 384, because 384 is the
+    // limit that is actually enforceable: the broker drops any PUBLISH whose
+    // payload reaches ARGUS_MQTT_BROKER_PAYLOAD_CAP (385) before
+    // authentication, policy or any application callback runs, so a 385-512
+    // byte request could never have reached the decoder to be told it was
+    // too large. The old assertion encoded the fiction; this one encodes the
+    // enforceable relationship.
+    //
+    // What it guarantees: there is no size a peer can send that the decoder
+    // would ACCEPT but the transport could not carry. Nothing can be
+    // truncated into validity.
+    CHECK(ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX <= ARGUS_MQTT_BROKER_PAYLOAD_CAP);
+    // A payload at the transport cap is past the contract ceiling, and is
+    // refused as TOO_LARGE rather than silently truncated. Unchanged by the
+    // correction above, and still the behaviour that matters.
     CHECK(argus_mqtt_decode_authority_request(
               oversize, ARGUS_MQTT_BROKER_PAYLOAD_CAP, false, &out) ==
+          ARGUS_MQTT_DECODE_TOO_LARGE);
+    // And one byte past the ceiling is refused too, so the boundary itself is
+    // pinned rather than only a comfortably oversized value.
+    CHECK(argus_mqtt_decode_authority_request(
+              oversize, ARGUS_MQTT_AUTHORITY_PAYLOAD_MAX + 1U, false, &out) ==
           ARGUS_MQTT_DECODE_TOO_LARGE);
 
     // An embedded NUL is refused rather than treated as a terminator.
