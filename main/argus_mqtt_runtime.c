@@ -274,9 +274,47 @@ static uint8_t commissioned_authority_profile(void)
 // True while the bounded startup window for ArgusCore is still open. Only
 // meaningful under ARGUSCORE_PREFERRED; it is what keeps a fast-booting panel
 // view-only until the supervisor has had its chance.
+// Anchored to the moment acquisition became operationally possible - the
+// broker accepting connections - NOT to raw MCU uptime.
+//
+// Measuring from uptime was wrong in a way that defeats the window's purpose:
+// broker and authority-service startup take seconds, and any of that time was
+// silently consumed before a supervisor could physically send a request. A
+// slow start could have burned the whole window before the first request was
+// even possible, handing control to the local fallback for a reason that has
+// nothing to do with ArgusCore being absent.
+//
+// Zero means "not yet ready", and the window is treated as OPEN in that
+// state: before acquisition is possible, nobody may acquire, which fails
+// closed toward the commissioned preference rather than toward the fallback.
+static uint64_t s_authority_ready_ms;
+
+void argus_mqtt_runtime_mark_authority_ready(void)
+{
+    // Only on a transition into readiness with no owner. A broker restart
+    // while a valid owner and lease exist must NOT silently reset authority
+    // or hand another principal a fresh window.
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    bool owned = (s_runtime.session.lease_machine_id[0] != '\0' &&
+                  s_runtime.session.link == ARGUS_MQTT_LINK_ONLINE);
+    if (!owned) {
+        s_authority_ready_ms = now_ms();
+        ESP_LOGI(TAG, "authority acquisition window opened (%u ms)",
+                 (unsigned)ARGUS_MQTT_CORE_ACQUISITION_WINDOW_MS);
+    } else {
+        ESP_LOGI(TAG, "authority service ready; existing owner retained, window not reset");
+    }
+    xSemaphoreGive(s_runtime.mutex);
+}
+
 static bool core_acquisition_window_open(void)
 {
-    return now_ms() < ARGUS_MQTT_CORE_ACQUISITION_WINDOW_MS;
+    uint64_t anchor;
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    anchor = s_authority_ready_ms;
+    xSemaphoreGive(s_runtime.mutex);
+    if (anchor == 0U) return true;   // not ready yet: nobody acquires
+    return (now_ms() - anchor) < ARGUS_MQTT_CORE_ACQUISITION_WINDOW_MS;
 }
 
 static const char *authority_result_reason(argus_mqtt_authority_result_t r)
@@ -758,6 +796,8 @@ void argus_mqtt_runtime_get_broker_config(uint16_t port,
 
 esp_err_t argus_mqtt_runtime_broker_started(void)
 {
+    // Anchor the acquisition window here, not at MCU boot.
+    argus_mqtt_runtime_mark_authority_ready();
     if (!s_runtime.prepared || !argus_mqtt_broker_is_running()) return ESP_ERR_INVALID_STATE;
     runtime_event_t event = {.type = RUNTIME_EVENT_PUBLISH_BASELINE};
     return xQueueSend(s_runtime.queue, &event, 0) == pdTRUE

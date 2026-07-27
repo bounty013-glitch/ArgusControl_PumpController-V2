@@ -47,6 +47,20 @@ argus_permission_set_t argus_mqtt_security_required_permission(
     if (topics == NULL || topic == NULL) return 0U;
     switch (argus_mqtt_topics_classify(topics, topic)) {
         case ARGUS_MQTT_ACTION_HEARTBEAT:
+        // Amendment A1/A2. These fell through to `default: return 0U`, and
+        // publish_allowed() requires a non-zero permission, so the authority
+        // topics were unreachable: every request was refused at the broker
+        // before the handler existed to see it. Fail-closed, so nothing was
+        // exposed - but the acquisition protocol was inert.
+        //
+        // Mapped to the same permission as the heartbeat deliberately.
+        // REQUEST_AUTHORITY is exactly the capability of "may participate in
+        // owning command authority", and it is already what an enrolled
+        // supervisor or panel is granted to heartbeat. It stays strictly
+        // separate from MOTION: holding authority and being allowed to move
+        // the pump remain independently granted.
+        case ARGUS_MQTT_ACTION_REQUEST_AUTHORITY:
+        case ARGUS_MQTT_ACTION_RELEASE_AUTHORITY:
             return ARGUS_PERMISSION_REQUEST_AUTHORITY;
         case ARGUS_MQTT_ACTION_E_STOP:
             return ARGUS_PERMISSION_SOFTWARE_ESTOP;
