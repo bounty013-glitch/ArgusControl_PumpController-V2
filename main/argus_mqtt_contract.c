@@ -531,8 +531,17 @@ argus_mqtt_authority_result_t argus_mqtt_session_request_authority(
         return ARGUS_MQTT_AUTHORITY_DENIED_PROFILE;
     }
 
-    bool held = (core->link == ARGUS_MQTT_LINK_ONLINE &&
-                 core->lease_machine_id[0] != '\0');
+    // Ownership follows the LEASE, not the transport. Testing link == ONLINE
+    // here meant that once the correction let a lease survive a disconnect, a
+    // DIFFERENT principal could acquire it while the owner was briefly
+    // offline - exactly the inheritance the transport/lease separation exists
+    // to prevent. Caught by test_4c_disconnect_then_rebind_preserves_epoch.
+    //
+    // A lease past its deadline counts as unowned even if the periodic tick
+    // has not run yet, so a legitimate requester never waits on a timer.
+    bool expired =
+        (now_ms - core->last_heartbeat_ms) >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS;
+    bool held = (core->lease_machine_id[0] != '\0') && !expired;
 
     if (held && strcmp(core->lease_machine_id, machine_id) == 0) {
         // Already ours. Rebind to the current socket and refresh liveness, but
@@ -618,7 +627,14 @@ bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms)
     // running whether or not the owner is currently connected, which is what
     // makes a genuinely dead supervisor expire on schedule instead of hiding
     // inside a reconnect loop.
-    if (core == NULL || core->lease_machine_id[0] == '\0' ||
+    // CORRECTION: keying this on lease_machine_id alone was wrong. A lease
+    // established without a recorded identity - the legacy path this contract
+    // still supports - could then never expire, and would have held authority
+    // forever. A lease exists if an identity is recorded OR the link is live.
+    bool lease_exists = (core != NULL) &&
+                        (core->lease_machine_id[0] != '\0' ||
+                         core->link == ARGUS_MQTT_LINK_ONLINE);
+    if (!lease_exists ||
         now_ms - core->last_heartbeat_ms < ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS) return false;
     core->link = ARGUS_MQTT_LINK_STALE;
     core->lease_connection_id = 0U;
