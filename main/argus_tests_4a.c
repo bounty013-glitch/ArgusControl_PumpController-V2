@@ -5507,6 +5507,8 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4c_lease_rejects_other_identities);
     RUN_TEST(test_4c_lease_identity_cleared_on_release);
     RUN_TEST(test_4c_disconnect_releases_matching_lease);
+    RUN_TEST(test_4c_disconnect_then_rebind_preserves_epoch);
+    RUN_TEST(test_4c_disconnect_without_renewal_still_expires);
     RUN_TEST(test_4c_sequence_first_and_newer);
     RUN_TEST(test_4c_sequence_duplicate_and_conflict);
     RUN_TEST(test_4c_sequence_stale_and_wrap);

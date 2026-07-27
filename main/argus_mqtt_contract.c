@@ -520,7 +520,14 @@ esp_err_t argus_mqtt_session_accept_heartbeat(
 
 bool argus_mqtt_session_tick(argus_mqtt_session_core_t *core, uint64_t now_ms)
 {
-    if (core == NULL || core->link != ARGUS_MQTT_LINK_ONLINE ||
+    // Expiry is driven by the LEASE, not by the transport. Keying this on
+    // link == ONLINE meant a lease could never expire once the socket
+    // dropped, because disconnect had already moved the link to OFFLINE.
+    // A lease exists whenever an owner is recorded; the deadline keeps
+    // running whether or not the owner is currently connected, which is what
+    // makes a genuinely dead supervisor expire on schedule instead of hiding
+    // inside a reconnect loop.
+    if (core == NULL || core->lease_machine_id[0] == '\0' ||
         now_ms - core->last_heartbeat_ms < ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS) return false;
     core->link = ARGUS_MQTT_LINK_STALE;
     core->lease_connection_id = 0U;
@@ -539,12 +546,28 @@ bool argus_mqtt_session_disconnect(argus_mqtt_session_core_t *core,
     if (core == NULL || connection_id == 0U ||
         (core->lease_connection_id != connection_id &&
          core->heartbeat_connection_id != connection_id)) return false;
+
+    // A transport disconnect invalidates the CONNECTION BINDING only. It does
+    // not destroy an otherwise unexpired lease and does not advance the
+    // epoch.
+    //
+    // This previously cleared the owner and bumped the epoch, which meant a
+    // momentary TCP drop handed authority away - the exact opposite of the
+    // accepted decision that a comms event must not move authority. It also
+    // silently invalidated the departing owner's in-flight commands. The
+    // heartbeat deadline keeps running from last_heartbeat_ms, so if the
+    // owner does not come back and renew in time, argus_mqtt_session_tick()
+    // expires the lease and advances the epoch there instead - one place,
+    // driven by the deadline rather than by socket noise.
+    //
+    // The same authenticated principal may rebind to a new connection while
+    // the lease is unexpired, preserving owner and epoch. Commands from the
+    // departed connection stop being accepted immediately because
+    // lease_connection_id no longer matches it.
     core->lease_connection_id = 0U;
-    lease_record_holder(core, NULL, 0U);
     core->heartbeat_connection_id = 0U;
     core->heartbeat_counter = 0U;
     core->link = ARGUS_MQTT_LINK_OFFLINE;
-    advance_epoch(core);
     return true;
 }
 

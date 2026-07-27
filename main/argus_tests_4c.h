@@ -31,6 +31,8 @@ esp_err_t test_4c_lease_follows_identity_across_reconnect(void);
 esp_err_t test_4c_lease_rejects_other_identities(void);
 esp_err_t test_4c_lease_identity_cleared_on_release(void);
 esp_err_t test_4c_disconnect_releases_matching_lease(void);
+esp_err_t test_4c_disconnect_then_rebind_preserves_epoch(void);
+esp_err_t test_4c_disconnect_without_renewal_still_expires(void);
 esp_err_t test_4c_sequence_first_and_newer(void);
 esp_err_t test_4c_sequence_duplicate_and_conflict(void);
 esp_err_t test_4c_sequence_stale_and_wrap(void);

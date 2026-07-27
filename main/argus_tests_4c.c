@@ -570,11 +570,12 @@ esp_err_t test_4c_fail_operational_disconnect_preserves_operation(void)
     argus_mqtt_session_core_t before = core;
     CHECK(argus_mqtt_session_disconnect(&core, 11U));
 
-    // A hard disconnect drops the heartbeat binding as well as the lease -
-    // but still may not touch the accepted-command record.
+    // A hard disconnect drops both connection bindings but PRESERVES the lease
+    // owner, and must not touch the accepted-command record. Authority moving
+    // on a transport event is exactly what the correction removed.
     CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
     CHECK(core.lease_connection_id == 0U);
-    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
     CHECK(core.heartbeat_connection_id == 0U && core.heartbeat_counter == 0U);
     CHECK(assert_only_lease_fields_changed(&before, &core, true) == ESP_OK);
     return ESP_OK;
@@ -698,32 +699,124 @@ esp_err_t test_4c_lease_identity_cleared_on_release(void)
     argus_mqtt_session_core_init(&core, SESSION);
     CHECK(argus_mqtt_session_accept_heartbeat(&core, 11U, "m-core", 5U,
                                               &heartbeat, 100U) == ESP_OK);
+    // Corrected expectation. A disconnect clears the CONNECTION BINDING and
+    // marks transport offline; it deliberately leaves the owner in place so a
+    // momentary drop cannot move authority. The deadline in
+    // argus_mqtt_session_tick() is what eventually clears the owner, and that
+    // is where the epoch advances.
     CHECK(argus_mqtt_session_disconnect(&core, 11U));
     CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
-    CHECK(core.lease_machine_id[0] == '\0' && core.lease_client_type == 0U);
+    CHECK(core.lease_connection_id == 0U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
     return ESP_OK;
 }
 
 esp_err_t test_4c_disconnect_releases_matching_lease(void)
 {
+    // RENAMED IN MEANING by the authority correction: a disconnect no longer
+    // releases the lease. It invalidates the CONNECTION BINDING only. The
+    // previous behaviour handed authority away on a momentary TCP drop, which
+    // contradicts the accepted rule that a comms event must not move
+    // authority.
     argus_mqtt_session_core_t core;
     argus_mqtt_session_core_init(&core, SESSION);
     argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
     strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 7U, NULL, 0U, &heartbeat, 0U) == ESP_OK);
+    CHECK(argus_mqtt_session_request_authority(&core, 7U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 0U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+
+    // An unrelated connection dropping changes nothing at all.
     CHECK(!argus_mqtt_session_disconnect(&core, 8U));
     CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
-    CHECK(argus_mqtt_session_disconnect(&core, 7U));
-    CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE && core.lease_connection_id == 0U);
+    CHECK(core.lease_connection_id == 7U);
 
-    argus_mqtt_session_core_init(&core, SESSION);
-    CHECK(argus_mqtt_session_accept_heartbeat(&core, 9U, NULL, 0U, &heartbeat, 100U) == ESP_OK);
-    CHECK(argus_mqtt_session_tick(&core, 6100U));
-    CHECK(core.link == ARGUS_MQTT_LINK_STALE && core.lease_connection_id == 0U);
-    CHECK(core.heartbeat_connection_id == 9U);
-    CHECK(argus_mqtt_session_disconnect(&core, 9U));
+    // The owner's connection dropping clears the binding and marks transport
+    // offline, but the lease, the owner and the epoch all survive.
+    CHECK(argus_mqtt_session_disconnect(&core, 7U));
     CHECK(core.link == ARGUS_MQTT_LINK_OFFLINE);
-    CHECK(core.heartbeat_connection_id == 0U && core.heartbeat_counter == 0U);
+    CHECK(core.lease_connection_id == 0U);
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+    CHECK(core.authority_epoch == epoch);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_disconnect_then_rebind_preserves_epoch(void)
+{
+    // The reconnect case that matters, exercised through the real disconnect
+    // entry point rather than only the heartbeat path. The previous test
+    // asserted epoch survival while never calling argus_mqtt_session_disconnect
+    // at all, so it passed against a production path that did the opposite.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    argus_mqtt_heartbeat_t heartbeat = {.counter = 1U};
+    strlcpy(heartbeat.session, SESSION, sizeof(heartbeat.session));
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 100U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+
+    // Same principal returns on a new socket, inside the lease term.
+    heartbeat.counter = 1U;
+    CHECK(argus_mqtt_session_accept_heartbeat(&core, 12U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND, &heartbeat, 3000U) == ESP_OK);
+    CHECK(core.link == ARGUS_MQTT_LINK_ONLINE);
+    CHECK(core.lease_connection_id == 12U);
+    CHECK(core.authority_epoch == epoch);   // authority never moved
+
+    // A different principal must not inherit the lease by arriving after the
+    // drop, whether it heartbeats or asks.
+    argus_mqtt_session_core_t other;
+    argus_mqtt_session_core_init(&other, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&other, 21U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 100U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+    CHECK(argus_mqtt_session_disconnect(&other, 21U));
+    CHECK(argus_mqtt_session_request_authority(&other, 22U, "m-panel",
+              ARGUS_MACHINE_CLIENT_HMI,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 200U)
+          == ARGUS_MQTT_AUTHORITY_DENIED_HELD);
+    CHECK(strcmp(other.lease_machine_id, "m-core") == 0);
+    return ESP_OK;
+}
+
+esp_err_t test_4c_disconnect_without_renewal_still_expires(void)
+{
+    // The other half of the same change: because the lease now survives a
+    // disconnect, expiry must be driven by the deadline rather than by the
+    // link state - otherwise a dropped supervisor would hold authority
+    // forever. Expiry is where the epoch advances.
+    argus_mqtt_session_core_t core;
+    argus_mqtt_session_core_init(&core, SESSION);
+    CHECK(argus_mqtt_session_request_authority(&core, 11U, "m-core",
+              ARGUS_MACHINE_CLIENT_ARGUS_COMMAND,
+              ARGUS_AUTHORITY_PROFILE_ARGUSCORE_PREFERRED, false, 100U)
+          == ARGUS_MQTT_AUTHORITY_GRANTED);
+    uint32_t epoch = core.authority_epoch;
+    core.has_sequence = true;
+    core.last_sequence = 99U;
+    strlcpy(core.cached_result, "ACCEPTED", sizeof(core.cached_result));
+
+    CHECK(argus_mqtt_session_disconnect(&core, 11U));
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);   // still owned
+
+    // Not yet due.
+    CHECK(!argus_mqtt_session_tick(&core, 100U + ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS - 1U));
+    CHECK(strcmp(core.lease_machine_id, "m-core") == 0);
+
+    // Due: lease expires, epoch advances, owner cleared.
+    CHECK(argus_mqtt_session_tick(&core, 100U + ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS));
+    CHECK(core.lease_machine_id[0] == '\0');
+    CHECK(core.authority_epoch != epoch);
+    // Fail-operational: the accepted-command record is untouched throughout.
+    CHECK(core.has_sequence && core.last_sequence == 99U);
+    CHECK(strcmp(core.cached_result, "ACCEPTED") == 0);
     return ESP_OK;
 }
 
