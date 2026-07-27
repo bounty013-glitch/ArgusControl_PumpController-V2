@@ -71,6 +71,8 @@ typedef struct {
     char status_authority_epoch[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_authority_profile[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char status_local_control[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_core_lease_status[ARGUS_MQTT_BROKER_TOPIC_CAP];
+    char status_authority_reason[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_device_name[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_model[ARGUS_MQTT_BROKER_TOPIC_CAP];
     char metadata_firmware_version[ARGUS_MQTT_BROKER_TOPIC_CAP];

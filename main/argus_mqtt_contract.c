@@ -56,6 +56,8 @@ esp_err_t argus_mqtt_topics_build(argus_mqtt_topics_t *out,
     MAKE_TOPIC(status_authority_epoch, "status/core/authority_epoch");
     MAKE_TOPIC(status_authority_profile, "status/core/authority_profile");
     MAKE_TOPIC(status_local_control, "status/core/local_control_status");
+    MAKE_TOPIC(status_core_lease_status, "status/core/core_lease_status");
+    MAKE_TOPIC(status_authority_reason, "status/core/authority_reason");
     MAKE_TOPIC(metadata_device_name, "metadata/core/device_name");
     MAKE_TOPIC(metadata_model, "metadata/core/model");
     MAKE_TOPIC(metadata_firmware_version, "metadata/core/firmware_version");

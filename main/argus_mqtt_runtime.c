@@ -289,6 +289,12 @@ static uint8_t commissioned_authority_profile(void)
 // closed toward the commissioned preference rather than toward the fallback.
 static uint64_t s_authority_ready_ms;
 
+// Why authority is where it is. Set at every transition so the published
+// snapshot can explain itself; the HMI must never have to reconstruct this
+// from transient events it may have missed while disconnected.
+static const char *s_authority_reason = "STARTUP";
+static void set_authority_reason(const char *reason) { s_authority_reason = reason; }
+
 void argus_mqtt_runtime_mark_authority_ready(void)
 {
     // Only on a transition into readiness with no owner. A broker restart
@@ -349,6 +355,7 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
             &s_runtime.session, message->principal.identifier);
         uint32_t epoch = s_runtime.session.authority_epoch;
         xSemaphoreGive(s_runtime.mutex);
+        if (released) set_authority_reason("RELEASED");
         ESP_LOGW(TAG, "authority release by %s: %s (epoch=%lu)",
                  message->principal.identifier,
                  released ? "accepted" : "refused_not_holder",
@@ -378,6 +385,13 @@ static void handle_authority_request(const argus_mqtt_broker_message_t *message,
              authority_result_reason(result), (unsigned)profile, (int)window_open,
              (unsigned long)epoch);
 
+    if (result == ARGUS_MQTT_AUTHORITY_GRANTED) {
+        set_authority_reason(
+            message->principal.client_type == ARGUS_MACHINE_CLIENT_ARGUS_COMMAND
+                ? "CORE_ACQUISITION"
+                : (profile == ARGUS_AUTHORITY_PROFILE_STANDALONE_HMI
+                       ? "STANDALONE_ACQUISITION" : "OPERATOR_TRANSFER"));
+    }
     if (result == ARGUS_MQTT_AUTHORITY_GRANTED ||
         result == ARGUS_MQTT_AUTHORITY_ALREADY_HELD) {
         publish_value(s_runtime.topics.state_supervisor_link, "ONLINE", true);
@@ -413,6 +427,28 @@ static void publish_authority_state(void)
         default:                                 owner_kind = "OTHER"; break;
         }
     }
+
+    // Lease status is derived from owner + transport + deadline together, so
+    // the three never disagree in what is published.
+    uint64_t last_hb;
+    xSemaphoreTake(s_runtime.mutex, portMAX_DELAY);
+    last_hb = s_runtime.session.last_heartbeat_ms;
+    xSemaphoreGive(s_runtime.mutex);
+
+    const char *lease_status;
+    if (owner[0] == '\0') {
+        lease_status = (link == ARGUS_MQTT_LINK_STALE) ? "EXPIRED" : "NONE";
+    } else if (link != ARGUS_MQTT_LINK_ONLINE) {
+        // Owner still holds it, but the transport is down and the deadline is
+        // running. Honest intermediate state rather than a false ACTIVE.
+        lease_status = "EXPIRING";
+    } else {
+        uint64_t age = now_ms() - last_hb;
+        lease_status = (age * 2U >= ARGUS_MQTT_HEARTBEAT_TIMEOUT_MS)
+                           ? "EXPIRING" : "ACTIVE";
+    }
+    publish_value(s_runtime.topics.status_core_lease_status, lease_status, true);
+    publish_value(s_runtime.topics.status_authority_reason, s_authority_reason, true);
 
     uint8_t profile = commissioned_authority_profile();
     publish_value(s_runtime.topics.status_authority_profile,
