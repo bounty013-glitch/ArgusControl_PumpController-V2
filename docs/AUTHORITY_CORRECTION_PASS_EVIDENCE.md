@@ -121,6 +121,64 @@ unfolds in about five. **Next step: per-transition logging of the acquisition
 state machine so the real ordering is visible before anything else is
 changed.** No further fix should be attempted until that exists.
 
+### The trace was built, and it moved the defect to the controller
+
+Panel commit `8bc3d01`. Every acquisition transition now logs the rule that
+caused it and the controller's published authority at that instant, plus an
+`AUTHORITY-DELTA` line whenever the authority tuple changes rather than on a
+timer. Host suite 3498 → 3690 checks, all passing. First hardware run
+answered the question, and **not in favour of the hypothesis above**:
+
+```
+#1  t=29916ms IDLE->REQUESTED    cause=REQUEST_SENT  owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=0
+#2  t=30013ms REQUESTED->CONFIRMING cause=GRANTED    owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=0
+#3  t=35052ms CONFIRMING->BACKOFF cause=CONFIRM_TIMEOUT owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=3
+#4  t=45126ms BACKOFF->IDLE      cause=BACKOFF_ELAPSED  ... epoch=6 heartbeats=3
+#5  t=45126ms IDLE->REQUESTED    cause=REQUEST_SENT     ... epoch=6 heartbeats=3
+#6  t=45297ms REQUESTED->CONFIRMING cause=GRANTED       ... epoch=6 heartbeats=3
+#7  t=50330ms CONFIRMING->BACKOFF cause=CONFIRM_TIMEOUT ... epoch=6 heartbeats=6
+   ... third identical cycle ...
+#14 t=75633ms REQUESTED->CONFIRMING cause=GRANTED    owner=LOCAL_HMI local=ACTIVE lease=ACTIVE epoch=7 heartbeats=9
+#15 t=75633ms CONFIRMING->HOLDING cause=OWNERSHIP_OBSERVED owner=LOCAL_HMI local=ACTIVE lease=ACTIVE epoch=7
+```
+
+**The controller answered ACCEPTED three times without its published
+authority changing at all.** `owner=NONE local=AVAILABLE lease=EXPIRED
+epoch=6` held constant for forty-six seconds across three grants.
+`AUTHORITY-DELTA` fired exactly twice in the whole window, so this is an
+absence of publication, not a message the panel missed or mishandled.
+
+**Panel silence during `CONFIRMING` is definitively excluded as the cause.**
+The heartbeat counters advance 0 → 3 → 6 → 9, exactly three renewals per
+five-second confirm window at the 2 s cadence. The panel was renewing
+throughout and ownership still never appeared. The `CONFIRMING` fix was
+correct on its own terms — a granted lease must be renewed — but it was never
+the explanation, which is precisely why it was necessary and not sufficient.
+
+The fourth attempt succeeded with the grant and `epoch=7` arriving in the
+same millisecond, and `HOLDING` followed in that same tick.
+
+**The defect is controller-side. The panel behaved correctly on every
+attempt**, including the three that failed. Two candidates remain that
+panel-side data cannot separate:
+
+1. The controller returns `ACCEPTED` on `event/core/authority_result` without
+   committing or publishing the corresponding authority state.
+2. It commits the grant and revokes it before publishing anything — for
+   instance by rejecting the panel's renewals, which the panel cannot
+   observe, since its counter records transmissions and not acceptances.
+
+Distinguishing these requires the controller's own log, which needs a capture
+on COM5. **Opening that port resets the controller** — that is how the
+distortion recorded further down happened — so it is a deliberate action to
+take at a chosen moment, not a casual probe.
+
+Health of the run itself: 0 unexpected topics, 0 panics, 0 watchdogs, 0
+`NO_MEM`, ending `HOLDING` at `epoch=7` with `lease=ACTIVE` and heartbeats
+climbing.
+
+**Still OPEN, and now correctly located.** Nothing here is a fix.
+
 ### Evidence classification
 
 | Claim | Basis |
@@ -131,7 +189,9 @@ changed.** No further fix should be attempted until that exists.
 | No panic, watchdog, `NO_MEM` or bad payload | Hardware serial capture, COM18 |
 | Lease held ACTIVE with heartbeats flowing | Hardware serial capture, COM18 |
 | `CONFIRMING` renews; panel holding nothing never heartbeats | Host tests, seam-verified |
-| Acquisition completes in one request | **Observed once, contradicted once. NOT a standing claim.** |
+| Acquisition completes in one request | **Observed once, contradicted twice. NOT a standing claim.** |
+| Controller grants without publishing authority state | Hardware transition trace, COM18 — three consecutive cycles |
+| Panel renews throughout `CONFIRMING` | Hardware transition trace — heartbeats 0→3→6→9 |
 | Three-client capacity, fourth refused | **Not demonstrated. Non-blocking per Shawn.** |
 
 ### Two things that distorted evidence in this pass
@@ -153,10 +213,11 @@ untrue. His documentation now matches the built behaviour.
 
 ### State at the end of this section
 
-Host suite **3498 checks, all passing** (3471 before this pass; 27 added).
-Controller unchanged at `64fff5d`. Panel at `6a74b64`, pushed. No merge to
-`main`, no tag, no acceptance mark — Stage 1 is **not** accepted while the
-acquisition finding is open.
+Host suite **3690 checks, all passing** (3471 before this pass; 219 added).
+Controller unchanged. Panel at `8bc3d01`, pushed. No merge to `main`, no tag,
+no acceptance mark — Stage 1 is **not** accepted while the acquisition
+finding is open, and it is now open against the controller rather than the
+panel.
 
 ## -4. MQTT admission isolation and capacity proof (2026-07-27)
 
