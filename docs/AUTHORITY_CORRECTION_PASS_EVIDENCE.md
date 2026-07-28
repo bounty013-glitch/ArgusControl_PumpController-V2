@@ -179,6 +179,127 @@ climbing.
 
 **Still OPEN, and now correctly located.** Nothing here is a fix.
 
+### Both-ends capture: root cause found — and it is panel-side, not controller-side
+
+Shawn authorized the COM5 capture. Both ports were captured back-to-back
+(sequential execution, provable from content below), and the result closes
+the diagnosis completely. **The paragraph above locating the defect
+controller-side was wrong**, in the same way the CONFIRMING hypothesis before
+it was wrong: each pass correctly eliminated its predecessor and then
+guessed. This one is not a guess — every link is verified in the capture and
+in source.
+
+**Two operational facts first, both corrections to earlier claims.**
+A plain serial open did NOT reset the controller: its timestamps run
+continuously through COM5 opening (~2.8 h uptime). The earlier mid-capture
+reset must have come from the probe method, not the open. And the PANEL reset
+between the two captures — proven below — almost certainly from the COM18
+close/reopen toggling its auto-reset circuit. That accident was the perfect
+experiment: the controller then watched a fresh panel boot run the entire
+failing acquisition, from the other side.
+
+**What the controller saw** (`both_controller.log`):
+
+```
+10064169  AP: panel STA fails 6 SA Query attempts → disassoc → rejoin ~700ms   (panel rebooting)
+10067825  broker: client disconnected (m-b4ad…)
+10068825  runtime: supervisor heartbeat stale; motion state intentionally unchanged
+10080318  broker: panel re-authenticated, 5 subscriptions restored
+10080678  request_authority #1: broker publish accepted — NO runtime decision logged — 3 heartbeats — silence
+10095868  #2: identical.  10111086 #3.  10126292 #4.  10141577 #5.  (15.2 s apart)
+10156860  request_authority #6 → 4 ms later:
+          W argus_mqtt_runtime: authority request (type=1): granted (profile=0 window=0 running=0)
+          → continuous 2 s heartbeats to end of capture
+```
+
+Five requests answered `ACCEPTED` on the wire with no runtime arbitration;
+the sixth arbitrated and granted. The three-heartbeat bursts prove the panel
+received `ACCEPTED` each time — it only enters CONFIRMING on a grant.
+
+**Proof the panel had rebooted, and that the windows are disjoint:** the
+heartbeat `payload_len` steps 42 → 43 at exactly the **10th** heartbeat after
+reconnect — the counter crossing 9 → 10. A fresh provider counts from 1; the
+panel's own capture ends at counter ≈ 280. The same numbers prove the
+captures ran sequentially (panel first): one device cannot be at counter 280
+and counter < 10 in the same window.
+
+**The counting law that gives it away.** The panel's final pre-reboot
+evidence read `sent=5 granted=5`. After reboot: exactly **5** phantom grants,
+success on request **6**. Every observed instance of this defect obeys the
+same law — N requests sent by the previous boot → N phantom grants after
+reboot → success on N+1:
+
+| Run | Previous boot had sent | Phantom grants | Succeeded on |
+| --- | --- | --- | --- |
+| First bench acceptance | 1 | 1 | #2 |
+| Transition-trace run | 3 | 3 | #4 |
+| Both-ends capture | 5 | 5 | #6 |
+
+**The mechanism, verified in source end-to-end:**
+
+1. The panel's request IDs are `hmi-auth-%010lu` of a counter that restarts
+   at zero **every boot** — `hmi_command_codec.c:176`, driven by
+   `p->request_counter` which `hmi_mqtt_provider_init()` zeroes.
+2. The controller's A2.6 duplicate cache is keyed on
+   `(session, request_id, kind)` — `argus_mqtt_runtime.c` `auth_dup_find()`.
+   The session is the CONTROLLER's, and the controller did not restart, so
+   the key collides across panel reboots.
+3. The rebooted panel's payload is byte-identical to the previous boot's
+   (same session string, same request ID, `epoch: 0`, same type), so the
+   SHA-256 payload-identity check classifies it `DUPLICATE_REPLAY`, not
+   `DUPLICATE_CONFLICT`.
+4. The replay path — `argus_mqtt_runtime.c:1015` — republishes the CACHED
+   result and returns: **no arbitration, no epoch change, no authority-state
+   publication, no log line.** Exactly what the capture shows, and exactly
+   what A2.6 specifies for a redelivered request.
+
+**The controller is behaving correctly.** A2.6's replay semantics exist so a
+QoS-1 redelivery cannot re-execute an authority change; the cache did
+precisely its job. The defect is the panel presenting a GENUINELY NEW request
+under the identity of an old one. `request_id` exists to name one request; a
+boot-relative counter names a slot, and every panel reboot re-issues names
+the previous boot already spent.
+
+**Second instance of the same class, found while verifying: command
+sequences.** The panel's `next_sequence` also restarts at 1 every boot
+(`hmi_mqtt_provider_init()`, and on session change), while the controller's
+`last_sequence` for the session persists. `argus_mqtt_session_check_sequence()`
+(`argus_mqtt_contract.c:829`) classifies a not-newer sequence `STALE` and a
+matching-sequence/different-payload `CONFLICT`. With `last_accepted_seq=3` on
+the controller (visible in the capture) and `next_seq=1` on the freshly
+booted panel (visible in its evidence line), the next THREE operator commands
+after any panel reboot will be refused before the fourth is accepted. Latent
+in this capture only because no command was attempted (`sent=0`). This is
+bench-visible and Stage-1-relevant: the operator presses START and is
+refused, three times, with no indication that time will fix it.
+
+**Not explained, stated so:** between the trace run and this capture, in an
+unobserved window, the panel lost and re-acquired authority once
+(`sent` 4→5, epoch 7→9, `unanswered` 3→4). Request #5 was a fresh ID, so this
+was NOT the replay defect. Consistent with a transient link stall expiring
+the lease, and with fail-operational the pump kept its state — but the window
+was unobserved and this is inference, not evidence.
+
+**Fix directions, for decision — both panel-side, neither implemented:**
+
+1. **Request IDs must be unique across boots within a controller session.**
+   Salt the ID with per-boot entropy (e.g. `hmi-auth-<nonce>-<counter>`),
+   supplied by the platform layer so the codec stays host-testable. No
+   contract change: A2.2 constrains charset and length, not structure, and
+   the controller treats the ID as opaque.
+2. **Sequence adoption on session bind.** When binding to a session the
+   controller already reports `last_accepted_sequence` for, start from
+   `last_accepted_sequence + 1` rather than 1. This is compliance with the
+   existing ordering contract, not a change to it.
+
+These are one doctrine — *boot-relative identity may never be presented
+against session-scoped state* — and should be decided together, which is why
+neither was implemented under a capture authorization.
+
+**The finding remains OPEN pending that decision.** The panel is currently
+HOLDING (the controller granted request #6 during the capture); pump idle,
+motor not connected, no motion commanded.
+
 ### Evidence classification
 
 | Claim | Basis |
