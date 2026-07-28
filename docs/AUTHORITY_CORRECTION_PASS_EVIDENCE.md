@@ -16,6 +16,148 @@ checkpoint.
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+Sections are newest-first. The header above describes the accepted
+`atlantis-authority-integration` checkpoint; work from §-5 onward continues on
+`atlantis-hmi-authority-controls` and is **not** covered by that acceptance.
+
+## -5. Stage 1 bench acceptance — first powered run with the panel in control (2026-07-28)
+
+The first time the rotary panel has held command authority against the real
+controller with the operator driving it. Motor **not** connected; no motion
+was produced. Controller on COM5, panel on COM18, both flashed from the
+branch heads recorded at the end of this section.
+
+Runbook: `docs/plan/STAGE_1_ACCEPTANCE_RUNBOOK.md` in the HMI repository.
+
+### Outcome — §1 through §3 PASS, §4 non-blocking by Shawn's call
+
+Shawn executed §1 (grant control capabilities to the enrolled panel identity),
+§2 (confirm the in-place upgrade) and §3 including §3.1 and §3.2. His report:
+the capability grant, the upgrade confirmation, the real command, and the
+refusal path all behaved as the runbook predicted; commands reported
+`accepted` and the machine acted on them; and the ramp behaviour read as the
+real controller rather than the simulator.
+
+That last observation is the one worth keeping. The panel is now driving the
+controller's own ramp logic rather than a local approximation, and it is
+distinguishable by feel — which is the substantive difference Stage 1 was
+written to produce.
+
+**§4 — three simultaneous authenticated clients plus a fourth refusal — is
+recorded NON-BLOCKING by Shawn's explicit determination**, not by my
+judgement and not by silence. His stated rationale: the only two long-term
+connections are the rotary HMI and ArgusCore; a third is a diagnostic
+connection made by him alone during service; and he has no way to stage a
+genuine four-client attempt at the bench right now. That population matches
+the measured `MAX_CLIENTS = 3` with one slot spare. The seam and the resource
+invariant are covered by host tests; the multi-host hardware demonstration
+remains an open evidence gap, unchanged from §-4 and still honestly labelled.
+
+### Serial capture found three defects the runbook could not
+
+The runbook is written for an operator watching the glass. Serial capture
+sees what the glass does not, and it found three things.
+
+**CLOSED — the panel discarded the controller's operator-visible admission
+conditions.** `status/core/network_fault`, `status/core/network_fault_action`
+and `status/core/auth_throttle` were arriving and being logged as
+`message on unexpected topic ... ignored`. Those three topics were added to
+the controller in §-4 for exactly one purpose: to let an operator see a
+network-configuration fault or an authentication throttle instead of guessing
+at a panel that has quietly stopped working. The panel was receiving them and
+throwing them away, which defeated the whole of that work. They are now
+mirrored into `hmi_state`.
+
+Presentation is deliberately **not** included. Where a network fault or an
+auth throttle appears on the glass, and what it displaces, is an operator-
+facing decision. Mirroring the data is mechanical; deciding what the operator
+sees is not, and inventing it silently is how a panel ends up lying. This is
+a named, deliberate gap, not an oversight.
+
+**CLOSED — two further false "unexpected topic" reports.**
+`event/core/authority_result` was reported as unexpected on every acquisition
+answer — the panel's own authority replies. And the panel's lease heartbeat
+was reported as unexpected because the panel subscribes to `status/#` and so
+receives its own publication back. Neither is unknown and neither is ignored.
+A wrong log is worse than no log: the next person debugging a failed
+acquisition would have chased twenty phantom warnings.
+
+Measured on hardware across the pass: unexpected-topic reports **26 → 20 → 0**.
+
+**OPEN — acquisition sometimes loses a granted lease. NOT FIXED.**
+
+Observed in the first capture: the panel requested authority, the controller
+granted it, ownership never appeared in retained state, the panel's confirm
+window expired and it asked again. Acquisition took roughly thirty seconds
+and two requests where it should take about two seconds and one.
+
+```
+ACQUIRE-EVIDENCE: state=4 requests[sent=2 granted=2 refused=0 unanswered=1]
+```
+
+The cause identified was that the panel transmitted nothing at all while in
+`HMI_ACQUIRE_CONFIRMING`, and the controller expires an unrenewed lease after
+six seconds — inside the five-second confirm window. Waiting for ownership
+destroyed the grant being waited for. That is a real defect and it is fixed:
+`CONFIRMING` now renews, immediately on entry and then on cadence, with host
+tests pinning both that it renews and that a panel holding nothing still
+never heartbeats.
+
+**It is an improvement, not a closure, and it is not recorded as fixed.** One
+subsequent hardware run acquired cleanly:
+
+```
+ACQUIRE-EVIDENCE: state=4 requests[sent=1 granted=1 refused=0 unanswered=0] heartbeats=15
+```
+
+The next run reproduced the original failure — `sent=2 granted=2 unanswered=1`
+— with the fix present and flashed. So the silence during `CONFIRMING` was
+necessary to fix and was not sufficient to explain the behaviour. The actual
+cause is not established, and any statement about it now would be a guess.
+
+The blocker is measurement resolution, not analysis. The panel prints
+`ACQUIRE-EVIDENCE` every fifteen seconds; the sequence under investigation
+unfolds in about five. **Next step: per-transition logging of the acquisition
+state machine so the real ordering is visible before anything else is
+changed.** No further fix should be attempted until that exists.
+
+### Evidence classification
+
+| Claim | Basis |
+| --- | --- |
+| §1–§3 behaved as written, commands accepted and acted on | Operator-observed at the bench by Shawn |
+| Ramp is controller logic, not simulator | Operator-observed, qualitative |
+| Zero unexpected-topic reports | Hardware serial capture, COM18 |
+| No panic, watchdog, `NO_MEM` or bad payload | Hardware serial capture, COM18 |
+| Lease held ACTIVE with heartbeats flowing | Hardware serial capture, COM18 |
+| `CONFIRMING` renews; panel holding nothing never heartbeats | Host tests, seam-verified |
+| Acquisition completes in one request | **Observed once, contradicted once. NOT a standing claim.** |
+| Three-client capacity, fourth refused | **Not demonstrated. Non-blocking per Shawn.** |
+
+### Two things that distorted evidence in this pass
+
+**I reset the controller mid-sequence.** Probing COM5 for availability
+restarted it while a capture was running, which is why one later capture
+shows `sent=2` against a controller that had just rebooted. The clean
+single-request acquisition is the separate `s1_panel2.log` capture. Probing a
+live device is not a free operation and I should not have done it during a
+run.
+
+**The flashed panel image predates three commits Shawn pushed during the
+pass.** Two of them touch `main/hmi_mqtt_client.c/.h`, but the diff is
+comments plus two log-message strings with no behavioural change, so the
+capture remains valid. Worth noting because his header correction retires the
+old claim that this client never publishes a heartbeat and only publishes
+while holding authority — a claim the `CONFIRMING` renewal fix had made
+untrue. His documentation now matches the built behaviour.
+
+### State at the end of this section
+
+Host suite **3498 checks, all passing** (3471 before this pass; 27 added).
+Controller unchanged at `64fff5d`. Panel at `6a74b64`, pushed. No merge to
+`main`, no tag, no acceptance mark — Stage 1 is **not** accepted while the
+acquisition finding is open.
+
 ## -4. MQTT admission isolation and capacity proof (2026-07-27)
 
 Shawn's final closure order, acting on independent review of `81fb3ed`. That
