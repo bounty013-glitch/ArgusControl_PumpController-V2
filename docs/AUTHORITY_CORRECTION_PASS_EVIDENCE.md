@@ -17,8 +17,20 @@ Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
 Sections are newest-first. The header above describes the accepted
-`atlantis-authority-integration` checkpoint; work from §-5 onward continues on
-`atlantis-hmi-authority-controls` and is **not** covered by that acceptance.
+`atlantis-authority-integration` checkpoint; work from §-5 onward was carried
+on `atlantis-hmi-authority-controls` and has its own acceptance:
+
+**§-5 (`atlantis-hmi-authority-controls`) ACCEPTED BY SHAWN, 2026-07-28,**
+after his and the independent review found no further blocking or
+significant defects, and merged into `main` on both repositories under that
+authorization. The one discrepancy at acceptance was documentation drift —
+comments describing link loss as revoking only the sequence receipt where
+the implementation correctly revokes both receipts — corrected in the
+close-out commit. **Deferred beyond this acceptance, labelled and
+unchanged:** an accepted command round-trip at the adopted nonzero sequence,
+which requires motion and belongs to the powered-acceptance procedure
+(`docs/STAGE_2_POWERED_ACCEPTANCE_PLAN.md`), where it is one explicit check.
+Motor testing itself remains entirely outside this acceptance.
 
 ## -5. Stage 1 bench acceptance — first powered run with the panel in control (2026-07-28)
 
