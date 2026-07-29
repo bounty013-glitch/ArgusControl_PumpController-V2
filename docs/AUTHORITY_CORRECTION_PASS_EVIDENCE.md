@@ -450,6 +450,61 @@ acquisition, HOLDING with heartbeats flowing, and 0 unexpected topics,
 demonstration remains the one deferred item, unchanged, labelled, and
 scheduled for the Stage 2 powered acceptance.
 
+### Review finding: session receipt was not its own fact (panel `817eefa`)
+
+Independent review found one remaining ordering hole in the pass above, and
+it was real in production: `has_last_accepted_sequence` proved a sequence
+VALUE had arrived, but nothing proved the SESSION had arrived on the same
+connection — or that the received sequence belonged to the session now
+observed. Two reachable paths: a session change arriving before its
+sequence let the provider revoke synchronization and **re-adopt the old
+session's sequence in the same observation**; and after a reconnect, a
+sequence-first arrival could synchronize against a session string that was
+merely last-known display data. The review also named why the tests missed
+it: the fixtures manually supplied the exact flag combinations production
+failed to create — the recurring green-test failure mode, again.
+
+**The correction makes receipt symmetrical and attribution explicit.**
+`has_command_session` is set only by the production parser on arrival of a
+valid session topic and revoked on link loss alongside the sequence
+receipt, through the same single-helper choke points as before. The parser
+revokes the SEQUENCE receipt whenever a DIFFERING session arrives — before
+installing it — so a sequence value can never be attributed to a session it
+did not arrive under; the empty initial session counts as different, and a
+republication of the same session revokes nothing (1 Hz retained
+republication cannot strobe synchronization off). The provider binds and
+adopts only when both receipts are true, at which point the pairing is
+unambiguous by construction.
+
+Either-order behaviour as specified by the review: same-session reconnect
+with sequence-first synchronizes once the session arrives; changed-session
+with sequence-first discards the unattributable receipt and waits for a
+subsequent sequence publication; session-then-sequence synchronizes
+normally.
+
+**Tests now drive the production chain.** Four new tests build every mirror
+through the real parser (`hmi_mqtt_parse_apply`), apply it through
+`hmi_state_apply_update`, and observe with the production provider —
+nothing hand-constructed except link loss itself, which is ESP-glue the
+host suite cannot link (the test helper performs exactly
+`stage_link_loss_locked()`'s two documented actions and says so). Every
+incomplete pairing is asserted side-effect-free: nothing transmitted, no
+sequence consumed, no ledger entry. Parse-level tests pin receipt,
+revocation, same-session republish, and malformed-session behaviour.
+Host suite **3821 → 3923 checks, all passing**; zero project warnings.
+
+**Hardware, two boots (COM18, controller untouched):** both reach
+`sync=READY` within 28–34 s (inside the periodic republication cycle),
+single-request acquisition, HOLDING, 0 unexpected topics / panics /
+`NO_MEM`. And a gift from the review itself: commands were driven at the
+bench during it, so the live session now reports `last_accepted=4` — both
+boots therefore demonstrate **nonzero adoption on hardware**:
+`next_seq=5`, derived from a real received value through the production
+chain and re-derived identically after reboot. This closes the previously
+host-test-only claim except for its final step; what remains deferred to
+Stage 2 narrows to *an accepted command round-trip at the adopted
+sequence*, which requires motion.
+
 ### Evidence classification
 
 | Claim | Basis |
