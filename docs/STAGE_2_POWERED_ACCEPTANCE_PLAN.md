@@ -1,7 +1,8 @@
 # Stage 2 — Powered Acceptance Plan
 
-**Status (2026-07-28): S2-B SUPERSEDED, S2-C EXECUTED AND PASSED.
-S2-D and S2-E deferred by Shawn to the sustained pumping test.**
+**Status (2026-07-28): S2-B SUPERSEDED, S2-C EXECUTED AND PASSED WITH
+SHAWN-AUTHORIZED EQUIVALENT SUBSTITUTIONS. S2-D and S2-E deferred by Shawn
+to the sustained pumping test.**
 Execution record at the end of this document. Motor wired through a 10:1
 planetary gearbox; the glass displays PUMP rpm, the motor turns ten times
 faster — every number in this plan is a pump/glass number.
@@ -189,11 +190,15 @@ easier to make before the pump is wet.
 ## Execution record — 2026-07-28
 
 Shawn at the bench driving the glass and, unannounced until afterwards, the
-admin portal from a laptop on the controller's AP; serial capture on both
-COM5 (controller, duplex with console) and COM18 (panel), each port opened
-once before motion and closed once after the bench was safe. Raw captures:
-`s2_controller.log` (167 KB), `s2_panel.log` (223 KB), with host-timestamped
-annotations marking every console keystroke sent.
+admin portal from a laptop on the controller's AP; serial capture was made on
+both COM5 (controller, duplex with console) and COM18 (panel), each port opened
+once before motion and closed once after the bench was safe. The contemporaneous
+session record identified `s2_controller.log` (167 KB) and `s2_panel.log`
+(223 KB), with host-timestamped annotations marking every console keystroke
+sent. Those raw captures were not committed and are no longer available for
+independent re-analysis. The execution record therefore relies on the
+contemporaneous annotations and Shawn's physical observations; no rerun was
+authorized solely to recreate the missing logs.
 
 **Context discovered during the session, now governing every number here:**
 the motor drives the pump through a **10:1 planetary gearbox** and the glass
@@ -213,13 +218,20 @@ Recorded as superseded, not skipped silently. The scope-level numbers
 (pulse width, frequency at 0.5 RPM) remain unverified and available to
 S2-B's procedure if ever needed.
 
-### S2-C — PASSED
+### S2-C — PASSED WITH SHAWN-AUTHORIZED EQUIVALENT SUBSTITUTIONS
+
+The written ladder (`0.5 → 5 → 20 → 72 RPM`) was not executed literally.
+The panel cannot command 0.5 RPM because its current setpoint resolution is
+5 RPM, and the session did not include a discrete 20-RPM hold. Shawn accepted
+the actual powered run as equivalent evidence for this stage rather than
+repeating the session solely to reproduce those two points. This disposition
+must not be read as a claim that the original ladder was followed exactly.
 
 **Ladder as actually run** (glass rpm): 5 → START → brief stop/restart →
 ~70 → 200 → STOP → 100 → STOP, then the formal measured run at 70 → STOP.
-All plan-envelope speeds (≤72) smooth, no stall, no cogging, applied
-tracking commanded — operator-observed on the shaft, the glass, and the
-admin portal simultaneously.
+All exercised plan-envelope speeds (≤72) were smooth, with no stall or
+cogging and with applied RPM tracking commanded — operator-observed on the
+shaft, the glass, and the admin portal simultaneously.
 
 **At 200 glass rpm (2000 motor rpm, discretionary, beyond the plan
 ladder): the motor reached speed and then stalled.** The controller
@@ -227,9 +239,21 @@ truthfully continued reporting GENERATED output with `feedback_available`
 false — a physical stall is invisible to an open-loop controller by
 design, and the telemetry honestly claimed generation, not measurement.
 This is the plan's own generated-vs-measured distinction demonstrated
-live. Stall investigation (current limit, ramp, resonance) deferred by
-Shawn; 70 glass rpm is his stated operational maximum and 200 will not be
+live. Because 200 RPM was a discretionary extension beyond the written
+≤72-RPM acceptance envelope, the stall ended that extension and is recorded
+as a physical anomaly; it does not invalidate the exercised within-envelope
+result. A stall at an acceptance-envelope speed would remain an S2-C failure.
+Stall investigation (current limit, ramp, resonance) is deferred by Shawn;
+70 glass rpm is his stated interim operational maximum and 200 will not be
 a service speed.
+
+**The 70-RPM limit is not currently enforced by the controller.** The
+controller accepted 200 RPM and, without shaft feedback, could not detect the
+stall. After S2-D establishes loaded displacement and behavior, a final
+service maximum must be selected and enforced at the controller's
+command-admission/configuration boundary before deployment. An HMI-only limit
+is insufficient because other authorized command sources use the same
+controller.
 
 **Deceleration, measured from the state manager's transition log:**
 
@@ -265,8 +289,12 @@ steel, not only in the state word.
 **Controlled exit and autonomous recovery — PASSED.** Exit via `N` → `X`
 (confirmed reboot, no configuration change). The controller booted to
 `SUPERVISORY/MQTT` gen 3 at t=5.6 s; the panel — which never rebooted —
-re-authenticated at t=22.7 s and was GRANTED 173 ms later. Its transition
-trace shows the full recovery in under 300 ms once the broker was back:
+re-authenticated at t=22.7 s and was GRANTED 173 ms later. Total
+controller/network/broker recovery to panel reacquisition was approximately
+17 seconds. Once the necessary controller/broker state was available, the
+panel's authority reacquisition sequence completed within 295 ms. The
+sub-300-ms figure applies only to that final authority sequence, not to the
+controller reboot as a whole:
 
 ```
 #8  HOLDING->IDLE        cause=OWNERSHIP_LOST    (fresh controller: owner=NONE)
@@ -282,7 +310,10 @@ old numbering (next_seq 21) and reported `next_seq=1 sync=READY`.
 **Command integrity across the whole powered session: 20 commands sent,
 20 accepted, 20 results resolved on the exact session/sequence/command-id
 triple, 0 stale, 0 unmatched, 0 refusals of any class, and controller
-`last_accepted_seq` in lockstep with the panel throughout.**
+`last_accepted_seq` in lockstep with the panel throughout. There were zero
+command, authority, synchronization, or correlation anomalies. The separate
+physical anomaly at the discretionary 200-RPM extension remains recorded
+above.**
 
 ### Observations recorded for later
 
@@ -293,6 +324,10 @@ triple, 0 stale, 0 unmatched, 0 refusals of any class, and controller
   presentation decision for the polish phase.
 - Ramp rate (~10 RPM/s pump) — tuning decision, open.
 - 200-glass-rpm stall — deferred investigation, non-operational speed.
+- Controller-enforced maximum — pre-deployment requirement after S2-D;
+  interim 70-RPM operator limit is not yet an admission limit.
+- Raw serial captures — generated during the session but not retained;
+  numerical claims cannot now be independently re-derived from those logs.
 - Serial port discipline that held all session: open each port once
   before motion, never close while energized; no device reset occurred at
   either open.
