@@ -368,6 +368,88 @@ adoption, which becomes observable the first time an operator drives the
 pump and then reboots the panel — worth one explicit check during Stage 2
 powered acceptance rather than a bench pass of its own.
 
+### Work order 2026-07-28: session-synchronization and correlation invariant (panel `f0173a1`)
+
+Shawn's independent review found two gaps in the fixes above, and ordered a
+bounded correction pass. Both are closed, with the history of the partial
+corrections preserved rather than rewritten.
+
+**Gap 1 — adoption was best-effort, not fail-closed.** The continuous-
+adoption fix still allowed a command to transmit before
+`last_accepted_sequence` had ever been received (the topic-by-topic mirror
+again: session present, sequence not yet arrived, adoption reads 0). The
+rule now: **the panel does not transmit or consume an operational command
+sequence until the controller's session AND its `last_accepted_sequence`
+have both actually been RECEIVED on the current connection.** Because 0 is
+a real value, receipt is tracked explicitly — `has_last_accepted_sequence`,
+set at exactly one place (the parser, on arrival of the topic) and revoked
+on disconnect, auth/authz failure, and session change by one helper on each
+side of the staged mirror, so no path can forget the revocation. Arrival
+order does not matter; readiness follows receipt, never a timer. Until
+ready, submission is refused as `SYNCHRONIZING — WAIT` with nothing
+transmitted, no sequence consumed, and no ledger entry; the first
+transmitted command uses `last_accepted_sequence + 1`.
+
+**Gap 2 — command results correlated on `command_id` alone.** Command IDs
+were still counter-only (`hmi-%010lu`), so a delayed result composed for a
+previous boot's command carried the exact identity of a new boot's command.
+Command IDs now carry the boot nonce (`hmi-<nonce>-<counter>`, 23 chars,
+inside the contract's 36-char S8 limit — the panel's 16-char ledger field
+was an internal limit with a comment wrongly calling it the wire limit),
+and **a result resolves a ledger entry only on an exact three-field match:
+session, sequence, command_id.** Each field is independently disqualifying.
+The ledger records the sequence per entry (as it already did the authority
+epoch) and reports what a resolve actually did, so `results_applied` counts
+only real resolutions; failed correlations are counted `results_stale` and
+change nothing.
+
+**The dropped edit, and what it proved.** The first build of this pass
+shipped with the parser's receipt line missing — a tool error during an
+editing session dropped that single edit — so receipt could never be set.
+The hardware capture caught it in one boot: `sync=WAITING` forever,
+commands refused with a truthful status. Two things worth recording. The
+fail-closed design held: the failure mode of the missing line was refusal
+with an accurate explanation, not a guessed sequence on the wire. And the
+host suite stayed green through it, because the provider tests set the
+receipt flag in their fixtures — the same green-test-proving-nothing
+failure mode this record keeps finding. A parse-level test now drives the
+production parser (value 0 must set receipt; malformed payloads must not;
+no other topic may) and would have failed that build.
+
+**Tests.** Host suite **3735 → 3821 checks, all passing**; ten new test
+functions cover the work order's thirteen scenarios: either-order topic
+arrival, refused submission with zero side effects, N+1 first command,
+disconnect/reconnect and session-change invalidation, cross-boot command-ID
+distinctness, a boot-A result against a boot-B command, and per-field
+correlation refusal at both the provider and the ledger seams. The
+59 existing ledger-test call sites were mechanically updated (uniform
+sequence 0 on both sides, preserving their original subjects); none were
+waived or removed. Acquisition-request replay protection is untouched and
+its tests still pass.
+
+**Build and hardware.** Firmware builds with **zero project warnings**.
+Three boots captured on COM18 against the unchanged controller (session
+`9b27893d…`, `last_accepted=0`): boot 1 exposed the dropped edit
+(`sync=WAITING`); boots 2 and 3, after the correction, show `sync=READY`,
+`next_seq=1` (correct for a session reporting 0), single-request
+acquisition, HOLDING with heartbeats flowing, and 0 unexpected topics,
+0 panics, 0 `NO_MEM`. The panel remains fully usable across reboot.
+
+**Hardware-proven vs host-tested, stated exactly:**
+
+| Claim | Basis |
+| --- | --- |
+| Synchronization reaches READY from real retained delivery | Hardware, boots 2–3 |
+| Fail-closed refusal while unsynchronized | Hardware (boot 1, inadvertently end-to-end) + host tests |
+| Acquisition regression: one request, HOLDING, clean | Hardware, boots 2–3 |
+| First command after sync uses N+1, N nonzero | **Host tests only** — live counter is 0; advancing it needs motion. Stage 2 check. |
+| Three-field correlation refusals | Host tests (provider and ledger seams) |
+| Cross-boot command-ID distinctness | Host tests + format proof; live two-boot command exchange needs motion |
+
+**Remaining uncertainty:** none new. The nonzero-sequence live
+demonstration remains the one deferred item, unchanged, labelled, and
+scheduled for the Stage 2 powered acceptance.
+
 ### Evidence classification
 
 | Claim | Basis |
