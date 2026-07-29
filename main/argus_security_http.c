@@ -187,6 +187,104 @@ static argus_permission_set_t permission_from_name(const char *name)
     return 0U;
 }
 
+// The permission bits a MACHINE may hold, by name. Exactly the complement of
+// the administrative set actor_can_manage() forbids on a machine, so a UI
+// built from this list cannot offer a capability the service would refuse.
+//
+// Emitted with the machines listing so the portal can render checkboxes
+// without duplicating bit constants in JavaScript. Duplicating them is how a
+// UI ends up offering a permission that does not exist, or silently omitting
+// one that does.
+static const char *const MACHINE_PERMISSION_NAMES[] = {
+    "view_status", "request_authority", "motion",
+    "software_estop", "reset_software_estop", "ack_alarms",
+};
+
+static bool add_permission_names(cJSON *item, argus_permission_set_t set)
+{
+    cJSON *names = cJSON_AddArrayToObject(item, "permission_names");
+    if (names == NULL) return false;
+    for (size_t i = 0U;
+         i < sizeof(MACHINE_PERMISSION_NAMES) / sizeof(MACHINE_PERMISSION_NAMES[0]);
+         ++i) {
+        argus_permission_set_t bit =
+            permission_from_name(MACHINE_PERMISSION_NAMES[i]);
+        if (bit == 0U || (set & bit) == 0U) continue;
+        cJSON *entry = cJSON_CreateString(MACHINE_PERMISSION_NAMES[i]);
+        if (entry == NULL) return false;
+        cJSON_AddItemToArray(names, entry);
+    }
+    return true;
+}
+
+static bool permission_array(
+    const cJSON *array, argus_permission_set_t *out);
+static bool object_keys(
+    const cJSON *object, const char *const *names, size_t count);
+static bool string_field(
+    const cJSON *object, const char *name, const char **out,
+    size_t max_length, bool allow_empty);
+
+argus_security_http_machine_body_t argus_security_http_machine_action_body(
+    const struct cJSON *root_opaque,
+    const char **out_identifier, const char **out_action,
+    bool *out_set_permissions, argus_permission_set_t *out_permissions)
+{
+    const cJSON *root = (const cJSON *)root_opaque;
+    if (out_identifier) *out_identifier = NULL;
+    if (out_action) *out_action = NULL;
+    if (out_set_permissions) *out_set_permissions = false;
+    if (out_permissions) *out_permissions = 0U;
+    if (root == NULL) return ARGUS_MACHINE_ACTION_BODY_INVALID;
+
+    // The accepted key set is per-action, and every action still requires an
+    // EXACT match - an unknown, extra or duplicated key is refused rather
+    // than ignored.
+    //
+    // set_permissions was unreachable for want of exactly this: it needs a
+    // third field, the two-key check rejected the only body that could carry
+    // one, and no test submitted a complete body through this decision. The
+    // endpoint could not have worked at all.
+    static const char *const KEYS[] = {"id", "action"};
+    static const char *const KEYS_WITH_PERMISSIONS[] = {
+        "id", "action", "permissions"};
+
+    // The action is read before the key set is chosen, and is trusted for
+    // nothing else - the exact-key check still has to pass afterwards, so a
+    // body claiming set_permissions without the field is still refused.
+    const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
+    bool wants_permissions =
+        cJSON_IsString(action_item) && action_item->valuestring != NULL &&
+        strcmp(action_item->valuestring, "set_permissions") == 0;
+
+    const char *identifier = NULL;
+    const char *action = NULL;
+    if (!(wants_permissions ? object_keys(root, KEYS_WITH_PERMISSIONS, 3U)
+                            : object_keys(root, KEYS, 2U)) ||
+        !string_field(root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) ||
+        !string_field(root, "action", &action, 16U, false)) {
+        return ARGUS_MACHINE_ACTION_BODY_INVALID;
+    }
+
+    if (wants_permissions) {
+        argus_permission_set_t permissions = 0U;
+        // An unrecognised or duplicated permission name fails the WHOLE
+        // request rather than granting a subset. A partial grant that looked
+        // like a success is the failure this endpoint must not have.
+        if (!permission_array(
+                cJSON_GetObjectItemCaseSensitive(root, "permissions"),
+                &permissions)) {
+            return ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS;
+        }
+        if (out_permissions) *out_permissions = permissions;
+    }
+
+    if (out_identifier) *out_identifier = identifier;
+    if (out_action) *out_action = action;
+    if (out_set_permissions) *out_set_permissions = wants_permissions;
+    return ARGUS_MACHINE_ACTION_BODY_OK;
+}
+
 static bool permission_array(
     const cJSON *array, argus_permission_set_t *out)
 {
@@ -1289,6 +1387,7 @@ static esp_err_t machines_get(httpd_req_t *req)
                 item, "api_scope", record->api_scope) != NULL &&
             cJSON_AddStringToObject(
                 item, "permissions", permissions) != NULL &&
+            add_permission_names(item, record->permissions) &&
             cJSON_AddNumberToObject(
                 item, "credential_version",
                 record->credential_version) != NULL &&
@@ -1484,15 +1583,32 @@ static esp_err_t machine_action_post(httpd_req_t *req)
         return ESP_OK;
     }
     cJSON *root = receive_object(req);
-    static const char *const KEYS[] = {"id", "action"};
     const char *identifier = NULL;
     const char *action = NULL;
-    bool valid = root != NULL && object_keys(root, KEYS, 2U) &&
-        string_field(
-            root, "id", &identifier, ARGUS_SECURITY_ID_MAX, false) &&
-        string_field(root, "action", &action, 16U, false);
+    bool set_permissions = false;
+    argus_permission_set_t requested_permissions = 0U;
+    argus_security_http_machine_body_t body =
+        argus_security_http_machine_action_body(
+            (const struct cJSON *)root, &identifier, &action,
+            &set_permissions, &requested_permissions);
+    if (body == ARGUS_MACHINE_ACTION_BODY_INVALID_PERMISSIONS) {
+        cJSON_Delete(root);
+        memset(&security, 0, sizeof(security));
+        return send_json(
+            req, "400 Bad Request",
+            "{\"ok\":false,\"error\":\"invalid_permissions\"}");
+    }
+    bool valid = body == ARGUS_MACHINE_ACTION_BODY_OK;
     bool rotation = valid && strcmp(action, "rotate") == 0;
-    if (rotation &&
+    // Recent re-authentication is required for BOTH minting a secret and
+    // changing what a machine may do. For rotation the reason is that a
+    // credential is being issued. For a permission change the reason Shawn
+    // gave is better and is the one recorded here: it is a confirmation
+    // step, not an access control. Granting MOTION is the difference between
+    // a panel that watches a pump and a panel that can move one, and the
+    // expensive mistake is the accidental click on the wrong row - not an
+    // attacker who already holds an administrative session.
+    if ((rotation || set_permissions) &&
         !argus_session_manager_recently_reauthenticated(
             security.session_index)) {
         cJSON_Delete(root);
@@ -1516,7 +1632,8 @@ static esp_err_t machine_action_post(httpd_req_t *req)
     }
     cJSON_Delete(root);
     if (!valid ||
-        (!rotation && strcmp(action_copy, "enable") != 0 &&
+        (!rotation && !set_permissions &&
+         strcmp(action_copy, "enable") != 0 &&
          strcmp(action_copy, "disable") != 0 &&
          strcmp(action_copy, "revoke") != 0 &&
          strcmp(action_copy, "delete") != 0)) {
@@ -1525,7 +1642,11 @@ static esp_err_t machine_action_post(httpd_req_t *req)
             req, "400 Bad Request",
             "{\"ok\":false,\"error\":\"invalid_request\"}");
     }
-    argus_permission_set_t required = rotation
+    // set_permissions GRANTS, so it needs the enrolment capability rather
+    // than the weaker revoke capability - "can take away" must not become a
+    // route to handing out MOTION. The service enforces this again; both
+    // checks are deliberate.
+    argus_permission_set_t required = (rotation || set_permissions)
         ? ARGUS_PERMISSION_ENROLL_MACHINES
         : ARGUS_PERMISSION_REVOKE_MACHINES;
     if (argus_authorization_require(&security.principal, required) !=
@@ -1537,8 +1658,22 @@ static esp_err_t machine_action_post(httpd_req_t *req)
     }
 
     argus_security_audit_mutation_t mutation;
+    // For a permission change the bare verb is not a useful audit record:
+    // "set_permissions" cannot answer "when did this panel get MOTION". The
+    // audit therefore carries the REQUESTED set as hex. The previous set is
+    // returned by the service and echoed in the response, because it is not
+    // knowable here - the audit opens before the mutation reads the record,
+    // and reading the directory twice to pre-fetch it would race the commit.
+    char audit_action[17];
+    argus_permission_set_t previous_permissions = 0U;
+    if (set_permissions) {
+        snprintf(audit_action, sizeof(audit_action), "perm:%08lx",
+                 (unsigned long)requested_permissions);
+    } else {
+        strlcpy(audit_action, action_copy, sizeof(audit_action));
+    }
     esp_err_t err = begin_admin_audit(
-        &security, event, id_copy, action_copy, &mutation);
+        &security, event, id_copy, audit_action, &mutation);
     argus_machine_credential_once_t credential = {0};
     argus_security_http_machine_action_decision_t decision = {0};
     if (err == ESP_OK) {
@@ -1555,6 +1690,10 @@ static esp_err_t machine_action_post(httpd_req_t *req)
                    strcmp(action_copy, "disable") == 0) {
             mutation_error = argus_machine_service_set_enabled(
                 &security.principal, id_copy, false);
+        } else if (mutation_error == ESP_OK && set_permissions) {
+            mutation_error = argus_machine_service_set_permissions(
+                &security.principal, id_copy, requested_permissions,
+                &previous_permissions);
         } else if (mutation_error == ESP_OK &&
                    strcmp(action_copy, "revoke") == 0) {
             mutation_error = argus_machine_service_revoke(
@@ -1598,6 +1737,21 @@ static esp_err_t machine_action_post(httpd_req_t *req)
         return response;
     }
     memset(&actor, 0, sizeof(actor));
+    if (set_permissions) {
+        // Echo BOTH sets. The operator's confirmation is then the resulting
+        // state rather than their own intent - which is the whole reason
+        // this endpoint exists in a form an operator drives by hand.
+        char body[96];
+        int written = snprintf(
+            body, sizeof(body),
+            "{\"ok\":true,\"previous_permissions\":\"%08lx\","
+            "\"permissions\":\"%08lx\"}",
+            (unsigned long)previous_permissions,
+            (unsigned long)requested_permissions);
+        if (written > 0 && (size_t)written < sizeof(body)) {
+            return send_json(req, "200 OK", body);
+        }
+    }
     return send_json(req, "200 OK", "{\"ok\":true}");
 }
 

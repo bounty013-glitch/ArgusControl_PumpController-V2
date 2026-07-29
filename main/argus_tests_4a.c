@@ -1,4 +1,4 @@
-#include <stdlib.h>
+﻿#include <stdlib.h>
 /**
  * @file argus_tests_4a.c
  * @brief Phase 4A Pure Non-Motion Unit Test Suite Implementation (100% Stack-Local Isolation)
@@ -1106,7 +1106,7 @@ static bool check_full_state_invariance(const argus_prod_snapshot_t *b, const ar
     return match;
 }
 
-/* ── Phase 4B.1 Pure Tests ───────────────────────────────────────── */
+/* â”€â”€ Phase 4B.1 Pure Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 /**
  * @brief Test json_escape with edge cases.
@@ -1137,7 +1137,7 @@ static esp_err_t test_http_json_escape_safety(void)
     argus_http_test_json_escape("a\nb\tc", dst, sizeof(dst));
     TEST_ASSERT(strcmp(dst, "a b c") == 0, "Control char replacement failed");
 
-    /* Truncation — 4-byte buffer: json_escape reserves 2 bytes at end for
+    /* Truncation â€” 4-byte buffer: json_escape reserves 2 bytes at end for
      * potential escape pair + NUL, so dst_size=4 yields at most 2 chars + NUL.
      * Output must be NUL-terminated within the buffer. */
     argus_http_test_json_escape("abcdef", dst, 4);
@@ -1169,9 +1169,9 @@ static esp_err_t test_http_json_escape_safety(void)
  * on-device acceptance, not run here.
  */
 
-/* ═══════════════════════════════════════════════════════════════════
- * Phase 4B.2 Pure Tests (Tests 20–47)
- * ═══════════════════════════════════════════════════════════════════ */
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+ * Phase 4B.2 Pure Tests (Tests 20â€“47)
+ * â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 
 // Test 20: Identity-only config (no WiFi) passes validate + commit via core API
 static esp_err_t test_nvs_commit_identity_only_payload(void)
@@ -1187,7 +1187,7 @@ static esp_err_t test_nvs_commit_identity_only_payload(void)
     snprintf(cfg.client_id, sizeof(cfg.client_id), "acme_corp");
     snprintf(cfg.unit_id, sizeof(cfg.unit_id), "pump_001");
     snprintf(cfg.device_name, sizeof(cfg.device_name), "Main Process Pump");
-    /* No WiFi — identity only */
+    /* No WiFi â€” identity only */
     cfg.provisioned_flags = 0;
 
     /* Validate accepts identity-only payloads */
@@ -1237,7 +1237,7 @@ static esp_err_t test_identity_provisioned_lock_flag(void)
     TEST_ASSERT(strcmp(readback.client_id, "locked_client") == 0,
                 "Identity not preserved with provisioned flag");
 
-    /* Reinit the core (simulating reboot) — flag must survive */
+    /* Reinit the core (simulating reboot) â€” flag must survive */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
     TEST_ASSERT(argus_nvs_core_get(&core2, &readback) == ESP_OK, "Post-reinit get failed");
@@ -1246,23 +1246,23 @@ static esp_err_t test_identity_provisioned_lock_flag(void)
     return ESP_OK;
 }
 
-// Test 22: Partial identity provisioning rejected — all three fields required
+// Test 22: Partial identity provisioning rejected â€” all three fields required
 static esp_err_t test_identity_partial_provisioning_rejected(void)
 {
-    /* client_id only — unit_id empty */
+    /* client_id only â€” unit_id empty */
     argus_config_payload_t cfg1 = {0};
     snprintf(cfg1.client_id, sizeof(cfg1.client_id), "valid_client");
     /* unit_id and device_name remain empty */
     TEST_ASSERT(argus_nvs_config_validate(&cfg1) != ESP_OK,
                 "Accepted payload with empty unit_id");
 
-    /* unit_id only — client_id empty */
+    /* unit_id only â€” client_id empty */
     argus_config_payload_t cfg2 = {0};
     snprintf(cfg2.unit_id, sizeof(cfg2.unit_id), "valid_unit");
     TEST_ASSERT(argus_nvs_config_validate(&cfg2) != ESP_OK,
                 "Accepted payload with empty client_id");
 
-    /* All three present — should pass */
+    /* All three present â€” should pass */
     argus_config_payload_t cfg3 = {0};
     snprintf(cfg3.client_id, sizeof(cfg3.client_id), "c");
     snprintf(cfg3.unit_id, sizeof(cfg3.unit_id), "u");
@@ -1369,7 +1369,7 @@ static esp_err_t test_omitted_password_preserves_stored(void)
     TEST_ASSERT(argus_nvs_core_get(&core, &overlay) == ESP_OK, "Get failed");
     TEST_ASSERT(strcmp(overlay.sta_pass, "OriginalPass") == 0, "Password not preserved from get()");
 
-    /* Commit unchanged overlay — password should persist */
+    /* Commit unchanged overlay â€” password should persist */
     TEST_ASSERT(argus_nvs_core_commit(&core, &overlay) == ESP_OK, "Overlay commit failed");
 
     argus_config_payload_t readback;
@@ -1469,10 +1469,10 @@ static esp_err_t test_provisioned_identity_immutable(void)
                 "Flag not set after commit+readback");
 
     /* The HTTP handler would check this flag and reject modification.
-     * At the NVS core level, the flag is just data — enforcement is in HTTP.
+     * At the NVS core level, the flag is just data â€” enforcement is in HTTP.
      * This test proves the flag survives the read-modify-write cycle. */
     snprintf(overlay.client_id, sizeof(overlay.client_id), "hacked_co");
-    TEST_ASSERT(argus_nvs_core_commit(&core, &overlay) == ESP_OK, "Core commit shouldn't reject — HTTP does");
+    TEST_ASSERT(argus_nvs_core_commit(&core, &overlay) == ESP_OK, "Core commit shouldn't reject â€” HTTP does");
 
     /* Verify flag persists even after identity change at core level */
     argus_config_payload_t readback;
@@ -1482,7 +1482,7 @@ static esp_err_t test_provisioned_identity_immutable(void)
     return ESP_OK;
 }
 
-// Test 29: Monotonic provisioning LKG rollback — HWM prevents identity reopening
+// Test 29: Monotonic provisioning LKG rollback â€” HWM prevents identity reopening
 static esp_err_t test_monotonic_provisioning_lkg_rollback(void)
 {
     mock_nvs_store_t store = {0};
@@ -1516,12 +1516,12 @@ static esp_err_t test_monotonic_provisioning_lkg_rollback(void)
         store.slot_b.crc32 ^= 0xDEADBEEF;
     }
 
-    /* Step 4: Reinit — should LKG from gen=1 */
+    /* Step 4: Reinit â€” should LKG from gen=1 */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
     TEST_ASSERT(core2.has_valid_config, "LKG not recovered after active slot corruption");
 
-    /* Step 5: Readback — monotonic HWM prevents identity reopening */
+    /* Step 5: Readback â€” monotonic HWM prevents identity reopening */
     argus_config_payload_t readback;
     TEST_ASSERT(argus_nvs_core_get(&core2, &readback) == ESP_OK, "LKG readback failed");
     TEST_ASSERT((readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY) != 0,
@@ -1531,7 +1531,7 @@ static esp_err_t test_monotonic_provisioning_lkg_rollback(void)
     return ESP_OK;
 }
 
-// Test 30: Restart safety via production seam — unsafe states rejected
+// Test 30: Restart safety via production seam â€” unsafe states rejected
 static esp_err_t test_restart_safety_via_seam_unsafe(void)
 {
     argus_machine_state_t unsafe_states[] = {
@@ -1550,7 +1550,7 @@ static esp_err_t test_restart_safety_via_seam_unsafe(void)
                     "Unsafe state incorrectly classified as safe for restart");
     }
 
-    /* HOLDING with estop latched — estop overrides */
+    /* HOLDING with estop latched â€” estop overrides */
     argus_state_snapshot_t holding_estop = {0};
     holding_estop.machine_state = ARGUS_STATE_HOLDING;
     holding_estop.estop_latched = true;
@@ -1559,7 +1559,7 @@ static esp_err_t test_restart_safety_via_seam_unsafe(void)
     return ESP_OK;
 }
 
-// Test 31: Restart safety via production seam — safe states accepted
+// Test 31: Restart safety via production seam â€” safe states accepted
 static esp_err_t test_restart_safety_via_seam_safe(void)
 {
     argus_state_snapshot_t holding = {0};
@@ -1576,7 +1576,7 @@ static esp_err_t test_restart_safety_via_seam_safe(void)
     return ESP_OK;
 }
 
-/* ── Restart transaction mock infrastructure ──────────────────────── */
+/* â”€â”€ Restart transaction mock infrastructure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 typedef struct {
     int call_log[20];
@@ -1667,7 +1667,7 @@ static void make_mock_restart_ops(argus_restart_ops_t *ops, mock_restart_ctx_t *
     ops->ctx = ctx;
 }
 
-// Test 32: Restart transaction success — 8-step ordering verified
+// Test 32: Restart transaction success â€” 8-step ordering verified
 static esp_err_t test_restart_transaction_success(void)
 {
     mock_restart_ctx_t ctx;
@@ -1715,7 +1715,7 @@ static esp_err_t test_new_ssid_without_password_rejected(void)
     snprintf(cfg.unit_id, sizeof(cfg.unit_id), "u");
     snprintf(cfg.device_name, sizeof(cfg.device_name), "d");
     snprintf(cfg.sta_ssid, sizeof(cfg.sta_ssid), "NewNetwork");
-    /* Password empty — should be rejected because SSID is non-empty */
+    /* Password empty â€” should be rejected because SSID is non-empty */
     TEST_ASSERT(argus_nvs_config_validate(&cfg) != ESP_OK,
                 "SSID with empty password accepted by validate");
 
@@ -1731,7 +1731,7 @@ static esp_err_t test_new_ssid_without_password_rejected(void)
     return ESP_OK;
 }
 
-// Test 34: V1→V2 schema migration — provisioned_flags defaults to 0
+// Test 34: V1â†’V2 schema migration â€” provisioned_flags defaults to 0
 static esp_err_t test_schema_v1_migration(void)
 {
     mock_nvs_store_t store = {0};
@@ -1774,7 +1774,7 @@ static esp_err_t test_schema_v1_migration(void)
     store.selector = 0;
     store.has_selector = true;
 
-    /* Init should transparently migrate V1→V2 */
+    /* Init should transparently migrate V1â†’V2 */
     argus_nvs_core_t core;
     TEST_ASSERT(argus_nvs_core_init(&core, &driver) == ESP_OK, "V1 migration init failed");
     TEST_ASSERT(core.has_valid_config, "V1 config not recognized after migration");
@@ -1877,7 +1877,7 @@ static esp_err_t test_authority_profile_range_rejected(void)
     return ESP_OK;
 }
 
-// Test 35: Restart transaction preflight failure — gate acquired and released, no side effects
+// Test 35: Restart transaction preflight failure â€” gate acquired and released, no side effects
 static esp_err_t test_restart_transaction_preflight_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -1902,7 +1902,7 @@ static esp_err_t test_restart_transaction_preflight_failure(void)
     return ESP_OK;
 }
 
-// Test 36: Restart transaction final safety failure — authority revoked, no reboot, gate released
+// Test 36: Restart transaction final safety failure â€” authority revoked, no reboot, gate released
 static esp_err_t test_restart_transaction_final_safety_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -1925,7 +1925,7 @@ static esp_err_t test_restart_transaction_final_safety_failure(void)
     return ESP_OK;
 }
 
-// Test 37: Config overlay — identity scope sets PROVISIONED lock, preserves WiFi
+// Test 37: Config overlay â€” identity scope sets PROVISIONED lock, preserves WiFi
 static esp_err_t test_overlay_identity_sets_lock(void)
 {
     /* Current config: has WiFi, no identity lock */
@@ -1959,7 +1959,7 @@ static esp_err_t test_overlay_identity_sets_lock(void)
     return ESP_OK;
 }
 
-// Test 38: Config overlay — locked identity rejected
+// Test 38: Config overlay â€” locked identity rejected
 static esp_err_t test_overlay_locked_identity_rejected(void)
 {
     argus_config_payload_t current = {0};
@@ -1985,7 +1985,7 @@ static esp_err_t test_overlay_locked_identity_rejected(void)
     return ESP_OK;
 }
 
-// Test 39: Config overlay — partial identity (missing unit_id) rejected
+// Test 39: Config overlay â€” partial identity (missing unit_id) rejected
 static esp_err_t test_overlay_partial_identity_rejected(void)
 {
     argus_config_payload_t current = {0};
@@ -2006,7 +2006,7 @@ static esp_err_t test_overlay_partial_identity_rejected(void)
     return ESP_OK;
 }
 
-// Test 40: Config overlay — WiFi overlay preserves identity fields and lock flag
+// Test 40: Config overlay â€” WiFi overlay preserves identity fields and lock flag
 static esp_err_t test_overlay_wifi_preserves_identity(void)
 {
     argus_config_payload_t current = {0};
@@ -2038,7 +2038,7 @@ static esp_err_t test_overlay_wifi_preserves_identity(void)
     return ESP_OK;
 }
 
-// Test 41: Config overlay — same SSID, no password field → existing password preserved
+// Test 41: Config overlay â€” same SSID, no password field â†’ existing password preserved
 static esp_err_t test_overlay_same_ssid_preserves_password(void)
 {
     argus_config_payload_t current = {0};
@@ -2051,7 +2051,7 @@ static esp_err_t test_overlay_same_ssid_preserves_password(void)
     argus_config_fields_t fields = {0};
     fields.has_sta_ssid = true;
     snprintf(fields.sta_ssid, sizeof(fields.sta_ssid), "SameSSID");
-    /* has_sta_pass = false → password not provided */
+    /* has_sta_pass = false â†’ password not provided */
 
     argus_config_payload_t out = {0};
     argus_config_overlay_result_t result = argus_config_overlay_apply(
@@ -2063,7 +2063,7 @@ static esp_err_t test_overlay_same_ssid_preserves_password(void)
     return ESP_OK;
 }
 
-// Test 42: Config overlay — new SSID without password rejected
+// Test 42: Config overlay â€” new SSID without password rejected
 static esp_err_t test_overlay_new_ssid_no_password_rejected(void)
 {
     argus_config_payload_t current = {0};
@@ -2087,7 +2087,7 @@ static esp_err_t test_overlay_new_ssid_no_password_rejected(void)
     return ESP_OK;
 }
 
-// Test 43: Config overlay — explicit WiFi clear (empty SSID) clears both, preserves identity
+// Test 43: Config overlay â€” explicit WiFi clear (empty SSID) clears both, preserves identity
 static esp_err_t test_overlay_explicit_wifi_clear(void)
 {
     argus_config_payload_t current = {0};
@@ -2100,7 +2100,7 @@ static esp_err_t test_overlay_explicit_wifi_clear(void)
 
     argus_config_fields_t fields = {0};
     fields.has_sta_ssid = true;
-    fields.sta_ssid[0] = '\0';  /* Empty SSID → clear */
+    fields.sta_ssid[0] = '\0';  /* Empty SSID â†’ clear */
 
     argus_config_payload_t out = {0};
     argus_config_overlay_result_t result = argus_config_overlay_apply(
@@ -2115,7 +2115,7 @@ static esp_err_t test_overlay_explicit_wifi_clear(void)
     return ESP_OK;
 }
 
-// Test 44: Config overlay — mask string password rejected
+// Test 44: Config overlay â€” mask string password rejected
 static esp_err_t test_overlay_mask_string_rejected(void)
 {
     argus_config_payload_t current = {0};
@@ -2139,7 +2139,7 @@ static esp_err_t test_overlay_mask_string_rejected(void)
     return ESP_OK;
 }
 
-// Test 45: Config overlay — unknown scope rejected + scope parser tests
+// Test 45: Config overlay â€” unknown scope rejected + scope parser tests
 static esp_err_t test_overlay_unknown_scope_rejected(void)
 {
     argus_config_payload_t current = {0};
@@ -2166,7 +2166,7 @@ static esp_err_t test_overlay_unknown_scope_rejected(void)
     return ESP_OK;
 }
 
-// Test 46: Config overlay — new password replaces old on same SSID
+// Test 46: Config overlay â€” new password replaces old on same SSID
 static esp_err_t test_overlay_new_password_replaces(void)
 {
     argus_config_payload_t current = {0};
@@ -2217,9 +2217,9 @@ static esp_err_t test_commissioned_requires_wifi(void)
     return ESP_OK;
 }
 
-/* ── Item 1: HWM error handling tests ──────────────────────────────── */
+/* â”€â”€ Item 1: HWM error handling tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-// Test 48: HWM read failure fails closed — identity locked
+// Test 48: HWM read failure fails closed â€” identity locked
 static esp_err_t test_hwm_read_failure_fails_closed(void)
 {
     mock_nvs_store_t store = {0};
@@ -2269,7 +2269,7 @@ static esp_err_t test_hwm_write_failure_rejects_commit(void)
     /* Install a failing HWM write */
     store.hwm_write_error = ESP_ERR_NVS_INVALID_HANDLE;
 
-    /* Attempt to commit with PROVISIONED flag — should fail */
+    /* Attempt to commit with PROVISIONED flag â€” should fail */
     argus_config_payload_t cfg = {0};
     snprintf(cfg.client_id, sizeof(cfg.client_id), "co");
     snprintf(cfg.unit_id, sizeof(cfg.unit_id), "unit");
@@ -2309,7 +2309,7 @@ static esp_err_t test_factory_reset_clears_hwm(void)
     /* Factory reset (erase_all) clears everything */
     TEST_ASSERT(driver.erase_all(driver.ctx) == ESP_OK, "Erase failed");
 
-    /* Reinit — should have no valid config and no HWM */
+    /* Reinit â€” should have no valid config and no HWM */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
     TEST_ASSERT(!core2.has_valid_config, "Config valid after factory reset");
@@ -2317,9 +2317,9 @@ static esp_err_t test_factory_reset_clears_hwm(void)
     return ESP_OK;
 }
 
-/* ── Item 2: Dispatch gate tests ───────────────────────────────────── */
+/* â”€â”€ Item 2: Dispatch gate tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-// Test 51: Restart authority-revocation failure — gate released, no reboot
+// Test 51: Restart authority-revocation failure â€” gate released, no reboot
 static esp_err_t test_restart_revoke_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -2342,7 +2342,7 @@ static esp_err_t test_restart_revoke_failure(void)
     return ESP_OK;
 }
 
-// Test 52: Restart HTTP-stop failure — authority revoked, gate released, no reboot
+// Test 52: Restart HTTP-stop failure â€” authority revoked, gate released, no reboot
 static esp_err_t test_restart_http_stop_failure(void)
 {
     mock_restart_ctx_t ctx;
@@ -2367,7 +2367,7 @@ static esp_err_t test_restart_http_stop_failure(void)
 // Test 53: Restart truthful result flags on every path
 static esp_err_t test_restart_truthful_flags(void)
 {
-    /* Path 1: Preflight failure — no ops except lock/unlock */
+    /* Path 1: Preflight failure â€” no ops except lock/unlock */
     {
         mock_restart_ctx_t ctx;
         init_mock_restart_ctx(&ctx);
@@ -2379,7 +2379,7 @@ static esp_err_t test_restart_truthful_flags(void)
         TEST_ASSERT(!r.http_stopped, "P1: http_stopped");
         TEST_ASSERT(!r.dispatch_locked, "P1: dispatch leaked");
     }
-    /* Path 2: Revoke failure — authority NOT revoked */
+    /* Path 2: Revoke failure â€” authority NOT revoked */
     {
         mock_restart_ctx_t ctx;
         init_mock_restart_ctx(&ctx);
@@ -2390,7 +2390,7 @@ static esp_err_t test_restart_truthful_flags(void)
         TEST_ASSERT(!r.authority_revoked, "P2: authority_revoked");
         TEST_ASSERT(!r.dispatch_locked, "P2: dispatch leaked");
     }
-    /* Path 3: HTTP stop failure — authority revoked, HTTP NOT stopped */
+    /* Path 3: HTTP stop failure â€” authority revoked, HTTP NOT stopped */
     {
         mock_restart_ctx_t ctx;
         init_mock_restart_ctx(&ctx);
@@ -2401,7 +2401,7 @@ static esp_err_t test_restart_truthful_flags(void)
         TEST_ASSERT(r.authority_revoked, "P3: not revoked");
         TEST_ASSERT(!r.http_stopped, "P3: http_stopped");
     }
-    /* Path 4: Success — all true */
+    /* Path 4: Success â€” all true */
     {
         mock_restart_ctx_t ctx;
         init_mock_restart_ctx(&ctx);
@@ -2415,9 +2415,9 @@ static esp_err_t test_restart_truthful_flags(void)
     return ESP_OK;
 }
 
-/* ── Item 3: JSON parser tests ─────────────────────────────────────── */
+/* â”€â”€ Item 3: JSON parser tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
-// Test 54: JSON extract — valid string, absent key, empty string
+// Test 54: JSON extract â€” valid string, absent key, empty string
 static esp_err_t test_json_extract_basic(void)
 {
     const char *json = "{\"name\":\"Argus\",\"empty\":\"\",\"num\":42}";
@@ -2440,7 +2440,7 @@ static esp_err_t test_json_extract_basic(void)
     return ESP_OK;
 }
 
-// Test 55: JSON extract — type mismatch (non-string value)
+// Test 55: JSON extract â€” type mismatch (non-string value)
 static esp_err_t test_json_extract_type_mismatch(void)
 {
     const char *json = "{\"num\":42,\"bool\":true,\"arr\":[1,2]}";
@@ -2455,7 +2455,7 @@ static esp_err_t test_json_extract_type_mismatch(void)
     return ESP_OK;
 }
 
-// Test 56: JSON extract — unterminated string
+// Test 56: JSON extract â€” unterminated string
 static esp_err_t test_json_extract_unterminated(void)
 {
     const char *json = "{\"name\":\"Argus}";
@@ -2466,7 +2466,7 @@ static esp_err_t test_json_extract_unterminated(void)
     return ESP_OK;
 }
 
-// Test 57: JSON extract — overflow (string too long for buffer)
+// Test 57: JSON extract â€” overflow (string too long for buffer)
 static esp_err_t test_json_extract_overflow(void)
 {
     const char *json = "{\"name\":\"ThisIsAVeryLongString\"}";
@@ -2477,7 +2477,7 @@ static esp_err_t test_json_extract_overflow(void)
     return ESP_OK;
 }
 
-// Test 58: JSON extract — boundary length (exact fit)
+// Test 58: JSON extract â€” boundary length (exact fit)
 static esp_err_t test_json_extract_boundary_length(void)
 {
     /* Buffer of 6 can hold 5 chars + NUL */
@@ -2495,7 +2495,7 @@ static esp_err_t test_json_extract_boundary_length(void)
     return ESP_OK;
 }
 
-// Test 59: JSON extract — escaped characters
+// Test 59: JSON extract â€” escaped characters
 static esp_err_t test_json_extract_escaped(void)
 {
     const char *json = "{\"msg\":\"hello\\\"world\"}";
@@ -2520,7 +2520,7 @@ static esp_err_t test_json_has_key(void)
     return ESP_OK;
 }
 
-/* ── Core NVS algorithm tests (stack-local, no production singletons) ─ */
+/* â”€â”€ Core NVS algorithm tests (stack-local, no production singletons) â”€ */
 /* Production wrapper delegation proven statically:
  *   argus_nvs_config_init()   calls argus_nvs_core_init(&s_prod_core, drv)
  *   argus_nvs_config_commit() calls argus_nvs_core_commit(&s_prod_core, in_cfg)
@@ -2701,7 +2701,7 @@ static esp_err_t test_reinit_recovers_after_selector_failure(void)
     /* Clear the selector write error (simulating power cycle) */
     store.selector_write_error = ESP_OK;
 
-    /* Reinit — core should detect HWM proves provisioning, selector
+    /* Reinit â€” core should detect HWM proves provisioning, selector
      * points to unprovisioned slot, and recover to the provisioned slot.
      * Selector repair is best-effort. */
     argus_nvs_core_t core2;
@@ -2743,7 +2743,7 @@ static esp_err_t test_provisioned_slot_corruption_cannot_reopen(void)
         store.slot_b.valid_marker = 0;
     }
 
-    /* Reinit — corrupted slot is invalid, but HWM survives */
+    /* Reinit â€” corrupted slot is invalid, but HWM survives */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
 
@@ -2756,7 +2756,7 @@ static esp_err_t test_provisioned_slot_corruption_cannot_reopen(void)
     return ESP_OK;
 }
 
-// Test 68: Successful factory reset via production helper — full orchestration
+// Test 68: Successful factory reset via production helper â€” full orchestration
 static esp_err_t test_core_factory_reset_clears_lock(void)
 {
     mock_nvs_store_t store = {0};
@@ -2844,7 +2844,7 @@ static esp_err_t test_core_hwm_persists_across_reinit(void)
     uint8_t hwm_val = store.provisioned_hwm;
     TEST_ASSERT(hwm_val & ARGUS_CFG_PROVISIONED_IDENTITY, "HWM value wrong");
 
-    /* Reinit — HWM must be read and enforced */
+    /* Reinit â€” HWM must be read and enforced */
     argus_nvs_core_t core2;
     TEST_ASSERT(argus_nvs_core_init(&core2, &driver) == ESP_OK, "Reinit failed");
     argus_config_payload_t readback;
@@ -2852,7 +2852,7 @@ static esp_err_t test_core_hwm_persists_across_reinit(void)
     TEST_ASSERT(readback.provisioned_flags & ARGUS_CFG_PROVISIONED_IDENTITY,
                 "HWM not enforced on reinit");
 
-    /* Attempt to commit with provisioned_flags=0 through core —
+    /* Attempt to commit with provisioned_flags=0 through core â€”
      * HWM enforcement in core_commit must preserve the lock */
     argus_config_payload_t cfg2 = {0};
     snprintf(cfg2.client_id, sizeof(cfg2.client_id), "new_co");
@@ -2871,9 +2871,9 @@ static esp_err_t test_core_hwm_persists_across_reinit(void)
     return ESP_OK;
 }
 
-/* ── Reset transaction durability tests (via production helpers) ─── */
+/* â”€â”€ Reset transaction durability tests (via production helpers) â”€â”€â”€ */
 
-// Test 71: Pending-write failure via factory-reset helper — no erase, data intact
+// Test 71: Pending-write failure via factory-reset helper â€” no erase, data intact
 static esp_err_t test_reset_pend_write_fails_no_erase(void)
 {
     mock_nvs_store_t store = {0};
@@ -2895,7 +2895,7 @@ static esp_err_t test_reset_pend_write_fails_no_erase(void)
     esp_err_t err = argus_nvs_core_factory_reset(&core, &driver);
     TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE, "Wrong error");
 
-    /* No erase occurred — original data intact */
+    /* No erase occurred â€” original data intact */
     TEST_ASSERT(store.has_provisioned_hwm, "HWM lost despite pend-write failure");
     TEST_ASSERT(store.has_slot_a || store.has_slot_b, "Slots lost despite pend-write failure");
     TEST_ASSERT(!store.reset_pending, "Pending set despite write failure");
@@ -2904,7 +2904,7 @@ static esp_err_t test_reset_pend_write_fails_no_erase(void)
     return ESP_OK;
 }
 
-// Test 72: Erase failure via factory-reset helper — pending survives, exact error
+// Test 72: Erase failure via factory-reset helper â€” pending survives, exact error
 static esp_err_t test_reset_erase_fails_pending_survives(void)
 {
     mock_nvs_store_t store = {0};
@@ -2926,14 +2926,14 @@ static esp_err_t test_reset_erase_fails_pending_survives(void)
     esp_err_t err = argus_nvs_core_factory_reset(&core, &driver);
     TEST_ASSERT(err == ESP_ERR_FLASH_BASE, "Wrong erase error");
 
-    /* Pending MUST remain true — recovery on next boot */
+    /* Pending MUST remain true â€” recovery on next boot */
     TEST_ASSERT(store.reset_pending, "Pending cleared despite erase failure");
     /* Data must survive since erase failed */
     TEST_ASSERT(store.has_provisioned_hwm, "HWM lost despite erase failure");
     return ESP_OK;
 }
 
-// Test 73: Pending-clear failure via factory-reset helper — pending remains, core reinitialized
+// Test 73: Pending-clear failure via factory-reset helper â€” pending remains, core reinitialized
 static esp_err_t test_reset_clear_fails_pending_remains(void)
 {
     mock_nvs_store_t store = {0};
@@ -2973,7 +2973,7 @@ static esp_err_t test_reset_clear_fails_pending_remains(void)
     /* Verify the pending-clear write was attempted exactly once */
     TEST_ASSERT(store.pend_clear_calls == 1, "Pending-clear not called exactly once");
 
-    /* Reset pending MUST remain true — will retry on next boot */
+    /* Reset pending MUST remain true â€” will retry on next boot */
     TEST_ASSERT(store.reset_pending, "Pending cleared despite clear failure");
 
     /* Configuration data IS erased (erase succeeded before clear failed) */
@@ -3026,7 +3026,7 @@ static esp_err_t test_reset_boot_recovery_reruns_erase(void)
     return ESP_OK;
 }
 
-// Test 75: Pending-read error via recovery helper — not interpreted as false
+// Test 75: Pending-read error via recovery helper â€” not interpreted as false
 static esp_err_t test_reset_pend_read_error_propagates(void)
 {
     mock_nvs_store_t store = {0};
@@ -3037,11 +3037,11 @@ static esp_err_t test_reset_pend_read_error_propagates(void)
     store.reset_pend_read_error = ESP_ERR_NVS_INVALID_HANDLE;
     esp_err_t err = argus_nvs_core_recovery_check(&driver);
     TEST_ASSERT(err == ESP_ERR_NVS_INVALID_HANDLE,
-                "Read error not propagated — was hidden as not-pending");
+                "Read error not propagated â€” was hidden as not-pending");
     return ESP_OK;
 }
 
-// Test 76: Missing pending via recovery helper — no erase, success
+// Test 76: Missing pending via recovery helper â€” no erase, success
 static esp_err_t test_reset_pend_missing_is_not_pending(void)
 {
     mock_nvs_store_t store = {0};
@@ -3058,7 +3058,7 @@ static esp_err_t test_reset_pend_missing_is_not_pending(void)
     return ESP_OK;
 }
 
-// Test 77: Recovery erase failure via recovery helper — exact error, pending preserved
+// Test 77: Recovery erase failure via recovery helper â€” exact error, pending preserved
 static esp_err_t test_reset_recovery_erase_failure_propagates(void)
 {
     mock_nvs_store_t store = {0};
@@ -3077,7 +3077,7 @@ static esp_err_t test_reset_recovery_erase_failure_propagates(void)
     return ESP_OK;
 }
 
-// Test 78: Recovery clear failure via recovery helper — exact error, pending preserved
+// Test 78: Recovery clear failure via recovery helper â€” exact error, pending preserved
 static esp_err_t test_reset_recovery_clear_failure_propagates(void)
 {
     mock_nvs_store_t store = {0};
@@ -3094,7 +3094,7 @@ static esp_err_t test_reset_recovery_clear_failure_propagates(void)
     TEST_ASSERT(argus_nvs_core_commit(&core, &cfg) == ESP_OK, "Commit failed");
     store.reset_pending = true;
 
-    /* Inject clear failure — the recovery helper only writes pending=false,
+    /* Inject clear failure â€” the recovery helper only writes pending=false,
      * not pending=true. Erase will succeed, then clear will fail. */
     store.reset_pend_clear_error = ESP_ERR_NVS_INVALID_HANDLE;
 
@@ -3202,7 +3202,7 @@ static esp_err_t test_service_policy_exit_rejected(void)
     return ESP_OK;
 }
 
-/* ── Test runner ───────────────────────────────────────────────────── */
+/* â”€â”€ Test runner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 static esp_err_t mock_obs_read_selector(void *ctx, uint8_t *out_sel) { return ((esp_err_t*)ctx)[0]; }
 static esp_err_t mock_obs_read_slot(void *ctx, uint8_t slot_idx, argus_cfg_slot_t *out_slot) {
     if (slot_idx == 0) return ((esp_err_t*)ctx)[1];
@@ -3514,9 +3514,9 @@ static esp_err_t test_nvs_bootstrap_error_handling(void)
     return ESP_OK;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
+/* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
  * Phase 4B.3a: Wi-Fi Recovery, Observability
- * ───────────────────────────────────────────────────────────────────────────*/
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€*/
 
 static esp_err_t test_4b3a_classify_reasons(void)
 {
@@ -5641,6 +5641,9 @@ esp_err_t argus_tests_4a_run_all(void)
     RUN_TEST(test_4d4_iface_ambiguity_fails_closed);
     RUN_TEST(test_4d4_kdf_global_bound_is_source_independent);
     RUN_TEST(test_4d4_admission_budgets_are_self_consistent);
+    RUN_TEST(test_4d4_permission_edit_body_shape);
+    RUN_TEST(test_4d4_permission_edit_cannot_escalate);
+    RUN_TEST(test_4d4_permission_edit_invalidates_live_sessions);
     RUN_TEST(test_4d4_proven_source_reservation_bounds_the_flood);
     RUN_TEST(test_4d4_pending_pool_cannot_starve_authenticated);
     RUN_TEST(test_4d4_authenticated_pool_refuses_beyond_limit);

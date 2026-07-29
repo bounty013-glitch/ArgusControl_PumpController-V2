@@ -46,6 +46,14 @@
     dialog::backdrop{background:#000a}.hidden{display:none!important}
     .banner{padding:10px 12px;border:1px solid #92400e;background:#2a1b08;
       color:#fde68a;border-radius:4px;margin-bottom:12px}
+    /* Capability checkboxes. Stacked one per row on purpose: a horizontal
+       run of tickboxes is easy to mis-click, and the one being mis-clicked
+       here might be "move the pump". */
+    .capset{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;
+      padding:8px 10px;border:1px solid #334155;border-radius:4px}
+    .capset label{display:flex;align-items:center;gap:8px;margin:0;
+      font-weight:400;cursor:pointer}
+    .capset input{width:auto;margin:0}
     @media(max-width:620px){header{align-items:flex-start;flex-direction:column}
       main{padding:10px}.panel{padding:12px}th,td{padding:7px 5px}}
   </style>
@@ -141,8 +149,21 @@
         <input id="machine-topic-scope" maxlength="96" required>
         <label for="machine-api-scope">Future API scope</label>
         <input id="machine-api-scope" maxlength="64">
-        <label for="machine-permissions">Capability IDs</label>
-        <textarea id="machine-permissions" required>view_status, request_authority</textarea>
+        <label>Capabilities</label>
+        <!-- Checkboxes rather than typed IDs. A mistyped capability name is
+             rejected by the API as a whole-request failure with no
+             indication of which name was wrong, so typing them turns a slip
+             into a puzzle. This list is exactly what a machine may hold;
+             anything administrative is refused by the service regardless of
+             what a page offers. -->
+        <div id="machine-permissions" class="capset">
+          <label><input type="checkbox" value="view_status" checked> View status</label>
+          <label><input type="checkbox" value="request_authority" checked> Request control authority</label>
+          <label><input type="checkbox" value="motion"> <b>Move the pump</b> (motion)</label>
+          <label><input type="checkbox" value="software_estop"> Software E-stop</label>
+          <label><input type="checkbox" value="reset_software_estop"> Reset software E-stop</label>
+          <label><input type="checkbox" value="ack_alarms"> Acknowledge alarms</label>
+        </div>
         <div class="actions"><button class="primary" type="submit">Enroll</button></div>
         <div class="status"></div>
       </form>
@@ -219,6 +240,25 @@
     <div id="account-action-fields"></div><div class="status"></div>
     <div class="actions"><button value="cancel">Cancel</button>
       <button id="account-action-submit" class="primary" value="default">Apply</button></div>
+  </form>
+</dialog>
+
+<dialog id="machine-caps-dialog">
+  <form method="dialog" id="machine-caps-form">
+    <h2>Machine capabilities</h2>
+    <div class="banner">This REPLACES the machine's capabilities with exactly
+      what is ticked below. It takes effect on a live connection immediately -
+      the machine does not need re-provisioning, and its secret does not
+      change. Granting <b>motion</b> lets this client move the pump.</div>
+    <label for="machine-caps-id">Machine ID</label>
+    <input id="machine-caps-id" readonly>
+    <label>Capabilities</label>
+    <div id="machine-caps-set" class="capset"></div>
+    <div class="actions">
+      <button id="machine-caps-save" class="primary" type="button">Save</button>
+      <button value="cancel">Cancel</button>
+    </div>
+    <div class="status"></div>
   </form>
 </dialog>
 
@@ -385,15 +425,35 @@
     setStatus($("machine-credential-form"),"Credential has not been retained by this page.",true);
     $("machine-credential-dialog").showModal();
   }
+  // Capability names a machine may hold, kept in ONE place. The server sends
+  // permission_names with each machine precisely so this page never has to
+  // duplicate bit values - duplicating them is how a UI ends up offering a
+  // capability that does not exist or silently omitting one that does.
+  const MACHINE_CAPS=[
+    ["view_status","View status"],
+    ["request_authority","Request control authority"],
+    ["motion","Move the pump (motion)"],
+    ["software_estop","Software E-stop"],
+    ["reset_software_estop","Reset software E-stop"],
+    ["ack_alarms","Acknowledge alarms"]
+  ];
+  function checkedCaps(id){
+    return Array.from($(id).querySelectorAll("input[type=checkbox]"))
+      .filter(box=>box.checked).map(box=>box.value);
+  }
+  let machineCapsById={};
   async function loadMachines(){
     const data=await request("/api/security/machines");
+    machineCapsById={};
+    (data.machines||[]).forEach(m=>{machineCapsById[m.id]=m.permission_names||null;});
     const canEnroll=runtime.caps.has("enroll_machines");
     const canRevoke=runtime.caps.has("revoke_machines");
     const rows=(data.machines||[]).map(machine=>`<tr>
       <td>${esc(machine.display_name)}<br><span class="identity">${esc(machine.client_type)}</span></td>
       <td>${esc(machine.id)}</td><td>${machine.enabled?"Enabled":"Disabled"}${machine.revoked?" / Revoked":""}</td>
       <td>${esc(machine.permissions)}</td><td><div class="actions">
-      ${canEnroll&&!machine.revoked?`<button data-machine="${esc(machine.id)}" data-machine-action="rotate">Rotate</button>`:""}
+      ${canEnroll&&!machine.revoked?`<button data-machine="${esc(machine.id)}" data-machine-action="rotate">Rotate</button>
+      <button data-machine="${esc(machine.id)}" data-machine-edit-caps="1">Capabilities</button>`:""}
       ${canRevoke&&!machine.revoked?`<button data-machine="${esc(machine.id)}" data-machine-action="${machine.enabled?"disable":"enable"}">${machine.enabled?"Disable":"Enable"}</button>
       <button class="danger" data-machine="${esc(machine.id)}" data-machine-action="revoke">Revoke</button>`:""}
       ${canRevoke&&machine.revoked?`<button class="danger" data-machine="${esc(machine.id)}" data-machine-action="delete">Delete</button>`:""}
@@ -413,7 +473,7 @@
         scope:$("machine-scope").value,
         topic_scope:$("machine-topic-scope").value,
         api_scope:$("machine-api-scope").value,
-        permissions:permissionList($("machine-permissions").value)
+        permissions:checkedCaps("machine-permissions")
       });
       setStatus(form,"Machine enrolled. Save the one-time credential.",true);
       showMachineCredential(data);await loadMachines();
@@ -422,6 +482,7 @@
   $("machines-table").addEventListener("click",async event=>{
     const button=event.target.closest("button[data-machine]");if(!button)return;
     const id=button.dataset.machine,action=button.dataset.machineAction;
+    if(button.dataset.machineEditCaps){openMachineCaps(id);return;}
     if(["disable","revoke","delete"].includes(action)&&!confirm(`${action} ${id}?`))return;
     try{
       const data=await post("/api/security/machines/action",{id,action});
@@ -429,6 +490,45 @@
       await loadMachines();
     }catch(error){alert(error.message);}
   });
+  function openMachineCaps(id){
+    const current=machineCapsById[id];
+    const form=$("machine-caps-form");
+    $("machine-caps-id").value=id;
+    setStatus(form,"");
+    // Prefilled from the machine's CURRENT capabilities, because this
+    // operation replaces rather than merges - an empty default would offer
+    // to strip everything, and a wrong default would offer to grant
+    // something. If the server did not tell us the current set we refuse to
+    // guess: saving is disabled rather than proposing a set we cannot
+    // justify.
+    const known=Array.isArray(current);
+    $("machine-caps-set").innerHTML=MACHINE_CAPS.map(([value,label])=>
+      `<label><input type="checkbox" value="${value}"${known&&current.includes(value)?" checked":""}${known?"":" disabled"}> ${esc(label)}</label>`
+    ).join("");
+    $("machine-caps-save").disabled=!known;
+    if(!known){
+      setStatus(form,"Current capabilities unknown - reload before editing.");
+    }
+    $("machine-caps-dialog").showModal();
+  }
+  $("machine-caps-save").onclick=async()=>{
+    const form=$("machine-caps-form");
+    const id=$("machine-caps-id").value;
+    const permissions=checkedCaps("machine-caps-set");
+    // Naming the machine and the change is the confirmation step. The
+    // controller also demands recent re-authentication for this action - an
+    // accidental click on the wrong row is the expensive mistake here, not
+    // an attacker who already holds an admin session.
+    if(!confirm(`Set capabilities for ${id} to:\n\n${permissions.join("\n")||"(none)"}\n\nThis replaces the current set.`))return;
+    try{
+      const data=await post("/api/security/machines/action",
+                            {id,action:"set_permissions",permissions});
+      $("machine-caps-dialog").close();
+      await loadMachines();
+      // Report what the controller actually applied, not what was asked for.
+      alert(`Capabilities updated for ${id}.\nWas: ${data.previous_permissions}\nNow: ${data.permissions}`);
+    }catch(error){setStatus(form,error.message);}
+  };
   $("machine-copy-secret").onclick=async()=>{
     const secret=$("machine-credential-secret").value;
     try{

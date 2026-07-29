@@ -16,6 +16,547 @@ checkpoint.
 Evidence for the correction pass ordered after the
 `atlantis-authority-integration` checkpoint. Sections refer to that order.
 
+Sections are newest-first. The header above describes the accepted
+`atlantis-authority-integration` checkpoint; work from §-5 onward was carried
+on `atlantis-hmi-authority-controls` and has its own acceptance:
+
+**§-5 (`atlantis-hmi-authority-controls`) ACCEPTED BY SHAWN, 2026-07-28,**
+after his and the independent review found no further blocking or
+significant defects, and merged into `main` on both repositories under that
+authorization. The one discrepancy at acceptance was documentation drift —
+comments describing link loss as revoking only the sequence receipt where
+the implementation correctly revokes both receipts — corrected in the
+close-out commit. **Deferred beyond this acceptance, labelled and
+unchanged:** an accepted command round-trip at the adopted nonzero sequence,
+which requires motion and belongs to the powered-acceptance procedure
+(`docs/STAGE_2_POWERED_ACCEPTANCE_PLAN.md`), where it is one explicit check.
+Motor testing itself remains entirely outside this acceptance.
+
+## -5. Stage 1 bench acceptance — first powered run with the panel in control (2026-07-28)
+
+The first time the rotary panel has held command authority against the real
+controller with the operator driving it. Motor **not** connected; no motion
+was produced. Controller on COM5, panel on COM18, both flashed from the
+branch heads recorded at the end of this section.
+
+Runbook: `docs/plan/STAGE_1_ACCEPTANCE_RUNBOOK.md` in the HMI repository.
+
+### Outcome — §1 through §3 PASS, §4 non-blocking by Shawn's call
+
+Shawn executed §1 (grant control capabilities to the enrolled panel identity),
+§2 (confirm the in-place upgrade) and §3 including §3.1 and §3.2. His report:
+the capability grant, the upgrade confirmation, the real command, and the
+refusal path all behaved as the runbook predicted; commands reported
+`accepted` and the machine acted on them; and the ramp behaviour read as the
+real controller rather than the simulator.
+
+That last observation is the one worth keeping. The panel is now driving the
+controller's own ramp logic rather than a local approximation, and it is
+distinguishable by feel — which is the substantive difference Stage 1 was
+written to produce.
+
+**§4 — three simultaneous authenticated clients plus a fourth refusal — is
+recorded NON-BLOCKING by Shawn's explicit determination**, not by my
+judgement and not by silence. His stated rationale: the only two long-term
+connections are the rotary HMI and ArgusCore; a third is a diagnostic
+connection made by him alone during service; and he has no way to stage a
+genuine four-client attempt at the bench right now. That population matches
+the measured `MAX_CLIENTS = 3` with one slot spare. The seam and the resource
+invariant are covered by host tests; the multi-host hardware demonstration
+remains an open evidence gap, unchanged from §-4 and still honestly labelled.
+
+### Serial capture found three defects the runbook could not
+
+The runbook is written for an operator watching the glass. Serial capture
+sees what the glass does not, and it found three things.
+
+**CLOSED — the panel discarded the controller's operator-visible admission
+conditions.** `status/core/network_fault`, `status/core/network_fault_action`
+and `status/core/auth_throttle` were arriving and being logged as
+`message on unexpected topic ... ignored`. Those three topics were added to
+the controller in §-4 for exactly one purpose: to let an operator see a
+network-configuration fault or an authentication throttle instead of guessing
+at a panel that has quietly stopped working. The panel was receiving them and
+throwing them away, which defeated the whole of that work. They are now
+mirrored into `hmi_state`.
+
+Presentation is deliberately **not** included. Where a network fault or an
+auth throttle appears on the glass, and what it displaces, is an operator-
+facing decision. Mirroring the data is mechanical; deciding what the operator
+sees is not, and inventing it silently is how a panel ends up lying. This is
+a named, deliberate gap, not an oversight.
+
+**CLOSED — two further false "unexpected topic" reports.**
+`event/core/authority_result` was reported as unexpected on every acquisition
+answer — the panel's own authority replies. And the panel's lease heartbeat
+was reported as unexpected because the panel subscribes to `status/#` and so
+receives its own publication back. Neither is unknown and neither is ignored.
+A wrong log is worse than no log: the next person debugging a failed
+acquisition would have chased twenty phantom warnings.
+
+Measured on hardware across the pass: unexpected-topic reports **26 → 20 → 0**.
+
+**OPEN — acquisition sometimes loses a granted lease. NOT FIXED.**
+
+Observed in the first capture: the panel requested authority, the controller
+granted it, ownership never appeared in retained state, the panel's confirm
+window expired and it asked again. Acquisition took roughly thirty seconds
+and two requests where it should take about two seconds and one.
+
+```
+ACQUIRE-EVIDENCE: state=4 requests[sent=2 granted=2 refused=0 unanswered=1]
+```
+
+The cause identified was that the panel transmitted nothing at all while in
+`HMI_ACQUIRE_CONFIRMING`, and the controller expires an unrenewed lease after
+six seconds — inside the five-second confirm window. Waiting for ownership
+destroyed the grant being waited for. That is a real defect and it is fixed:
+`CONFIRMING` now renews, immediately on entry and then on cadence, with host
+tests pinning both that it renews and that a panel holding nothing still
+never heartbeats.
+
+**It is an improvement, not a closure, and it is not recorded as fixed.** One
+subsequent hardware run acquired cleanly:
+
+```
+ACQUIRE-EVIDENCE: state=4 requests[sent=1 granted=1 refused=0 unanswered=0] heartbeats=15
+```
+
+The next run reproduced the original failure — `sent=2 granted=2 unanswered=1`
+— with the fix present and flashed. So the silence during `CONFIRMING` was
+necessary to fix and was not sufficient to explain the behaviour. The actual
+cause is not established, and any statement about it now would be a guess.
+
+The blocker is measurement resolution, not analysis. The panel prints
+`ACQUIRE-EVIDENCE` every fifteen seconds; the sequence under investigation
+unfolds in about five. **Next step: per-transition logging of the acquisition
+state machine so the real ordering is visible before anything else is
+changed.** No further fix should be attempted until that exists.
+
+### The trace was built, and it moved the defect to the controller
+
+Panel commit `8bc3d01`. Every acquisition transition now logs the rule that
+caused it and the controller's published authority at that instant, plus an
+`AUTHORITY-DELTA` line whenever the authority tuple changes rather than on a
+timer. Host suite 3498 → 3690 checks, all passing. First hardware run
+answered the question, and **not in favour of the hypothesis above**:
+
+```
+#1  t=29916ms IDLE->REQUESTED    cause=REQUEST_SENT  owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=0
+#2  t=30013ms REQUESTED->CONFIRMING cause=GRANTED    owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=0
+#3  t=35052ms CONFIRMING->BACKOFF cause=CONFIRM_TIMEOUT owner=NONE local=AVAILABLE lease=EXPIRED epoch=6 heartbeats=3
+#4  t=45126ms BACKOFF->IDLE      cause=BACKOFF_ELAPSED  ... epoch=6 heartbeats=3
+#5  t=45126ms IDLE->REQUESTED    cause=REQUEST_SENT     ... epoch=6 heartbeats=3
+#6  t=45297ms REQUESTED->CONFIRMING cause=GRANTED       ... epoch=6 heartbeats=3
+#7  t=50330ms CONFIRMING->BACKOFF cause=CONFIRM_TIMEOUT ... epoch=6 heartbeats=6
+   ... third identical cycle ...
+#14 t=75633ms REQUESTED->CONFIRMING cause=GRANTED    owner=LOCAL_HMI local=ACTIVE lease=ACTIVE epoch=7 heartbeats=9
+#15 t=75633ms CONFIRMING->HOLDING cause=OWNERSHIP_OBSERVED owner=LOCAL_HMI local=ACTIVE lease=ACTIVE epoch=7
+```
+
+**The controller answered ACCEPTED three times without its published
+authority changing at all.** `owner=NONE local=AVAILABLE lease=EXPIRED
+epoch=6` held constant for forty-six seconds across three grants.
+`AUTHORITY-DELTA` fired exactly twice in the whole window, so this is an
+absence of publication, not a message the panel missed or mishandled.
+
+**Panel silence during `CONFIRMING` is definitively excluded as the cause.**
+The heartbeat counters advance 0 → 3 → 6 → 9, exactly three renewals per
+five-second confirm window at the 2 s cadence. The panel was renewing
+throughout and ownership still never appeared. The `CONFIRMING` fix was
+correct on its own terms — a granted lease must be renewed — but it was never
+the explanation, which is precisely why it was necessary and not sufficient.
+
+The fourth attempt succeeded with the grant and `epoch=7` arriving in the
+same millisecond, and `HOLDING` followed in that same tick.
+
+**The defect is controller-side. The panel behaved correctly on every
+attempt**, including the three that failed. Two candidates remain that
+panel-side data cannot separate:
+
+1. The controller returns `ACCEPTED` on `event/core/authority_result` without
+   committing or publishing the corresponding authority state.
+2. It commits the grant and revokes it before publishing anything — for
+   instance by rejecting the panel's renewals, which the panel cannot
+   observe, since its counter records transmissions and not acceptances.
+
+Distinguishing these requires the controller's own log, which needs a capture
+on COM5. **Opening that port resets the controller** — that is how the
+distortion recorded further down happened — so it is a deliberate action to
+take at a chosen moment, not a casual probe.
+
+Health of the run itself: 0 unexpected topics, 0 panics, 0 watchdogs, 0
+`NO_MEM`, ending `HOLDING` at `epoch=7` with `lease=ACTIVE` and heartbeats
+climbing.
+
+**Still OPEN, and now correctly located.** Nothing here is a fix.
+
+### Both-ends capture: root cause found — and it is panel-side, not controller-side
+
+Shawn authorized the COM5 capture. Both ports were captured back-to-back
+(sequential execution, provable from content below), and the result closes
+the diagnosis completely. **The paragraph above locating the defect
+controller-side was wrong**, in the same way the CONFIRMING hypothesis before
+it was wrong: each pass correctly eliminated its predecessor and then
+guessed. This one is not a guess — every link is verified in the capture and
+in source.
+
+**Two operational facts first, both corrections to earlier claims.**
+A plain serial open did NOT reset the controller: its timestamps run
+continuously through COM5 opening (~2.8 h uptime). The earlier mid-capture
+reset must have come from the probe method, not the open. And the PANEL reset
+between the two captures — proven below — almost certainly from the COM18
+close/reopen toggling its auto-reset circuit. That accident was the perfect
+experiment: the controller then watched a fresh panel boot run the entire
+failing acquisition, from the other side.
+
+**What the controller saw** (`both_controller.log`):
+
+```
+10064169  AP: panel STA fails 6 SA Query attempts → disassoc → rejoin ~700ms   (panel rebooting)
+10067825  broker: client disconnected (m-b4ad…)
+10068825  runtime: supervisor heartbeat stale; motion state intentionally unchanged
+10080318  broker: panel re-authenticated, 5 subscriptions restored
+10080678  request_authority #1: broker publish accepted — NO runtime decision logged — 3 heartbeats — silence
+10095868  #2: identical.  10111086 #3.  10126292 #4.  10141577 #5.  (15.2 s apart)
+10156860  request_authority #6 → 4 ms later:
+          W argus_mqtt_runtime: authority request (type=1): granted (profile=0 window=0 running=0)
+          → continuous 2 s heartbeats to end of capture
+```
+
+Five requests answered `ACCEPTED` on the wire with no runtime arbitration;
+the sixth arbitrated and granted. The three-heartbeat bursts prove the panel
+received `ACCEPTED` each time — it only enters CONFIRMING on a grant.
+
+**Proof the panel had rebooted, and that the windows are disjoint:** the
+heartbeat `payload_len` steps 42 → 43 at exactly the **10th** heartbeat after
+reconnect — the counter crossing 9 → 10. A fresh provider counts from 1; the
+panel's own capture ends at counter ≈ 280. The same numbers prove the
+captures ran sequentially (panel first): one device cannot be at counter 280
+and counter < 10 in the same window.
+
+**The counting law that gives it away.** The panel's final pre-reboot
+evidence read `sent=5 granted=5`. After reboot: exactly **5** phantom grants,
+success on request **6**. Every observed instance of this defect obeys the
+same law — N requests sent by the previous boot → N phantom grants after
+reboot → success on N+1:
+
+| Run | Previous boot had sent | Phantom grants | Succeeded on |
+| --- | --- | --- | --- |
+| First bench acceptance | 1 | 1 | #2 |
+| Transition-trace run | 3 | 3 | #4 |
+| Both-ends capture | 5 | 5 | #6 |
+
+**The mechanism, verified in source end-to-end:**
+
+1. The panel's request IDs are `hmi-auth-%010lu` of a counter that restarts
+   at zero **every boot** — `hmi_command_codec.c:176`, driven by
+   `p->request_counter` which `hmi_mqtt_provider_init()` zeroes.
+2. The controller's A2.6 duplicate cache is keyed on
+   `(session, request_id, kind)` — `argus_mqtt_runtime.c` `auth_dup_find()`.
+   The session is the CONTROLLER's, and the controller did not restart, so
+   the key collides across panel reboots.
+3. The rebooted panel's payload is byte-identical to the previous boot's
+   (same session string, same request ID, `epoch: 0`, same type), so the
+   SHA-256 payload-identity check classifies it `DUPLICATE_REPLAY`, not
+   `DUPLICATE_CONFLICT`.
+4. The replay path — `argus_mqtt_runtime.c:1015` — republishes the CACHED
+   result and returns: **no arbitration, no epoch change, no authority-state
+   publication, no log line.** Exactly what the capture shows, and exactly
+   what A2.6 specifies for a redelivered request.
+
+**The controller is behaving correctly.** A2.6's replay semantics exist so a
+QoS-1 redelivery cannot re-execute an authority change; the cache did
+precisely its job. The defect is the panel presenting a GENUINELY NEW request
+under the identity of an old one. `request_id` exists to name one request; a
+boot-relative counter names a slot, and every panel reboot re-issues names
+the previous boot already spent.
+
+**Second instance of the same class, found while verifying: command
+sequences.** The panel's `next_sequence` also restarts at 1 every boot
+(`hmi_mqtt_provider_init()`, and on session change), while the controller's
+`last_sequence` for the session persists. `argus_mqtt_session_check_sequence()`
+(`argus_mqtt_contract.c:829`) classifies a not-newer sequence `STALE` and a
+matching-sequence/different-payload `CONFLICT`. With `last_accepted_seq=3` on
+the controller (visible in the capture) and `next_seq=1` on the freshly
+booted panel (visible in its evidence line), the next THREE operator commands
+after any panel reboot will be refused before the fourth is accepted. Latent
+in this capture only because no command was attempted (`sent=0`). This is
+bench-visible and Stage-1-relevant: the operator presses START and is
+refused, three times, with no indication that time will fix it.
+
+**Not explained, stated so:** between the trace run and this capture, in an
+unobserved window, the panel lost and re-acquired authority once
+(`sent` 4→5, epoch 7→9, `unanswered` 3→4). Request #5 was a fresh ID, so this
+was NOT the replay defect. Consistent with a transient link stall expiring
+the lease, and with fail-operational the pump kept its state — but the window
+was unobserved and this is inference, not evidence.
+
+**Fix directions, for decision — both panel-side, neither implemented:**
+
+1. **Request IDs must be unique across boots within a controller session.**
+   Salt the ID with per-boot entropy (e.g. `hmi-auth-<nonce>-<counter>`),
+   supplied by the platform layer so the codec stays host-testable. No
+   contract change: A2.2 constrains charset and length, not structure, and
+   the controller treats the ID as opaque.
+2. **Sequence adoption on session bind.** When binding to a session the
+   controller already reports `last_accepted_sequence` for, start from
+   `last_accepted_sequence + 1` rather than 1. This is compliance with the
+   existing ordering contract, not a change to it.
+
+These are one doctrine — *boot-relative identity may never be presented
+against session-scoped state* — and should be decided together, which is why
+neither was implemented under a capture authorization.
+
+**The finding remains OPEN pending that decision.** The panel is currently
+HOLDING (the controller granted request #6 during the capture); pump idle,
+motor not connected, no motion commanded.
+
+### Both fixes authorized by Shawn, built, and verified — the finding is CLOSED on the panel side
+
+Panel commit `3f849c8`. Host suite 3690 → 3735, all passing.
+
+**Fix 1 — boot-unique request identities.** Request IDs are now
+`hmi-auth-<per-boot nonce>-<counter>` (`esp_random()` in firmware, fixed
+values in host tests). The nonce is an init parameter rather than a setter,
+so forgetting it is a compile error rather than a silent return of the
+defect. A host test simulates the exact bench scenario — two boots, same
+controller session — and requires different identities AND different payload
+bytes, since byte-identical payloads under a colliding ID are what trigger
+the silent A2.6 replay.
+
+**Hardware: the counting law is broken.** Four consecutive panel boots, each
+acquiring in ONE arbitrated request — the controller logs the arbitration
+~250 ms after each reconnect, the epoch advances, and ownership lands in the
+same tick the grant does:
+
+```
+#1 t=29888ms IDLE->REQUESTED       cause=REQUEST_SENT       epoch=4
+#2 t=30068ms REQUESTED->CONFIRMING cause=GRANTED            epoch=5   ← state already published
+#3 t=30068ms CONFIRMING->HOLDING   cause=OWNERSHIP_OBSERVED epoch=5   ← same tick
+```
+
+Under the old firmware the fourth boot alone would have burned five phantom
+grants first. Zero unexpected topics, zero panics, zero `NO_MEM` across all
+captures.
+
+**Fix 2 — sequence adoption on session bind.** On binding, the provider
+adopts the controller's `last_accepted_sequence + 1` instead of restarting
+at 1. The controller-restart case falls out of the same rule (it reports 0,
+adoption yields 1), so the old behaviour survives as a consequence rather
+than a special case.
+
+**The first cut of Fix 2 was wrong, and hardware falsified it within the
+hour.** Adoption originally read the value once, at the bind instant. But
+the panel's mirror fills topic-by-topic: the session arrived first, adoption
+read `last_accepted_sequence` as 0, and never looked again — observed on
+hardware as `next_seq=1` against `last_accepted_seq=6`, the original defect
+wearing the fix's name. The host test had missed it because tests applied
+complete state structs atomically. Adoption now continues until the
+binding's first command actually transmits, then stops — at that point the
+panel's numbering is ahead of the controller's memory, and re-adopting would
+rewind beneath unanswered in-flight commands. The test now binds the way
+production does: session first, the value in a later update, plus the
+no-rewind and session-change re-open cases.
+
+**Evidence classification for the fixes:**
+
+| Claim | Basis |
+| --- | --- |
+| One arbitrated request per boot, no phantom grants | Hardware, 4 consecutive boots, both ends captured |
+| Distinct identities across boots; distinct payload bytes | Host test (reboot simulation) + hardware (controller arbitrated every time) |
+| Adoption of a NONZERO `last_accepted_sequence` | **Host tests only — NOT hardware-demonstrated.** The controller restarted between captures, so its live session reports 0 and adoption legitimately yields 1, indistinguishable on the wire from the old behaviour. Advancing the live counter requires real commands, which are motion-capable and were not authorized. |
+| Topic-ordering hazard (bind before value arrives) | Found on hardware, fix pinned by host test |
+
+**Operational note:** the controller restarted twice today, both times
+correlated with a COM5 serial port CLOSE (opens are observed safe — the
+timestamps run through them). Cause not pinned; until it is, treat any COM5
+open/close cycle as a probable controller reset and choose the moment
+accordingly. The panel provably resets on COM18 close.
+
+**Stage 1's open finding is closed on the panel side.** What remains open is
+only the deliberately-deferred hardware demonstration of nonzero sequence
+adoption, which becomes observable the first time an operator drives the
+pump and then reboots the panel — worth one explicit check during Stage 2
+powered acceptance rather than a bench pass of its own.
+
+### Work order 2026-07-28: session-synchronization and correlation invariant (panel `f0173a1`)
+
+Shawn's independent review found two gaps in the fixes above, and ordered a
+bounded correction pass. Both are closed, with the history of the partial
+corrections preserved rather than rewritten.
+
+**Gap 1 — adoption was best-effort, not fail-closed.** The continuous-
+adoption fix still allowed a command to transmit before
+`last_accepted_sequence` had ever been received (the topic-by-topic mirror
+again: session present, sequence not yet arrived, adoption reads 0). The
+rule now: **the panel does not transmit or consume an operational command
+sequence until the controller's session AND its `last_accepted_sequence`
+have both actually been RECEIVED on the current connection.** Because 0 is
+a real value, receipt is tracked explicitly — `has_last_accepted_sequence`,
+set at exactly one place (the parser, on arrival of the topic) and revoked
+on disconnect, auth/authz failure, and session change by one helper on each
+side of the staged mirror, so no path can forget the revocation. Arrival
+order does not matter; readiness follows receipt, never a timer. Until
+ready, submission is refused as `SYNCHRONIZING — WAIT` with nothing
+transmitted, no sequence consumed, and no ledger entry; the first
+transmitted command uses `last_accepted_sequence + 1`.
+
+**Gap 2 — command results correlated on `command_id` alone.** Command IDs
+were still counter-only (`hmi-%010lu`), so a delayed result composed for a
+previous boot's command carried the exact identity of a new boot's command.
+Command IDs now carry the boot nonce (`hmi-<nonce>-<counter>`, 23 chars,
+inside the contract's 36-char S8 limit — the panel's 16-char ledger field
+was an internal limit with a comment wrongly calling it the wire limit),
+and **a result resolves a ledger entry only on an exact three-field match:
+session, sequence, command_id.** Each field is independently disqualifying.
+The ledger records the sequence per entry (as it already did the authority
+epoch) and reports what a resolve actually did, so `results_applied` counts
+only real resolutions; failed correlations are counted `results_stale` and
+change nothing.
+
+**The dropped edit, and what it proved.** The first build of this pass
+shipped with the parser's receipt line missing — a tool error during an
+editing session dropped that single edit — so receipt could never be set.
+The hardware capture caught it in one boot: `sync=WAITING` forever,
+commands refused with a truthful status. Two things worth recording. The
+fail-closed design held: the failure mode of the missing line was refusal
+with an accurate explanation, not a guessed sequence on the wire. And the
+host suite stayed green through it, because the provider tests set the
+receipt flag in their fixtures — the same green-test-proving-nothing
+failure mode this record keeps finding. A parse-level test now drives the
+production parser (value 0 must set receipt; malformed payloads must not;
+no other topic may) and would have failed that build.
+
+**Tests.** Host suite **3735 → 3821 checks, all passing**; ten new test
+functions cover the work order's thirteen scenarios: either-order topic
+arrival, refused submission with zero side effects, N+1 first command,
+disconnect/reconnect and session-change invalidation, cross-boot command-ID
+distinctness, a boot-A result against a boot-B command, and per-field
+correlation refusal at both the provider and the ledger seams. The
+59 existing ledger-test call sites were mechanically updated (uniform
+sequence 0 on both sides, preserving their original subjects); none were
+waived or removed. Acquisition-request replay protection is untouched and
+its tests still pass.
+
+**Build and hardware.** Firmware builds with **zero project warnings**.
+Three boots captured on COM18 against the unchanged controller (session
+`9b27893d…`, `last_accepted=0`): boot 1 exposed the dropped edit
+(`sync=WAITING`); boots 2 and 3, after the correction, show `sync=READY`,
+`next_seq=1` (correct for a session reporting 0), single-request
+acquisition, HOLDING with heartbeats flowing, and 0 unexpected topics,
+0 panics, 0 `NO_MEM`. The panel remains fully usable across reboot.
+
+**Hardware-proven vs host-tested, stated exactly:**
+
+| Claim | Basis |
+| --- | --- |
+| Synchronization reaches READY from real retained delivery | Hardware, boots 2–3 |
+| Fail-closed refusal while unsynchronized | Hardware (boot 1, inadvertently end-to-end) + host tests |
+| Acquisition regression: one request, HOLDING, clean | Hardware, boots 2–3 |
+| First command after sync uses N+1, N nonzero | **Host tests only** — live counter is 0; advancing it needs motion. Stage 2 check. |
+| Three-field correlation refusals | Host tests (provider and ledger seams) |
+| Cross-boot command-ID distinctness | Host tests + format proof; live two-boot command exchange needs motion |
+
+**Remaining uncertainty:** none new. The nonzero-sequence live
+demonstration remains the one deferred item, unchanged, labelled, and
+scheduled for the Stage 2 powered acceptance.
+
+### Review finding: session receipt was not its own fact (panel `817eefa`)
+
+Independent review found one remaining ordering hole in the pass above, and
+it was real in production: `has_last_accepted_sequence` proved a sequence
+VALUE had arrived, but nothing proved the SESSION had arrived on the same
+connection — or that the received sequence belonged to the session now
+observed. Two reachable paths: a session change arriving before its
+sequence let the provider revoke synchronization and **re-adopt the old
+session's sequence in the same observation**; and after a reconnect, a
+sequence-first arrival could synchronize against a session string that was
+merely last-known display data. The review also named why the tests missed
+it: the fixtures manually supplied the exact flag combinations production
+failed to create — the recurring green-test failure mode, again.
+
+**The correction makes receipt symmetrical and attribution explicit.**
+`has_command_session` is set only by the production parser on arrival of a
+valid session topic and revoked on link loss alongside the sequence
+receipt, through the same single-helper choke points as before. The parser
+revokes the SEQUENCE receipt whenever a DIFFERING session arrives — before
+installing it — so a sequence value can never be attributed to a session it
+did not arrive under; the empty initial session counts as different, and a
+republication of the same session revokes nothing (1 Hz retained
+republication cannot strobe synchronization off). The provider binds and
+adopts only when both receipts are true, at which point the pairing is
+unambiguous by construction.
+
+Either-order behaviour as specified by the review: same-session reconnect
+with sequence-first synchronizes once the session arrives; changed-session
+with sequence-first discards the unattributable receipt and waits for a
+subsequent sequence publication; session-then-sequence synchronizes
+normally.
+
+**Tests now drive the production chain.** Four new tests build every mirror
+through the real parser (`hmi_mqtt_parse_apply`), apply it through
+`hmi_state_apply_update`, and observe with the production provider —
+nothing hand-constructed except link loss itself, which is ESP-glue the
+host suite cannot link (the test helper performs exactly
+`stage_link_loss_locked()`'s two documented actions and says so). Every
+incomplete pairing is asserted side-effect-free: nothing transmitted, no
+sequence consumed, no ledger entry. Parse-level tests pin receipt,
+revocation, same-session republish, and malformed-session behaviour.
+Host suite **3821 → 3923 checks, all passing**; zero project warnings.
+
+**Hardware, two boots (COM18, controller untouched):** both reach
+`sync=READY` within 28–34 s (inside the periodic republication cycle),
+single-request acquisition, HOLDING, 0 unexpected topics / panics /
+`NO_MEM`. And a gift from the review itself: commands were driven at the
+bench during it, so the live session now reports `last_accepted=4` — both
+boots therefore demonstrate **nonzero adoption on hardware**:
+`next_seq=5`, derived from a real received value through the production
+chain and re-derived identically after reboot. This closes the previously
+host-test-only claim except for its final step; what remains deferred to
+Stage 2 narrows to *an accepted command round-trip at the adopted
+sequence*, which requires motion.
+
+### Evidence classification
+
+| Claim | Basis |
+| --- | --- |
+| §1–§3 behaved as written, commands accepted and acted on | Operator-observed at the bench by Shawn |
+| Ramp is controller logic, not simulator | Operator-observed, qualitative |
+| Zero unexpected-topic reports | Hardware serial capture, COM18 |
+| No panic, watchdog, `NO_MEM` or bad payload | Hardware serial capture, COM18 |
+| Lease held ACTIVE with heartbeats flowing | Hardware serial capture, COM18 |
+| `CONFIRMING` renews; panel holding nothing never heartbeats | Host tests, seam-verified |
+| Acquisition completes in one request | **Observed once, contradicted twice. NOT a standing claim.** |
+| Controller grants without publishing authority state | Hardware transition trace, COM18 — three consecutive cycles |
+| Panel renews throughout `CONFIRMING` | Hardware transition trace — heartbeats 0→3→6→9 |
+| Three-client capacity, fourth refused | **Not demonstrated. Non-blocking per Shawn.** |
+
+### Two things that distorted evidence in this pass
+
+**I reset the controller mid-sequence.** Probing COM5 for availability
+restarted it while a capture was running, which is why one later capture
+shows `sent=2` against a controller that had just rebooted. The clean
+single-request acquisition is the separate `s1_panel2.log` capture. Probing a
+live device is not a free operation and I should not have done it during a
+run.
+
+**The flashed panel image predates three commits Shawn pushed during the
+pass.** Two of them touch `main/hmi_mqtt_client.c/.h`, but the diff is
+comments plus two log-message strings with no behavioural change, so the
+capture remains valid. Worth noting because his header correction retires the
+old claim that this client never publishes a heartbeat and only publishes
+while holding authority — a claim the `CONFIRMING` renewal fix had made
+untrue. His documentation now matches the built behaviour.
+
+### State at the end of this section
+
+Host suite **3690 checks, all passing** (3471 before this pass; 219 added).
+Controller unchanged. Panel at `8bc3d01`, pushed. No merge to `main`, no tag,
+no acceptance mark — Stage 1 is **not** accepted while the acquisition
+finding is open, and it is now open against the controller rather than the
+panel.
+
 ## -4. MQTT admission isolation and capacity proof (2026-07-27)
 
 Shawn's final closure order, acting on independent review of `81fb3ed`. That
