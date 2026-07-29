@@ -300,6 +300,74 @@ neither was implemented under a capture authorization.
 HOLDING (the controller granted request #6 during the capture); pump idle,
 motor not connected, no motion commanded.
 
+### Both fixes authorized by Shawn, built, and verified — the finding is CLOSED on the panel side
+
+Panel commit `3f849c8`. Host suite 3690 → 3735, all passing.
+
+**Fix 1 — boot-unique request identities.** Request IDs are now
+`hmi-auth-<per-boot nonce>-<counter>` (`esp_random()` in firmware, fixed
+values in host tests). The nonce is an init parameter rather than a setter,
+so forgetting it is a compile error rather than a silent return of the
+defect. A host test simulates the exact bench scenario — two boots, same
+controller session — and requires different identities AND different payload
+bytes, since byte-identical payloads under a colliding ID are what trigger
+the silent A2.6 replay.
+
+**Hardware: the counting law is broken.** Four consecutive panel boots, each
+acquiring in ONE arbitrated request — the controller logs the arbitration
+~250 ms after each reconnect, the epoch advances, and ownership lands in the
+same tick the grant does:
+
+```
+#1 t=29888ms IDLE->REQUESTED       cause=REQUEST_SENT       epoch=4
+#2 t=30068ms REQUESTED->CONFIRMING cause=GRANTED            epoch=5   ← state already published
+#3 t=30068ms CONFIRMING->HOLDING   cause=OWNERSHIP_OBSERVED epoch=5   ← same tick
+```
+
+Under the old firmware the fourth boot alone would have burned five phantom
+grants first. Zero unexpected topics, zero panics, zero `NO_MEM` across all
+captures.
+
+**Fix 2 — sequence adoption on session bind.** On binding, the provider
+adopts the controller's `last_accepted_sequence + 1` instead of restarting
+at 1. The controller-restart case falls out of the same rule (it reports 0,
+adoption yields 1), so the old behaviour survives as a consequence rather
+than a special case.
+
+**The first cut of Fix 2 was wrong, and hardware falsified it within the
+hour.** Adoption originally read the value once, at the bind instant. But
+the panel's mirror fills topic-by-topic: the session arrived first, adoption
+read `last_accepted_sequence` as 0, and never looked again — observed on
+hardware as `next_seq=1` against `last_accepted_seq=6`, the original defect
+wearing the fix's name. The host test had missed it because tests applied
+complete state structs atomically. Adoption now continues until the
+binding's first command actually transmits, then stops — at that point the
+panel's numbering is ahead of the controller's memory, and re-adopting would
+rewind beneath unanswered in-flight commands. The test now binds the way
+production does: session first, the value in a later update, plus the
+no-rewind and session-change re-open cases.
+
+**Evidence classification for the fixes:**
+
+| Claim | Basis |
+| --- | --- |
+| One arbitrated request per boot, no phantom grants | Hardware, 4 consecutive boots, both ends captured |
+| Distinct identities across boots; distinct payload bytes | Host test (reboot simulation) + hardware (controller arbitrated every time) |
+| Adoption of a NONZERO `last_accepted_sequence` | **Host tests only — NOT hardware-demonstrated.** The controller restarted between captures, so its live session reports 0 and adoption legitimately yields 1, indistinguishable on the wire from the old behaviour. Advancing the live counter requires real commands, which are motion-capable and were not authorized. |
+| Topic-ordering hazard (bind before value arrives) | Found on hardware, fix pinned by host test |
+
+**Operational note:** the controller restarted twice today, both times
+correlated with a COM5 serial port CLOSE (opens are observed safe — the
+timestamps run through them). Cause not pinned; until it is, treat any COM5
+open/close cycle as a probable controller reset and choose the moment
+accordingly. The panel provably resets on COM18 close.
+
+**Stage 1's open finding is closed on the panel side.** What remains open is
+only the deliberately-deferred hardware demonstration of nonzero sequence
+adoption, which becomes observable the first time an operator drives the
+pump and then reboots the panel — worth one explicit check during Stage 2
+powered acceptance rather than a bench pass of its own.
+
 ### Evidence classification
 
 | Claim | Basis |
