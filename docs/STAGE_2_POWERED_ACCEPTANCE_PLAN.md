@@ -1,6 +1,10 @@
 # Stage 2 — Powered Acceptance Plan
 
-**Status: NOT STARTED. Preparation only — nothing here has been executed.**
+**Status (2026-07-28): S2-B SUPERSEDED, S2-C EXECUTED AND PASSED.
+S2-D and S2-E deferred by Shawn to the sustained pumping test.**
+Execution record at the end of this document. Motor wired through a 10:1
+planetary gearbox; the glass displays PUMP rpm, the motor turns ten times
+faster — every number in this plan is a pump/glass number.
 
 Stage 1 gives the panel real command authority with the motor disconnected.
 Stage 2 is the first time this firmware turns a shaft. It is written so that
@@ -23,10 +27,13 @@ Every step below assumes:
   The physical disconnect is the safety device.
 
 **Abort immediately, and record it, if any of these occur:** an unexpected
-direction of rotation, motion that does not stop within 2 s of a STOP,
-motion with the driver reported DISABLED, a fault that does not clear
-cleanly, any smell or sound of binding, or a panel that shows a state the
-controller does not.
+direction of rotation, motion that does not **begin visibly decelerating**
+within 2 s of a STOP (a full ramp-down takes ~0.1 s per glass-RPM by
+design — 7 s from 70 is the configured ramp working, not a failure; this
+wording corrected 2026-07-28 after the first measured stop), motion with
+the driver reported DISABLED, a fault that does not clear cleanly, any
+smell or sound of binding, or a panel that shows a state the controller
+does not.
 
 ---
 
@@ -178,6 +185,123 @@ session and I will add a higher-rate capture — it is a small change and much
 easier to make before the pump is wet.
 
 ---
+
+## Execution record — 2026-07-28
+
+Shawn at the bench driving the glass and, unannounced until afterwards, the
+admin portal from a laptop on the controller's AP; serial capture on both
+COM5 (controller, duplex with console) and COM18 (panel), each port opened
+once before motion and closed once after the bench was safe. Raw captures:
+`s2_controller.log` (167 KB), `s2_panel.log` (223 KB), with host-timestamped
+annotations marking every console keystroke sent.
+
+**Context discovered during the session, now governing every number here:**
+the motor drives the pump through a **10:1 planetary gearbox** and the glass
+displays PUMP rpm. The plan's ladder was written before that was stated:
+"72 RPM" on the glass is 720 RPM at the motor. Also, the panel's setpoint
+resolution is currently **5 RPM increments**, so the plan's 0.5/0.6/0.7/1.0
+steps are unreachable from the glass (they remain reachable from the
+diagnostic console, which is where those menu entries live).
+
+### S2-B — SUPERSEDED, Shawn's determination
+
+First motion had already occurred informally (Shawn wired the motor and ran
+it before the formal session; every command accepted and acted on). The
+step's gating purpose — verify signals BEFORE anything moves — was moot,
+and the signal behaviour it protects against was demonstrated by operation.
+Recorded as superseded, not skipped silently. The scope-level numbers
+(pulse width, frequency at 0.5 RPM) remain unverified and available to
+S2-B's procedure if ever needed.
+
+### S2-C — PASSED
+
+**Ladder as actually run** (glass rpm): 5 → START → brief stop/restart →
+~70 → 200 → STOP → 100 → STOP, then the formal measured run at 70 → STOP.
+All plan-envelope speeds (≤72) smooth, no stall, no cogging, applied
+tracking commanded — operator-observed on the shaft, the glass, and the
+admin portal simultaneously.
+
+**At 200 glass rpm (2000 motor rpm, discretionary, beyond the plan
+ladder): the motor reached speed and then stalled.** The controller
+truthfully continued reporting GENERATED output with `feedback_available`
+false — a physical stall is invisible to an open-loop controller by
+design, and the telemetry honestly claimed generation, not measurement.
+This is the plan's own generated-vs-measured distinction demonstrated
+live. Stall investigation (current limit, ramp, resonance) deferred by
+Shawn; 70 glass rpm is his stated operational maximum and 200 will not be
+a service speed.
+
+**Deceleration, measured from the state manager's transition log:**
+
+| Stop from (glass) | Measured | Basis |
+|---|---|---|
+| 5 RPM | 0.53 s | wire STOP → `DECELERATING -> HOLDING` |
+| 70 RPM | **7.04 s** | formal measurement, same basis |
+| 100 RPM | 10.03 s | same |
+| 200 RPM | 20.04 s | same (shaft stalled; generated ramp anyway) |
+
+Four stops, all ≈0.10 s per glass-RPM: the decel ramp is linear at
+~10 RPM/s pump (100 RPM/s motor), matching the configured trajectory.
+Whether that rate is operationally right is an open tuning decision —
+the plan predicted ramp tuning would be the adjustment point.
+
+**Setpoint retention:** STOP retained the 70000 mRPM setpoint; so did
+UNLOCK. No comms event, stop, or authority change cleared it at any point
+in the session (fail-operational held throughout).
+
+**S2-C.4 UNLOCK proof — PASSED, with three independent witnesses.**
+Console `N` → `5`: `[SERVICE ENTRY COMPLETE]`, authority
+`SUPERVISORY/MQTT` gen 3 → `LOCAL_SERVICE/DIAGNOSTIC_CLI` gen 5. As the
+plan predicted, service entry reconfigured the network (`SERVICE_AP_ONLY`)
+and the panel disconnected — the glass dropped to its non-authority
+presentation (Shawn's observation), the laptop's portal session died
+(Shawn's observation, exactly as designed), and the panel's serial showed
+`mqtt=DISCONNECTED`, last-known data clearly marked stale, heartbeats
+correctly stopped. Console `u` from HOLDING: `UNLOCKED`, `Driver Enabled:
+NO`, zero output, fault 0 — **and the shaft turned freely by hand** where
+minutes earlier it had held torque. HOLDING vs UNLOCKED is real on the
+steel, not only in the state word.
+
+**Controlled exit and autonomous recovery — PASSED.** Exit via `N` → `X`
+(confirmed reboot, no configuration change). The controller booted to
+`SUPERVISORY/MQTT` gen 3 at t=5.6 s; the panel — which never rebooted —
+re-authenticated at t=22.7 s and was GRANTED 173 ms later. Its transition
+trace shows the full recovery in under 300 ms once the broker was back:
+
+```
+#8  HOLDING->IDLE        cause=OWNERSHIP_LOST    (fresh controller: owner=NONE)
+#9  IDLE->REQUESTED      cause=REQUEST_SENT       same tick
+#10 REQUESTED->CONFIRMING cause=GRANTED           +295 ms, epoch=1 published
+#11 CONFIRMING->HOLDING  cause=OWNERSHIP_OBSERVED same tick
+```
+
+The session-synchronization invariant then did its job unprompted: new
+controller session, `last_accepted_seq=0` received, panel discarded its
+old numbering (next_seq 21) and reported `next_seq=1 sync=READY`.
+
+**Command integrity across the whole powered session: 20 commands sent,
+20 accepted, 20 results resolved on the exact session/sequence/command-id
+triple, 0 stale, 0 unmatched, 0 refusals of any class, and controller
+`last_accepted_seq` in lockstep with the panel throughout.**
+
+### Observations recorded for later
+
+- Second AP client during the session was Shawn's laptop on the admin
+  portal; the portal's Machine State dialog tracked RPM changes and the
+  UNLOCKED transition accurately in real time.
+- Panel setpoint resolution (5 RPM) vs the plan's sub-1-RPM steps —
+  presentation decision for the polish phase.
+- Ramp rate (~10 RPM/s pump) — tuning decision, open.
+- 200-glass-rpm stall — deferred investigation, non-operational speed.
+- Serial port discipline that held all session: open each port once
+  before motion, never close while energized; no device reset occurred at
+  either open.
+
+### Still pending in Stage 2
+
+S2-D (pump head, displacement measurement) and S2-E (live
+fail-operational proof under flow) — deferred to Shawn's sustained
+pumping test, to be run with the same capture arrangement.
 
 ## Deliberately not in Stage 2
 
