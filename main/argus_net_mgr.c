@@ -726,14 +726,33 @@ static void net_mgr_task(void *pvParameters)
                         s_net_mode == ARGUS_NET_MODE_COMMISSIONED_STA ||
                         s_net_mode == ARGUS_NET_MODE_AP_DISCOVERABLE ||
                         s_net_mode == ARGUS_NET_MODE_NETWORK_FAULT) {
-                        ESP_LOGW(TAG, "STA disconnected/IP lost. Revoking SUPERVISORY MQTT authority & stopping broker listener.");
-                        argus_authority_mgr_set_mode(ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
-                        esp_err_t broker_stop_err = argus_mqtt_broker_stop();
-                        if (broker_stop_err != ESP_OK) {
-                            s_last_error = ARGUS_NET_ERR_STOP_TIMEOUT;
-                            ESP_LOGE(TAG, "Broker stop did not converge after STA disconnect: %s",
-                                     esp_err_to_name(broker_stop_err));
-                        }
+                        /* STA loss is an STA-interface event. It is NOT a
+                         * reason to tear down a service that serves both
+                         * interfaces.
+                         *
+                         * Previously this stopped the broker listener and
+                         * revoked SUPERVISORY/MQTT wholesale, which killed
+                         * MQTT service for clients on our OWN service AP
+                         * that had nothing to do with the STA link, and left
+                         * them unable to reconnect until the STA target
+                         * returned. Confirmed on the bench 2026-07-30.
+                         *
+                         * The lease held by a now-unreachable supervisor is
+                         * retired by the mechanism that owns that question:
+                         * heartbeat expiry in argus_mqtt_session_tick(),
+                         * which clears lease_machine_id and advances the
+                         * authority epoch. That is identity-precise — it
+                         * retires the departed holder's lease specifically,
+                         * rather than every client's authority at once — and
+                         * it keeps A2.11's promise that published ownership
+                         * stays truthful while a link is merely offline.
+                         *
+                         * Supervisory mode therefore follows the BROKER (the
+                         * condition this code already used to grant it),
+                         * not the STA link. */
+                        ESP_LOGW(TAG, "STA disconnected/IP lost. Broker and service-AP clients "
+                                      "unaffected; any unreachable supervisor's lease expires on "
+                                      "heartbeat timeout.");
 
                         s_last_disconnect_reason = evt.disconnect_reason;
                         const char *reason_name;
@@ -859,14 +878,12 @@ static void net_mgr_task(void *pvParameters)
                         ESP_LOGI(TAG, "STA stop confirmed disabled service state");
                     } else if (stop_action == ARGUS_STA_EVENT_PROCESS) {
                         s_sta_state = ARGUS_STA_DISABLED;
-                        argus_authority_mgr_set_mode(
-                            ARGUS_AUTHORITY_NONE, ARGUS_AUTH_OWNER_NONE);
-                        esp_err_t broker_stop_err = argus_mqtt_broker_stop();
-                        if (broker_stop_err != ESP_OK) {
-                            s_last_error = ARGUS_NET_ERR_STOP_TIMEOUT;
-                            ESP_LOGE(TAG, "Broker stop did not converge after STA stop: %s",
-                                     esp_err_to_name(broker_stop_err));
-                        }
+                        /* Same rule as the STA_DISCONNECTED path above: an
+                         * STA-side failure does not tear down the broker
+                         * that serves our own AP. NETWORK_FAULT describes
+                         * the STA interface, not the controller's ability to
+                         * serve a local client. Leases held by unreachable
+                         * holders still expire on heartbeat timeout. */
                         set_net_mode(ARGUS_NET_MODE_NETWORK_FAULT);
                         s_last_error = ARGUS_NET_ERR_STA_SHUTDOWN_FAILED;
                         ESP_LOGE(TAG, "Unexpected operational STA stop; entered NETWORK_FAULT");
@@ -1107,6 +1124,33 @@ esp_err_t argus_net_mgr_init(void)
         esp_err_t http_err = argus_http_server_start();
         if (http_err != ESP_OK) {
             ESP_LOGW(TAG, "HTTP server start failed in AP_DISCOVERABLE: %s", esp_err_to_name(http_err));
+        }
+
+        /* Start the MQTT broker here, on entry to a commissioned
+         * client-serving mode — NOT on STA_GOT_IP.
+         *
+         * The broker binds INADDR_ANY and classifies every accepted
+         * connection by receiving interface (SOFTAP vs STA), with
+         * per-interface machine permissions. It is an all-interface service
+         * and needs no STA link to serve a client on our own AP.
+         *
+         * Starting it only when the STA acquired an IP meant a controller
+         * whose STA target was unreachable could never serve ANY MQTT
+         * client, however healthy its own AP — a local HMI on the service
+         * AP sat at "starting up" forever, waiting for a listener that
+         * would never open. Confirmed on the bench 2026-07-30.
+         *
+         * Same non-fatal treatment as HTTP above, and for the same reason:
+         * a service that cannot start must not prevent the controller from
+         * running and reporting. */
+        if (s_broker_start_cb != NULL) {
+            s_broker_start_cb();
+        }
+        if (argus_mqtt_broker_is_running()) {
+            ESP_LOGI(TAG, "MQTT broker listening on the service AP (STA-independent).");
+        } else {
+            ESP_LOGW(TAG, "MQTT broker did not start at commissioned boot; "
+                          "HTTP portal and controller operation continue.");
         }
     }
 
