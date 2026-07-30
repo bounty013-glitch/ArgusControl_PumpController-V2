@@ -1147,7 +1147,20 @@ esp_err_t argus_net_mgr_init(void)
             s_broker_start_cb();
         }
         if (argus_mqtt_broker_is_running()) {
-            ESP_LOGI(TAG, "MQTT broker listening on the service AP (STA-independent).");
+            /* Supervisory availability follows the BROKER, not the STA link
+             * — the same condition this code already used to grant it on
+             * STA_GOT_IP, applied at the point the broker actually becomes
+             * available. Without this, a controller with no reachable STA
+             * would listen but report AuthMode NONE, so a client on our own
+             * service AP could connect and then be refused control: the
+             * lockout moved one step later rather than removed.
+             *
+             * This grants an authority MODE (MQTT clients may hold leases),
+             * never a lease. Leases are still acquired only by explicit,
+             * authenticated, adjudicated request under A1/A2. */
+            argus_authority_mgr_set_mode(ARGUS_AUTHORITY_SUPERVISORY, ARGUS_AUTH_OWNER_MQTT);
+            ESP_LOGI(TAG, "MQTT broker listening on the service AP (STA-independent). "
+                          "Granted SUPERVISORY/MQTT authority.");
         } else {
             ESP_LOGW(TAG, "MQTT broker did not start at commissioned boot; "
                           "HTTP portal and controller operation continue.");
