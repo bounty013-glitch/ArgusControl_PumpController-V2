@@ -51,13 +51,18 @@ param(
     [Parameter(Mandatory=$true)][string]$Ssid,
     [Parameter(Mandatory=$true)][string]$Passphrase,
     [string]$ClientId = 'paladin',
+    # Full commissioned unit id. Defaults to pump_00N, but the naming
+    # standard is <unitID>_<pumpID> (IMPLEMENTATION_PLAN section 5), so a
+    # real trailer passes e.g. chem_add_001_pump_003 and the topic root
+    # becomes argus/<client>/chem_add_001_pump_003.
+    [string]$UnitId,
     [string]$Adapter  = 'Wi-Fi 3',
     [string]$RepoRoot = 'C:\Users\bount\Dev\Argus\ArgusControl_PumpController-V2'
 )
 
 $ErrorActionPreference = 'Stop'
 $base = 'http://192.168.4.1'
-$unit = 'pump_{0:D3}' -f $PumpNumber
+if ($UnitId) { $unit = $UnitId } else { $unit = 'pump_{0:D3}' -f $PumpNumber }
 
 function Fail($m) { Write-Host "FAILED: $m" -ForegroundColor Red; exit 1 }
 function ErrBody($e) {
