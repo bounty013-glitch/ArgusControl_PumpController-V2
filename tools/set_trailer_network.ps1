@@ -29,8 +29,12 @@ function ErrBody($e) {
     return $e.Exception.Message
 }
 
+# MUST be --after hard_reset. esptool resets the chip INTO the download
+# bootloader to talk to it, so --after no_reset leaves it stranded there:
+# no application, no service AP, no MQTT. That failure looks exactly like a
+# credential or network problem and is neither.
 $mac = $null
-foreach ($l in (python -m esptool --port $Port --after no_reset read_mac 2>&1)) {
+foreach ($l in (python -m esptool --port $Port --after hard_reset read_mac 2>&1)) {
     if ($l -match 'MAC:\s*([0-9a-fA-F:]{17})') { $mac = $Matches[1]; break }
 }
 if (-not $mac) { Write-Host "$Port : could not read MAC"; exit 1 }
