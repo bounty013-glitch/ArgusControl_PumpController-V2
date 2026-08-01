@@ -38,6 +38,7 @@
 #include "argus_console_helpers.h"
 #include "argus_http_server.h"
 #include "argus_local_recovery.h"
+#include "argus_factory_credential.h"
 #include "argus_password_verifier.h"
 #include "argus_security_migration.h"
 #include "argus_security_store.h"
@@ -1010,6 +1011,24 @@ void app_main(void)
     if (ap_bootstrap_err != ESP_OK &&
         ap_bootstrap_err != ESP_ERR_NOT_SUPPORTED) {
         ESP_ERROR_CHECK(ap_bootstrap_err);
+    }
+
+    // 2b-ii. Provision this device's per-device FACTORY portal credential if
+    // it has none (CER-6). A factory-fresh controller previously had no path
+    // to a first login at all: no account is seeded, the console verifier was
+    // left BUILD_DEFAULT_DEFERRED, and the only writer of that verifier
+    // requires an existing session. Every bench unit worked solely because it
+    // carried a migrated legacy password from a build that no longer exists.
+    //
+    // Runs BEFORE the migration below, so migration sees a provisioned
+    // verifier and settles as COMPLETE rather than DEFERRED. No-ops with
+    // ESP_ERR_NOT_SUPPORTED once any verifier exists, so an operator's chosen
+    // password can never be overwritten by a later boot.
+    esp_err_t factory_cred_err = argus_factory_credential_bootstrap();
+    if (factory_cred_err != ESP_OK &&
+        factory_cred_err != ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGE(TAG, "Factory portal credential provisioning failed: %s",
+                 esp_err_to_name(factory_cred_err));
     }
 
     // 2c. Migrate a changed legacy portal credential transactionally. The

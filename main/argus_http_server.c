@@ -55,6 +55,7 @@
  */
 
 #include "argus_http_server.h"
+#include "argus_factory_credential.h"
 #include "argus_identity.h"
 #include "argus_state_mgr.h"
 #include "argus_authority_mgr.h"
@@ -1780,13 +1781,19 @@ static esp_err_t session_get_handler(httpd_req_t *req)
         "\"display_name\":\"%s\",\"role\":\"%s\",\"level\":%u},"
         "\"csrf\":\"%s\",\"session\":{\"idle_timeout_s\":900,"
         "\"absolute_timeout_s\":28800},\"security_recovery\":%s,"
+        "\"console_credential_factory\":%s,"
         "\"capabilities\":[",
         security.principal.identifier,
         security.principal.type == ARGUS_PRINCIPAL_CONSOLE
             ? "CONSOLE" : "HUMAN",
         escaped_display, role, (unsigned)security.principal.level, csrf,
         argus_security_store_get_recovery_state() ==
-                ARGUS_SECURITY_RECOVERY_REQUESTED ? "true" : "false");
+                ARGUS_SECURITY_RECOVERY_REQUESTED ? "true" : "false",
+        // Nags, never blocks (Shawn, 2026-08-01). A controller still on its
+        // derived factory password says so on every session, but refusing to
+        // work until it is changed would trade a small risk for a large one
+        // during commissioning.
+        argus_factory_credential_in_use() ? "true" : "false");
     for (size_t i = 0U;
          length > 0 &&
          i < sizeof(CAPABILITIES) / sizeof(CAPABILITIES[0]); ++i) {
@@ -2076,6 +2083,10 @@ static esp_err_t change_own_password_post_handler(httpd_req_t *req)
             }
             argus_password_zeroize(&verifier, sizeof(verifier));
             if (err == ESP_OK) {
+                // The stored verifier just changed, so the cached "is this
+                // still the factory password?" answer is stale. Recompute it
+                // rather than let the nag outlive the thing it nags about.
+                argus_factory_credential_refresh();
                 (void)argus_session_manager_revoke_all();
             }
         } else {

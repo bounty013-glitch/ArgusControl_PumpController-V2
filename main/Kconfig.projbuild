@@ -14,6 +14,24 @@ menu "Argus V2 Pump Controller Configuration"
             Shared internal Argus service AP password. Privately provisioned at build time.
             Default is empty string; must be configured in untracked local sdkconfig (8..63 chars).
 
+    config ARGUS_FACTORY_CREDENTIAL_SALT
+        string "Factory portal-credential derivation salt"
+        default ""
+        help
+            Salt for the per-device factory portal password, derived as
+            SHA-256(salt || MAC). Privately provisioned at build time in
+            untracked local sdkconfig; never in tracked source.
+
+            The MAC is NOT secret - it is visible in the service SSID to
+            anyone in radio range - so this salt is the entire secret. Leave
+            it empty and every device's portal password becomes derivable
+            from a beacon frame; that build warns at every derivation and
+            must not leave a bench.
+
+            One salt per fleet, not per device: the MAC already makes each
+            device's password unique. Recover a password with
+            tools/factory_credential.py, which needs the MAC and this salt.
+
     config ARGUS_WIFI_SSID
         string "Wi-Fi SSID"
         default ""

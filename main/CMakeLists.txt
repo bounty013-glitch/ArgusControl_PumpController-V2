@@ -59,6 +59,7 @@ idf_component_register(
         "argus_security_migration.c"
         "argus_security_provisioning.c"
         "argus_local_recovery.c"
+        "argus_factory_credential.c"
         "argus_authorization.c"
         "argus_session_manager.c"
         "argus_security_directory.c"
