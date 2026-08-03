@@ -45,6 +45,16 @@ graph TD
 2.  **Fixed-Point Units and Conversions (`argus_conversions`)**:
     *   All calculations use fixed-point integer math to avoid float rounding drift.
     *   Speed values are stored in **milli-RPM** ($1 \text{ RPM} = 1000$ units).
+    *   **Every RPM figure in this controller is OUTPUT-SHAFT (pump head) RPM, never motor RPM.**
+        `argus_conversions_steps_per_rev()` is the *only* place the gearbox ratio is applied:
+        $200 \text{ full steps} \times 4 \text{ microsteps} \times 10/1 = 8000$ steps per **head**
+        revolution. `argus_trajectory` passes that value straight into
+        `argus_step_gen_set_rate_rpm_milli()`, so the rate the timing engine is given is by
+        construction the speed of the shaft that takes 8000 steps to turn once.
+        The motor's own speed — ten times the head — is emergent from the pulse stream and is
+        deliberately **never represented as a number anywhere**, which is what makes the ratio
+        impossible to apply twice. `generated_rpm_milli` and `generated_step_count` are published
+        on this same basis, so a consumer converts with gallons-per-*head*-revolution.
         *   `1200` milli-RPM = $1.2 \text{ RPM}$
         *   `12000` milli-RPM = $12.0 \text{ RPM}$
     *   *Unconfirmed Displacement*: Volumetric displacement (default: `0.04 gal/rev`) is treated as unresolved until physical calibration and marked as unconfirmed commissioning configuration.
@@ -103,6 +113,28 @@ graph TD
     *   Authenticates MQTT CONNECT before admission, binds a sanitized principal to a non-reusable connection identity, and enforces interface, transport, capability, exact topic scope, and Phase 4C ownership policy on every packet.
     *   Coordinates authentication-to-bind with machine invalidation epochs and closes or makes policy-inert the exact affected connection after rotation, disable, revocation, or deletion without disturbing unrelated clients or human sessions.
     *   Software-stored XTS keys protect against casual plaintext inspection but remain physically extractable. eFuse/HMAC key derivation, flash encryption, secure boot, HTTPS/TLS, certificates, and hostile-network operation remain deferred.
+
+### Removed: `argus_stepper.c` / `argus_stepper.h` (2026-08-03)
+
+The V1 stepper driver was superseded by `argus_step_gen` and had already been
+excluded from the build (Phase 4A, Q3: not in `CMakeLists.txt`, no callers, no
+shared hardware, no task created). It has now been **deleted** rather than left
+dormant, and the reason is worth recording.
+
+It carried its own private copy of the same safety-relevant conversion —
+`motor_full_steps × microsteps × gearbox_num / gearbox_den` — with
+`ARGUS_DEFAULT_MICROSTEPS 32`, the setting used before the revised controller
+build moved to 4. Two divergent copies of the arithmetic that decides how fast a
+motor turns is a trap that only pays out badly: anyone reading the wrong one, or
+re-adding the file to the build, gets a factor of eight on step rate with no
+symptom until a shaft is spinning.
+
+It had already cost time. During console totalizer work on 2026-08-02 the stale
+32 was read as current, which produced a wrong steps-per-revolution figure that
+survived until measurement contradicted it.
+
+`argus_conversions_steps_per_rev()` is now the single definition. If a second
+implementation is ever needed, it should call that, not restate it.
 
 ---
 
