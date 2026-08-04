@@ -200,7 +200,11 @@
 
 **Limitation:** Commissioned devices boot with the service AP and HTTP portal active by default in APSTA mode (`AP_DISCOVERABLE`). The portal is credential-protected but always advertised. No persistent enable/disable toggle exists.
 
-**Rationale:** The operator has determined that field-accessible configuration requires the portal to be reachable without CLI service entry. This is an accepted temporary lifecycle policy for bench and field evaluation. AP visibility does not grant motor authority — the portal is read/config only. Motor commands require MQTT supervisory authority from the STA network path.
+**Rationale:** The operator has determined that field-accessible configuration requires the portal to be reachable without CLI service entry. This is an accepted temporary lifecycle policy for bench and field evaluation.
+
+> **CORRECTED 2026-08-04.** The two sentences that followed — "AP visibility does not grant motor authority — the portal is read/config only. Motor commands require MQTT supervisory authority from the STA network path." — were true when written on 2026-07-18 and became false at Phase 4B.4/4B.5. The browser portal is now a full motion **and software-e-stop** surface: `main/argus_controls.html:214` renders an EMERGENCY STOP button, `:710-711` wire it to the `estop` and `reset_estop` verbs, `main/argus_browser_command.c:238-241` maps those to router command types, and `main/argus_http_server.c:1244-1250` gates them on `ARGUS_PERMISSION_SOFTWARE_ESTOP` / `RESET_SOFTWARE_ESTOP`. Browser commands reach the SAME command router as MQTT.
+>
+> The AP-exposure argument therefore now rests on **authorization**, not on the absence of a command path: deny-by-default route capabilities, SoftAP-only human routes, Phase 4D.3 local sessions and CSRF. That is a materially different claim and the deferral should be re-judged on it.
 
 **Security posture:** The AP is WPA2-PSK protected. Human routes are SoftAP-only and use Phase 4D.3 local sessions, CSRF, and deny-by-default authorization. Public login/bootstrap routes remain bounded; protected endpoints require an authorized session. Plain HTTP and always-advertised AP exposure remain accepted only for the trusted-local development release.
 
